@@ -153,9 +153,14 @@ docker compose run --rm app uv run funnel run-funnel
   pydantic-ai. Everything else is deterministic code.
 - **We send nothing.** There is no code path that sends an email or an application. `draft`
   writes to the database; the human sends it and then sets the status to `sent` in the admin.
-- **Multilingual embeddings.** If the sources include Russian-language boards, use
-  `intfloat/multilingual-e5-small` (note that e5 requires `query:`/`passage:` prefixes). If
-  English only, use `BAAI/bge-small-en-v1.5` (no prefixes needed).
+- **Multilingual embeddings.** Decided: `intfloat/multilingual-e5-small`, because letters are
+  EN but RU postings must still embed sensibly. **e5 requires prefixes: profile text gets
+  `query: `, posting text gets `passage: `.** Omitting them degrades scores silently.
+- **Three profiles, not one CV.** `data/profiles/` (gitignored) holds `_experience.md` (shared,
+  prepended to each) plus one header per target role. `match_score` = max of the cosines,
+  `Job.matched_profile` = the argmax; ties go backend > gameplay > techdesign. The three CVs
+  differ only in their header, so a single merged profile would score technologies rather
+  than target role. See `PLAN.md` §4.
 - **Invariants are tested.** `tests/test_invariants.py` guards the boundaries above (no
   torch, no LLM outside `drafting/`+`replies/`, Gmail scope read-only, no Django, no
   hardcoded secrets). A failure there means a boundary was broken, not that the test is wrong.

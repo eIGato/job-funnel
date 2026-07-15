@@ -93,6 +93,34 @@ scheduler lives on the host: `docker compose run --rm app uv run funnel run-funn
 - `embedding` (nullable — a float32 vector; stored as `BYTEA`/`JSONB` for the numpy path,
   or as a `vector` column if pgvector is added)
 - `hard_filter_passed` (bool), `match_score` (float, nullable)
+- `matched_profile` (str, nullable — which profile produced `match_score`; see "Profiles")
+
+### Profiles (decided 2026-07-15)
+
+There is not one CV, there are three: backend, gameplay, technical game design. They differ
+**only** in the header — desired position, skills, technologies, summary — and share their
+work experience verbatim (verified by diffing the PDFs). So a single concatenated profile
+would be ~85% shared text, and the cosine would be driven by the common Python/Postgres
+experience rather than by the target role. `match_score` would then measure "knows these
+technologies" instead of "wants this job".
+
+Therefore: **one profile per target role**, and
+
+- `match_score` = max over profiles of cosine(job, profile)
+- `matched_profile` = the argmax
+- priority **backend > gameplay > techdesign** breaks near-ties
+
+Profiles live in `data/profiles/` (gitignored — personal data). `_experience.md` holds the
+shared part and is prepended to each role header. Files starting with `_` are not profiles.
+
+The profile is not a CV: nobody reads it, it only feeds the embedding. Contact details are
+left out (no semantic value against a posting); detail the public CV omits is included.
+
+Note: `gameplay.md` and `techdesign.md` share skills and technologies word for word, so their
+scores will track each other closely and the priority order is what actually separates them.
+
+No CTO profile: the human declined one. CTO alerts will therefore be scored against the
+backend profile and land mid-table. Revisit if the CTO alerts turn out to be noisy.
 
 **`Application`** — an application (one-to-one with Job)
 - `job` (FK), `status` (Enum: `shortlisted` / `drafted` / `sent` / `rejected` /
@@ -118,11 +146,30 @@ found only by actually running things:
 - `uv run` re-syncs by default, which pulled dev tooling into the container and needed PyPI
   on every run; the image sets `UV_NO_SYNC=1` so a timer run stays offline-safe.
 
-### [ ] Phase 2 — Data model + admin
+### [x] Phase 2 — Data model + admin
 The models from §4, the first Alembic migration, **sqladmin** with CRUD views over the three
 models (list_display, filters by status/score).
 **Done when:** sqladmin at `/admin` shows the tables and you can create/edit a Job and an
 Application by hand.
+
+Verified 2026-07-16 by driving the real forms over HTTP: `/admin` lists Source/Job/Application,
+and a Source, a Job and an Application were created and then edited by hand. The criterion
+earned its keep — the code looked finished but failed it twice, and both failures were only
+visible by actually submitting the forms:
+
+- **Creating a Job was impossible.** `content_hash` is NOT NULL but excluded from the form
+  (nobody types a sha256), and only `NormalizedJob` knew how to compute one — the ingest path.
+  Every other path hit `NotNullViolation`. Fixed by making `models.compute_content_hash` the
+  single definition and deriving the value in a `before_insert`/`before_update` hook, so
+  ingest and the admin cannot drift apart and quietly break dedup.
+- **The admin deleted data on save.** sqladmin renders relationship fields by default, and
+  both `Source.jobs` and `Job.application` are `cascade="all, delete-orphan"`: submitting the
+  form with the field empty deleted the orphans. Saving a Source wiped every Job of that
+  source; saving a Job deleted its Application together with the cover letter. For a
+  review-only admin (invariant 6) guarding a human-in-the-loop draft (invariant 2), that is
+  the worst possible failure. Both relationships are now off their forms.
+
+Both are guarded by tests in `tests/test_invariants.py` (verified to fail without the fixes).
 
 ### [ ] Phase 3 — Ingest layer
 - The base interface `BaseAdapter.fetch() -> list[NormalizedJob]` (NormalizedJob is a
@@ -239,9 +286,54 @@ trick as "chat with your PDF", except the retrieval is over CV bullets.
 
 ## 7. Open questions (ask the human, do not invent)
 
-- **The CV path** and format (md / txt / PDF?). How to split it into bullets for Phase 5.
+### Answered (2026-07-15)
+
+- **The CV path and format.** Source of truth: three PDFs in `../eIGato.github.io/cv/`
+  (also published at `https://eigato.github.io/cv/Evgenii-Denisov-CV-{backend,developer,game-designer}.pdf`).
+  Converted once into `data/profiles/` (gitignored); the markdown there is the working
+  artifact, the PDFs stay what the human sends to people. **Awaiting the human's proofread.**
+  Splitting into bullets for Phase 5 happens over that markdown (headings + paragraphs).
+- **Profiles.** Three, scored by max, `matched_profile` records the winner. See §4.
+- **The cover letter language.** EN by default; RU when the posting itself is Russian. The
+  posting's language is detected in **code, not by the LLM** (invariant 4).
+- **The embedding model.** Follows from the above: `intfloat/multilingual-e5-small`, since
+  RU postings must embed sensibly. e5 requires prefixes — **profile text gets `query: `,
+  posting text gets `passage: `**. Missing prefixes degrade e5 silently, with no error.
+- **Non-CV experience to include in the profile.** Only the 220 Volt material (load testing,
+  Yandex.Tank, the area-code scraper, Docker/GitLab CI). Explicitly **excluded**: TTK
+  (networks/switches/DSLAM — would pull network-engineer postings) and Nexign (would pull the
+  legacy telecom enterprise the human left). ML stays as the CV already states it.
+- **Right to work.** RU citizenship, RU international passport, no other passports or visas.
+  Montenegro residence permit via the **digital nomad visa**; lives in Montenegro (CET).
+  Sole proprietor / self-employed in **Georgia** at a 1% tax rate — B2B contracts are the
+  natural shape here, and net ≈ gross under them. This is what the V4Scale contract used.
+
+  Consequence: **"can travel there" ≠ "can legally work there".** Visa-free entry on a RU
+  passport is tourist entry and grants no work rights, so a visa-free country list is useless
+  as a filter basis. Filter on **signals in the posting text** instead — `is_remote`, geo
+  restrictions, sponsorship markers — which is deterministic and survives rule changes.
+
+- **Geography / filter rules (Phase 4a).**
+  - RU and BY locations: hard stop.
+  - Remote on a foreign employer: the main stream (exactly what the DNV permits).
+  - **Timezone: not filtered at all.** The human will adapt to any zone.
+  - **Remote but geo-restricted** ("US only", "must be authorized to work in the UK"):
+    **reject**, unless the posting explicitly allows contractor / B2B / independent
+    contractor — the human has a Georgian entity for exactly that.
+  - **On-site / hybrid without explicit sponsorship: keep, but rank below remote.** Many
+    companies sponsor on request without saying so in the text.
+
+  "Rank below remote" is *not* `hard_filter_passed` — that is a bool. `match_score` stays a
+  pure cosine (no invented penalty multiplier); the ordering is a composite sort
+  **`(is_remote DESC, match_score DESC)`** in the admin and when picking top-N for drafting.
+
+### Still open
+
+- **Montenegro on-site postings**: the DNV is believed to forbid working for local employers,
+  which would make them a reject. Not a lawyer, rules change — the human confirms.
 - **Which boards actually have an available API/alerts today** — verify while building Phase 3.
 - **The LLM provider and model** to default to for pydantic-ai (the human has the key).
-- **The exact hard-filter criteria** (Phase 4a): timezone, seniority floor, stop-stack.
-- **The cover letter language** (EN by default?).
+  `.env.example` currently suggests a cheap Anthropic model; unconfirmed, and `LLM_API_KEY`
+  is empty.
+- **The rest of the hard-filter criteria** (Phase 4a): seniority floor, stop-stack.
 - **The agent layer:** LangGraph or pydantic-graph.
