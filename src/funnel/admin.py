@@ -20,6 +20,10 @@ class SourceAdmin(ModelView, model=Source):
     column_list = [Source.id, Source.name, Source.kind, Source.enabled, Source.last_run_at]
     column_searchable_list = [Source.name]
     column_sortable_list = [Source.name, Source.last_run_at]
+    # Source.jobs is cascade="all, delete-orphan": submitting this form with the field empty
+    # deletes every job of the source (and their applications). Ingest owns this collection,
+    # not the human — keep it off the form entirely.
+    form_excluded_columns = [Source.jobs]
 
 
 class JobAdmin(ModelView, model=Job):
@@ -39,7 +43,10 @@ class JobAdmin(ModelView, model=Job):
     column_sortable_list = [Job.match_score, Job.posted_at, Job.company]
     column_default_sort = [(Job.match_score, True)]  # best matches on top
     column_details_exclude_list = [Job.embedding]  # raw bytes are noise in the UI
-    form_excluded_columns = [Job.embedding, Job.content_hash, Job.fetched_at]
+    # content_hash is derived on write (models._fill_content_hash) — nobody types a sha256.
+    # Job.application is cascade="all, delete-orphan": leaving it off this form is what stops
+    # a Job edit from deleting the application and its cover letter.
+    form_excluded_columns = [Job.embedding, Job.content_hash, Job.fetched_at, Job.application]
     page_size = 50
 
 

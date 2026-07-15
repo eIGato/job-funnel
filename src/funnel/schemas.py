@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, computed_field
 
-from funnel.models import SourceKind
+from funnel.models import SourceKind, compute_content_hash
 
 
 class NormalizedJob(BaseModel):
@@ -31,14 +30,7 @@ class NormalizedJob(BaseModel):
     @property
     def content_hash(self) -> str:
         """Dedup key: normalized company+title+url, so a repeat ingest is a no-op."""
-        raw = "|".join(
-            (
-                self.company.strip().casefold(),
-                self.title.strip().casefold(),
-                str(self.url).strip().casefold(),
-            )
-        )
-        return hashlib.sha256(raw.encode()).hexdigest()
+        return compute_content_hash(self.company, self.title, str(self.url))
 
     @property
     def embedding_text(self) -> str:

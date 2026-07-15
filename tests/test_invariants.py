@@ -69,6 +69,59 @@ def test_gmail_scope_is_readonly() -> None:
     assert not any("send" in scope or "compose" in scope for scope in GMAIL_SCOPES)
 
 
+def test_admin_forms_never_expose_delete_orphan_relations() -> None:
+    """Invariant 6: the admin is for review, so no form field may destroy data.
+
+    sqladmin renders relationship fields by default. On a delete-orphan relationship an empty
+    submit deletes the orphans: saving a Source wiped every Job of that source, and saving a
+    Job deleted its Application together with the cover letter. Both were real, both were
+    reachable with one click.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    from funnel.admin import ApplicationAdmin, JobAdmin, SourceAdmin
+
+    for view in (SourceAdmin, JobAdmin, ApplicationAdmin):
+        excluded = {attr.key for attr in getattr(view, "form_excluded_columns", [])}
+        for rel in sa_inspect(view.model).relationships:
+            if "delete-orphan" in rel.cascade:
+                assert rel.key in excluded, (
+                    f"{view.model.__name__}.{rel.key} is delete-orphan but reachable from the "
+                    f"{view.__name__} form: saving that form would delete rows"
+                )
+
+
+def test_content_hash_has_a_single_definition() -> None:
+    """Dedup relies on ingest and the admin agreeing on the hash, byte for byte.
+
+    Two implementations would drift and quietly start creating duplicates.
+    """
+    from funnel.models import compute_content_hash
+    from funnel.schemas import NormalizedJob
+
+    posting = NormalizedJob(
+        url="https://example.com/jobs/1",
+        company="Acme",
+        title="Data Engineer",
+    )
+    assert posting.content_hash == compute_content_hash(
+        "Acme", "Data Engineer", "https://example.com/jobs/1"
+    )
+
+
+def test_content_hash_is_filled_on_write() -> None:
+    """content_hash is NOT NULL and kept off the admin form, so a hook must derive it.
+
+    Without the hook, creating a Job anywhere but ingest raises NotNullViolation.
+    """
+    from sqlalchemy import event
+
+    from funnel.models import Job, _fill_content_hash
+
+    for hook in ("before_insert", "before_update"):
+        assert event.contains(Job, hook, _fill_content_hash), f"Job.{hook} hook is missing"
+
+
 @pytest.mark.parametrize("secret", ["password", "api_key", "secret"])
 def test_no_hardcoded_secrets(secret: str) -> None:
     """Invariant 7: secrets live in .env only."""

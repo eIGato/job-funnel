@@ -6,6 +6,7 @@ SQLAlchemy 2.0 typed style: Mapped/mapped_column, never the legacy Column.
 from __future__ import annotations
 
 import enum
+import hashlib
 from datetime import datetime
 from typing import Any
 
@@ -19,6 +20,7 @@ from sqlalchemy import (
     LargeBinary,
     String,
     Text,
+    event,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -27,6 +29,17 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
     pass
+
+
+def compute_content_hash(company: str, title: str, url: str) -> str:
+    """The dedup key: normalized company+title+url.
+
+    The single definition of the hash. `NormalizedJob` (the ingest path) and the `Job` insert
+    hook (every other path, including the admin) both call this: two implementations would
+    drift and silently break dedup.
+    """
+    raw = "|".join((company.strip().casefold(), title.strip().casefold(), url.strip().casefold()))
+    return hashlib.sha256(raw.encode()).hexdigest()
 
 
 class SourceKind(enum.StrEnum):
@@ -109,6 +122,18 @@ class Job(Base):
 
     def __str__(self) -> str:
         return f"{self.company} — {self.title}"
+
+
+@event.listens_for(Job, "before_insert")
+@event.listens_for(Job, "before_update")
+def _fill_content_hash(_mapper: object, _connection: object, target: Job) -> None:
+    """Derive content_hash on every write path.
+
+    content_hash is NOT NULL but is kept out of the admin form — nobody types a sha256 by
+    hand. Without this hook, creating a Job anywhere other than ingest raises NotNullViolation.
+    Recomputed on update too, so editing company/title/url keeps the dedup key honest.
+    """
+    target.content_hash = compute_content_hash(target.company, target.title, target.url)
 
 
 class Application(Base):
