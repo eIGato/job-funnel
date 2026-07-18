@@ -112,6 +112,23 @@ def run_funnel(ctx: typer.Context) -> None:
     ctx.invoke(draft)
 
 
+@app.command(name="auth-gmail")
+def auth_gmail() -> None:
+    """Authorize Gmail read-only access (one-time, opens a browser). DOES NOT SEND."""
+    from funnel.adapters.gmail import get_credentials
+
+    settings = get_settings()
+    typer.echo(f"Using client secret : {settings.gmail_credentials_path}")
+    typer.echo(f"Token will be saved : {settings.gmail_token_path}")
+    typer.echo("A browser window will open for consent (scope: gmail.readonly)...")
+    try:
+        get_credentials(interactive=True)
+    except (FileNotFoundError, RuntimeError) as exc:
+        typer.secho(f"auth-gmail: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(1) from exc
+    typer.secho("auth-gmail: token stored, Gmail access ready.", fg=typer.colors.GREEN)
+
+
 @app.command()
 def admin() -> None:
     """Serve the sqladmin review UI for the shortlist and drafts."""
@@ -145,6 +162,14 @@ def doctor() -> None:
         ok = False
 
     typer.echo(f"adapters        : {', '.join(sorted(adapters.registry())) or 'none'}")
+
+    if settings.gmail_token_path.exists():
+        typer.secho(f"gmail token     : ok ({settings.gmail_token_path})", fg=typer.colors.GREEN)
+    else:
+        typer.secho(
+            "gmail token     : missing (run `uv run funnel auth-gmail`)",
+            fg=typer.colors.YELLOW,
+        )
 
     cv: Path = settings.cv_path
     if cv.is_file():
