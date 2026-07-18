@@ -93,31 +93,33 @@ scheduler lives on the host: `docker compose run --rm app uv run funnel run-funn
 - `embedding` (nullable — a float32 vector; stored as `BYTEA`/`JSONB` for the numpy path,
   or as a `vector` column if pgvector is added)
 - `hard_filter_passed` (bool), `match_score` (float, nullable)
-- `matched_profile` (str, nullable — which profile produced `match_score`; see "Profiles")
 
-### Profiles (decided 2026-07-15)
+### Profiles (multi-profile shelved 2026-07-18)
 
-There is not one CV, there are three: backend, gameplay, technical game design. They differ
-**only** in the header — desired position, skills, technologies, summary — and share their
-work experience verbatim (verified by diffing the PDFs). So a single concatenated profile
-would be ~85% shared text, and the cosine would be driven by the common Python/Postgres
-experience rather than by the target role. `match_score` would then measure "knows these
-technologies" instead of "wants this job".
+Originally planned as three profiles (backend, gameplay, technical game design) scored by
+`max` cosine, because the three CVs differ **only** in the header and share their work
+experience verbatim (verified by diffing the PDFs) — a single concatenated profile would have
+scored "knows these technologies" instead of "wants this job".
 
-Therefore: **one profile per target role**, and
+That is **shelved.** There are no shipped game projects (only unfinished demos), so a
+dedicated gameplay profile is not justified yet. Matching embeds **one active profile**,
+`backend.md`. To still catch a hybrid posting ("Unreal developer with backend experience"),
+`backend.md` carries one truthful line about gameplay-backend work (LimeCity) and Unreal/C++
+from game projects: such a posting overlaps the backend profile and surfaces, while a
+pure-gamedev role has little backend overlap and lands lower — which is what we want.
 
-- `match_score` = max over profiles of cosine(job, profile)
-- `matched_profile` = the argmax
-- priority **backend > gameplay > techdesign** breaks near-ties
+So there is no `matched_profile` field and no `max`/argmax: `match_score` is just
+cosine(job, active profile). If shipped game work appears, revive multi-profile — the code
+below reads a directory of profiles, so it generalizes; for now the directory has one active
+header.
 
 Profiles live in `data/profiles/` (gitignored — personal data). `_experience.md` holds the
-shared part and is prepended to each role header. Files starting with `_` are not profiles.
+shared part and is prepended to the active role header. Files starting with `_` are not
+profiles. `gameplay.md` and `techdesign.md` are kept **dormant** (refreshed from the CVs, but
+consumed by nothing) so multi-profile can be revived without re-extracting.
 
 The profile is not a CV: nobody reads it, it only feeds the embedding. Contact details are
 left out (no semantic value against a posting); detail the public CV omits is included.
-
-Note: `gameplay.md` and `techdesign.md` share skills and technologies word for word, so their
-scores will track each other closely and the priority order is what actually separates them.
 
 No CTO profile: the human declined one. CTO alerts will therefore be scored against the
 backend profile and land mid-table. Revisit if the CTO alerts turn out to be noisy.
@@ -293,7 +295,8 @@ trick as "chat with your PDF", except the retrieval is over CV bullets.
   Converted once into `data/profiles/` (gitignored); the markdown there is the working
   artifact, the PDFs stay what the human sends to people. **Awaiting the human's proofread.**
   Splitting into bullets for Phase 5 happens over that markdown (headings + paragraphs).
-- **Profiles.** Three, scored by max, `matched_profile` records the winner. See §4.
+- **Profiles.** Multi-profile shelved (2026-07-18): one active profile, `backend.md`, with a
+  gameplay/UE line so hybrid postings still surface. No shipped game work justifies more. See §4.
 - **The cover letter language.** EN by default; RU when the posting itself is Russian. The
   posting's language is detected in **code, not by the LLM** (invariant 4).
 - **The embedding model.** Follows from the above: `intfloat/multilingual-e5-small`, since

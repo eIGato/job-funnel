@@ -156,11 +156,12 @@ docker compose run --rm app uv run funnel run-funnel
 - **Multilingual embeddings.** Decided: `intfloat/multilingual-e5-small`, because letters are
   EN but RU postings must still embed sensibly. **e5 requires prefixes: profile text gets
   `query: `, posting text gets `passage: `.** Omitting them degrades scores silently.
-- **Three profiles, not one CV.** `data/profiles/` (gitignored) holds `_experience.md` (shared,
-  prepended to each) plus one header per target role. `match_score` = max of the cosines,
-  `Job.matched_profile` = the argmax; ties go backend > gameplay > techdesign. The three CVs
-  differ only in their header, so a single merged profile would score technologies rather
-  than target role. See `PLAN.md` §4.
+- **One active profile (multi-profile shelved).** `data/profiles/` (gitignored) holds
+  `_experience.md` (shared) prepended to the active header, `backend.md`. `match_score` is just
+  cosine(job, that profile) — no `max`, no `matched_profile`. `backend.md` carries one truthful
+  gameplay/UE line so a hybrid posting ("Unreal dev with backend experience") still surfaces.
+  `gameplay.md`/`techdesign.md` are dormant (refreshed from the CVs, consumed by nothing) so
+  multi-profile can be revived if shipped game work appears. See `PLAN.md` §4.
 - **Invariants are tested.** `tests/test_invariants.py` guards the boundaries above (no
   torch, no LLM outside `drafting/`+`replies/`, Gmail scope read-only, no Django, no
   hardcoded secrets). A failure there means a boundary was broken, not that the test is wrong.
