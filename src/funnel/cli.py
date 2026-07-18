@@ -112,6 +112,41 @@ def run_funnel(ctx: typer.Context) -> None:
     ctx.invoke(draft)
 
 
+@app.command(name="seed-sources")
+def seed_sources(
+    update_config: bool = typer.Option(
+        False, help="Refresh config/kind of sources that already exist (never touches enabled)."
+    ),
+) -> None:
+    """Create the verified default sources. Idempotent; the admin stays the source of truth."""
+    from funnel.seeds import DEFAULT_SOURCES
+
+    with session_scope() as session:
+        existing = {s.name: s for s in session.scalars(select(Source)).all()}
+        created = updated = 0
+        for seed in DEFAULT_SOURCES:
+            row = existing.get(seed.name)
+            if row is None:
+                session.add(
+                    Source(
+                        name=seed.name,
+                        kind=seed.kind,
+                        config=seed.config,
+                        enabled=seed.enabled,
+                    )
+                )
+                created += 1
+                typer.echo(f"  + {seed.name} ({seed.kind})")
+            elif update_config:
+                row.kind = seed.kind
+                row.config = seed.config
+                updated += 1
+                typer.echo(f"  ~ {seed.name} (config refreshed)")
+            else:
+                typer.echo(f"  = {seed.name} (exists, unchanged)")
+    typer.secho(f"seed-sources: +{created} created, {updated} updated", fg=typer.colors.GREEN)
+
+
 @app.command(name="auth-gmail")
 def auth_gmail() -> None:
     """Authorize Gmail read-only access (one-time, opens a browser). DOES NOT SEND."""

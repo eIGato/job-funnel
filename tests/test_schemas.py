@@ -37,3 +37,17 @@ def test_embedding_text_includes_title_and_company(job: NormalizedJob) -> None:
     text = job.embedding_text
     assert "Data Engineer" in text
     assert "Acme" in text
+
+
+def test_long_location_and_external_id_are_truncated_to_the_column() -> None:
+    """A board can pack a whole country list into `location`; it must still fit varchar(255)."""
+    job = NormalizedJob(
+        url="https://example.com/j/1",
+        company="Acme",
+        title="Dev",
+        location="Anywhere in the World, " + ", ".join(["Country"] * 200),
+        external_id="x" * 500,
+    )
+    assert job.location is not None and len(job.location) <= 255
+    assert job.external_id is not None and len(job.external_id) <= 255
+    assert job.location.startswith("Anywhere in the World")

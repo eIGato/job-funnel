@@ -186,6 +186,26 @@ Both are guarded by tests in `tests/test_invariants.py` (verified to fail withou
 **Done when:** `funnel ingest` fills `jobs` from ≥1 real source, and a repeat run creates no
 duplicates.
 
+Progress 2026-07-18 — API/RSS side done and verified live; Gmail parser still pending, so the
+box stays open. Four boards were verified reachable at build time and wired as adapters
+(`remoteok`, `remotive`, `arbeitnow` JSON; `weworkremotely` RSS). `funnel seed-sources` seeds
+their verified endpoints into `Source.config` (endpoints live there, not in the modules).
+`funnel ingest` pulled 339 real postings; a second run added 0 (dedup on `content_hash`
+holds). Two traps, both found only by running it against live data:
+- **`api.hh.ru` returns 403** from here regardless of User-Agent (IP/geo block on their API).
+  So hh stays on the **email-alert** path, not a direct API. The sample is already captured.
+- **`varchar(255)` overflow on ingest.** WeWorkRemotely packs a country list into `region`
+  (seen: 1077 chars); `location`/`external_id` were unbounded in `NormalizedJob` while the
+  columns are `String(255)`, so the whole batch died on commit with `StringDataRightTruncation`
+  (nothing persisted — the run is atomic). Fixed in the contract: `NormalizedJob` now truncates
+  those two fields to the column width (they are noise past that, unlike title/company which
+  still reject). Guarded by a test.
+
+Still to do for Phase 3: the **Gmail alert parser** (`gmail-alerts`, seeded but disabled).
+OAuth is already done (`funnel auth-gmail`, read-only). Real `.eml` samples for Habr and hh
+live in `data/samples/emails/` (gitignored); redacted fixtures go under `tests/fixtures/`
+when the parser is written. LinkedIn awaits its first alert email.
+
 ### [ ] Phase 4 — Matching
 - **4a. Hard filters (code, free):** remote, timezone, seniority, stack, stop-list
   (`security clearance` and friends) → `hard_filter_passed`.

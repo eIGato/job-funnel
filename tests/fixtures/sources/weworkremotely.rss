@@ -1,0 +1,318 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:media="http://search.yahoo.com/mrss">
+  <channel>
+    <title>We Work Remotely: Remote jobs in design, programming, marketing and more</title>
+    <link>https://weworkremotely.com/remote-jobs.rss</link>
+    <description>We Work Remotely: Remote jobs in design, programming, marketing and more</description>
+    <language>en-US</language>
+    <ttl>60</ttl>
+    <item>
+      <media:content url="https://wwr-pro.s3.amazonaws.com/logos/0171/5865/logo.gif" type="image/png"/>
+      <title>LawnStarter: Data Governance &amp; Platform Manager</title>
+      <region>Anywhere in the World</region>
+      <country></country>
+      <state></state>
+      <skills></skills>
+      <category>All Other Remote</category>
+      <type>Full-Time</type>
+      <description>&lt;img src="https://we-work-remotely.imgix.net/logos/0171/5865/logo.gif?ixlib=rails-4.0.0&amp;w=50&amp;h=50&amp;dpr=2&amp;fit=fill&amp;auto=compress" /&gt;
+
+&lt;p&gt;
+  &lt;strong&gt;Headquarters:&lt;/strong&gt; Brazil
+    &lt;br /&gt;&lt;strong&gt;URL:&lt;/strong&gt; &lt;a href="http://lawnstarter.com"&gt;http://lawnstarter.com&lt;/a&gt;
+&lt;/p&gt;
+
+&lt;h3&gt;About LawnStarter&lt;a href="https://github.com/lawnstarter/brain/blob/main/docs/job-descriptions/data-governance-platform-manager.md#about-lawnstarter" class="external"&gt;&lt;/a&gt;
+&lt;/h3&gt;
+&lt;p&gt;LawnStarter is the nation's leading on-demand marketplace for lawn care and outdoor services, with over $100M in annual bookings. We're expanding beyond lawn care to become the one-stop shop for all home services - operating across three brands (LawnStarter, Lawn Love, Home Gnome) on a single shared platform.&lt;/p&gt;
+&lt;p&gt;&lt;/p&gt;
+&lt;h3&gt;About Analytics at LawnStarter&lt;a href="https://github.com/lawnstarter/brain/blob/main/docs/job-descriptions/data-governance-platform-manager.md#about-analytics-at-lawnstarter" class="external"&gt;&lt;/a&gt;
+&lt;/h3&gt;
+&lt;p&gt;We're a small, senior analytics team supporting the entire company - product, marketing, operations, and finance all run on the data we serve. The foundation is solid: a centralized Redshift data warehouse where all source data lands, modeled in dbt and orchestrated by Airflow, with Segment feeding event data in. You won't be stitching scattered sources together - the platform exists; your job is to make it trustworthy and keep it that way. We're mid-migration to Lightdash as our single BI platform, replacing Tableau and Metabase.&lt;/p&gt;
+&lt;p&gt;Here's the honest gap: everyone on the team today is an analyst. Data quality, tracking standards, and platform hygiene get done as side work, squeezed between analyses. Nobody wakes up thinking about them - which is exactly the job we're hiring for.&lt;/p&gt;
+&lt;p&gt;&lt;/p&gt;
+&lt;h3&gt;The Role&lt;a href="https://github.com/lawnstarter/brain/blob/main/docs/job-descriptions/data-governance-platform-manager.md#the-role" class="external"&gt;&lt;/a&gt;
+&lt;/h3&gt;
+&lt;p&gt;You'll be the first person at LawnStarter dedicated to data governance - the owner of whether our data can be trusted. That means the quality and freshness of our source data, pipelines, and reports; the definitions behind our metrics; the standards behind our Segment event tracking; the health of our Lightdash workspace; the data feeding our machine learning models; and the security of the data itself.&lt;/p&gt;
+&lt;p&gt;This is a hands-on role. You'll work solo at first, with the Analytics team around you but nobody under you - building automation, writing checks, fixing what's broken, and putting processes in place that scale past you. If the scope grows the way we expect, this becomes the foundation of a team you'd build.&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;What makes this role different:&lt;/strong&gt;&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;strong&gt;You're first.&lt;/strong&gt;&amp;nbsp;Governance has been everyone's side job, so what exists today is yours to reshape - keep what works, redesign what doesn't, and your standards become the company's standards.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Whole-stack ownership.&lt;/strong&gt;&amp;nbsp;Source data to pipelines to dashboards and ML models - you own trust across the entire chain, not one slice of it.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;A live migration to shape.&lt;/strong&gt;&amp;nbsp;Lightdash is landing now. You get to set up its permissions, structure, and norms before bad habits form, instead of untangling them later.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;/p&gt;
+&lt;h3&gt;What You'll Own&lt;a href="https://github.com/lawnstarter/brain/blob/main/docs/job-descriptions/data-governance-platform-manager.md#what-youll-own" class="external"&gt;&lt;/a&gt;
+&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;strong&gt;Data quality and freshness&lt;/strong&gt;&amp;nbsp;- automated monitoring across source data, pipelines, and reports; catching upstream schema and source changes before they break anything downstream; running incidents to resolution when they happen.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Data lineage and impact analysis&lt;/strong&gt;&amp;nbsp;- a living map from production source to warehouse model to dashboard, and the process that uses it: when a production change is proposed, its downstream impact on pipelines, metrics, and reports gets assessed before it ships, not discovered after. The end-state is data contracts with engineering, so breaking changes get caught in their workflow, not ours.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Lightdash&lt;/strong&gt;&amp;nbsp;- administration, workspace structure, permissions, and the rollout itself. Your job is to give the company self-serve autonomy while keeping the workspace tidy enough that people can find and trust what's there. Enablement is part of the deal - people follow standards they've been taught - and so is keeping queries fast and warehouse costs sane.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;The semantic layer&lt;/strong&gt;&amp;nbsp;- we just shipped it for our most critical metrics: one governed definition per metric, in code. You'll extend definition and mapping to the rest and guard the layer against uncontrolled growth as it scales.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Event tracking governance&lt;/strong&gt;&amp;nbsp;- our governed Segment event catalog: reviewing new events against its standards, keeping it matched to what production actually sends, and evolving the guardrails (naming, property dictionary, drift detection) as tracking grows.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;AI data readiness&lt;/strong&gt;&amp;nbsp;- AI agents query our warehouse every day through Brain, our internal AI toolkit. You'll govern what data AI tools can access and keep the warehouse AI-legible: documented, consistent, and safe for an agent to query and get the right answer.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Data security and privacy&lt;/strong&gt;&amp;nbsp;- access controls, PII handling and retention under US state privacy laws, and periodic reviews of who - and which AI tools - can see what.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;The governance system itself&lt;/strong&gt;&amp;nbsp;- the documentation, ownership models, and review loops that keep all of the above running without heroics.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;/p&gt;
+&lt;h3&gt;Problems to Solve&lt;a href="https://github.com/lawnstarter/brain/blob/main/docs/job-descriptions/data-governance-platform-manager.md#problems-to-solve" class="external"&gt;&lt;/a&gt;
+&lt;/h3&gt;
+&lt;p&gt;&lt;strong&gt;Make the Lightdash migration a step-change, not a re-platforming&lt;/strong&gt;&amp;nbsp;We're replacing Tableau and Metabase with Lightdash. Done poorly, we trade two messy tools for one messy tool. You'll design the structure - spaces, permissions, certification, naming - that lets stakeholders self-serve at the speed the company needs without creating an uncontrolled dashboard-growth nightmare. The hard part: autonomy and tidiness pull in opposite directions, and you have to deliver both.&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Finish and defend the semantic layer&lt;/strong&gt;&amp;nbsp;We just shipped our semantic layer for our most critical metrics - one governed definition per metric, so "two dashboards, two numbers" can't happen. The unglamorous truth: a long tail of metrics still needs definition and mapping, and a semantic layer only stays trustworthy if someone curbs its growth. You'll own both - extending coverage and keeping one-metric-one-definition true as the layer scales.&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Tame event-tracking entropy&lt;/strong&gt;&amp;nbsp;Segment events power our funnels and product analytics, and they're implemented by many engineers across many teams. The guardrails exist - a governed event catalog with naming standards, a property dictionary, a review lifecycle, and automated drift detection against production. What's missing is a dedicated owner: someone who holds every new event to the standard, keeps the catalog matched to what production actually sends, and evolves the guardrails as tracking grows. Without that, entropy wins - events drift and silently degrade when features change.&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Get ahead of breakage instead of chasing it&lt;/strong&gt;&amp;nbsp;Today, when production data changes upstream, we too often find out when a pipeline breaks or a stakeholder flags a wrong number. You won't start from zero - an AI-powered Analytics Engineer agent already runs freshness monitoring, metric anomaly detection, and dbt-based lineage checks - but it doesn't yet run at the scale or coverage we need. You'll take detection from partial to comprehensive, extend lineage beyond dbt (Segment events and Lightdash need stitching in), and wire it into engineering's change review, so a proposed production change comes with a downstream impact assessment instead of a postmortem. The end-state is data contracts: breaking changes caught in engineering's workflow, not ours.&lt;/p&gt;
+&lt;p&gt;&lt;/p&gt;
+&lt;h3&gt;What Success Looks Like (Year 1)&lt;a href="https://github.com/lawnstarter/brain/blob/main/docs/job-descriptions/data-governance-platform-manager.md#what-success-looks-like-year-1" class="external"&gt;&lt;/a&gt;
+&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;strong&gt;Zero pipeline incidents from unannounced source-data changes&lt;/strong&gt;&amp;nbsp;- lineage and automation catch them before they break anything downstream, and production changes ship with an impact assessment instead of a postmortem.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Zero freshness incidents&lt;/strong&gt;&amp;nbsp;- stakeholders never open a stale dashboard.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Every area of the business manages on official, well-maintained metrics and dashboards&lt;/strong&gt;&amp;nbsp;- product, marketing, ops, and finance self-serve in Lightdash against a fully mapped semantic layer; Tableau and Metabase are retired; arguments about whose number is right don't happen. Not because you built the dashboards - because you built the system that keeps them trustworthy.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Every Segment event has an owner and a standard&lt;/strong&gt;&amp;nbsp;- new events ship compliant, and degradation gets caught automatically, not by accident.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Governance runs as a system&lt;/strong&gt;&amp;nbsp;- documented processes that would survive you taking a month off.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;Requirements&lt;/strong&gt;&lt;/p&gt;
+&lt;h3&gt;Who You Are&lt;a href="https://github.com/lawnstarter/brain/blob/main/docs/job-descriptions/data-governance-platform-manager.md#who-you-are" class="external"&gt;&lt;/a&gt;
+&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;strong&gt;Governance is your craft, not your chore.&lt;/strong&gt;&amp;nbsp;You genuinely enjoy making data systems trustworthy and tidy - you're the person who can't leave a broken naming convention alone. This is unlikely to be a good fit if you see governance as a stepping stone to "real" analytics work.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;AI-native.&lt;/strong&gt;&amp;nbsp;You use AI tools (Claude Code, Copilot, ChatGPT) daily to build quality checks, write automation, triage anomalies, and document as you go - one person covering ground that used to take a team. You also see the reverse direction: AI agents consume our data daily, and making the warehouse safe and legible for them is part of governance now. This is unlikely to be a good fit if you're skeptical of AI tools or prefer to do everything manually.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;A hands-on senior operator.&lt;/strong&gt;&amp;nbsp;You write the SQL, debug the Airflow DAG, and configure the permissions yourself - seniority here means judgment and speed, not delegation. This is unlikely to be a good fit if your last few years were spent directing others and you'd need a team to execute.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Automation-first.&lt;/strong&gt;&amp;nbsp;Your instinct for any recurring check is to build a monitor, not a checklist. This is unlikely to be a good fit if your quality practice depends on manual review and discipline.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;An enforcer people actually like.&lt;/strong&gt;&amp;nbsp;You'll hold engineers and analysts you don't manage to standards - which takes clear rules, good tooling that makes compliance easy, and the spine to say no gracefully. This is unlikely to be a good fit if you avoid friction or, at the other extreme, enjoy being the department of no.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;/p&gt;
+&lt;h3&gt;This Role Is NOT&lt;a href="https://github.com/lawnstarter/brain/blob/main/docs/job-descriptions/data-governance-platform-manager.md#this-role-is-not" class="external"&gt;&lt;/a&gt;
+&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;strong&gt;A people-management role - yet.&lt;/strong&gt;&amp;nbsp;You'll work alone for a while. A team may grow under you if the scope demands it, but if you need direct reports on day one, this isn't it.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;A policy or committee job.&lt;/strong&gt;&amp;nbsp;There are no governance councils to chair and no binders to produce. When something's broken, you fix it - with code, config, or a conversation.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;A BI analyst role.&lt;/strong&gt;&amp;nbsp;You won't spend your days building dashboards for stakeholders. You build the platform and guardrails that let everyone else do that well.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;A finished system to babysit.&lt;/strong&gt;&amp;nbsp;Much of this doesn't exist yet. If you want to operate a mature data platform rather than build one, you'll be frustrated here.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;/p&gt;
+&lt;h3&gt;Tech You'll Touch&lt;a href="https://github.com/lawnstarter/brain/blob/main/docs/job-descriptions/data-governance-platform-manager.md#tech-youll-touch" class="external"&gt;&lt;/a&gt;
+&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;strong&gt;Warehouse &amp;amp; pipelines&lt;/strong&gt;&amp;nbsp;- Redshift, dbt, Airflow&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Event tracking&lt;/strong&gt;&amp;nbsp;- Segment&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;BI&lt;/strong&gt;&amp;nbsp;- Lightdash (primary), Tableau and Metabase (sunsetting)&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;AI tooling&lt;/strong&gt;&amp;nbsp;- Claude Code, Codex, Brain (our internal AI toolkit), and any tool that makes you more effective or efficient&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Observability&lt;/strong&gt;&amp;nbsp;- an AI-powered Analytics Engineer agent (freshness monitoring, anomaly detection, dbt lineage) you'll scale up, plus the quality and impact tooling you'll add around it&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;You don't need every box checked. You need hands-on depth in the warehouse/pipeline layer and credible experience keeping a BI tool and tracking plan healthy at company scale.&lt;/p&gt;
+&lt;p&gt;&lt;/p&gt;
+&lt;p&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Benefits&lt;/strong&gt;&lt;/p&gt;
+&lt;h3&gt;Compensation &amp;amp; Benefits&lt;a href="https://github.com/lawnstarter/brain/blob/main/docs/job-descriptions/data-governance-platform-manager.md#compensation--benefits" class="external"&gt;&lt;/a&gt;
+&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;strong&gt;Base salary&lt;/strong&gt;: $75k-$100k/year&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Equity&lt;/strong&gt;: The whole company makes decisions on the data you'll guard. When data trust goes up, decision quality, and company value, go up with it. We want you to own a piece of that.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Fully remote&lt;/strong&gt;: This work needs deep focus, building monitors, untangling pipelines, and we trust you to manage your environment. Async collaboration is the norm.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Flexible PTO&lt;/strong&gt;: We focus on results. Take what you need.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;/p&gt;
+&lt;p&gt;&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;LawnStarter provides equal employment opportunities (EEO) to all employees and applicants for employment without regard to race, color, religion, sex, national origin, age, disability, or genetics. We comply with applicable state and local laws governing nondiscrimination in employment.&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;To apply:&lt;/strong&gt; &lt;a href="https://weworkremotely.com/remote-jobs/lawnstarter-data-governance-platform-manager"&gt;https://weworkremotely.com/remote-jobs/lawnstarter-data-governance-platform-manager&lt;/a&gt;&lt;/p&gt;
+</description>
+      <pubDate>Fri, 17 Jul 2026 20:07:06 +0000</pubDate>
+      <expires_at>Sun, 16 Aug 2026 20:07:06 +0000</expires_at>
+      <guid>https://weworkremotely.com/remote-jobs/lawnstarter-data-governance-platform-manager</guid>
+      <link>https://weworkremotely.com/remote-jobs/lawnstarter-data-governance-platform-manager</link>
+    </item>
+<item>
+      <media:content url="https://wwr-pro.s3.amazonaws.com/logos/0171/5864/logo.gif" type="image/png"/>
+      <title>MP College Consulting: College Counselor Specializing in BS/MD Admissions– Remote, Part-Time</title>
+      <region>Anywhere in the World</region>
+      <country>🇺🇸 United States of America</country>
+      <state>Georgia</state>
+      <skills> Client Relationship Management</skills>
+      <category>All Other Remote</category>
+      <type>Contract</type>
+      <description>&lt;img src="https://we-work-remotely.imgix.net/logos/0171/5864/logo.gif?ixlib=rails-4.0.0&amp;w=50&amp;h=50&amp;dpr=2&amp;fit=fill&amp;auto=compress" /&gt;
+
+&lt;p&gt;
+  &lt;strong&gt;Headquarters:&lt;/strong&gt; United States
+    &lt;br /&gt;&lt;strong&gt;URL:&lt;/strong&gt; &lt;a href="https://moonprep.com"&gt;https://moonprep.com&lt;/a&gt;
+&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Role: College Admissions Counselor&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Pay: $35.00 - $50.00 per hour&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Employement Type: Independent Contractor&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Job Type: Part-time&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Location: Fully Remote&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Job Description&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Join the MP College Counseling Team&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;MP College Counseling is a leader in the college counseling industry—particularly in the niche field of direct medical programs—and plays a vital role in guiding students through high school and the college admissions process.&lt;/p&gt;
+&lt;p&gt;As a College Counselor with MP College Counseling, you will support students by providing:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;Guidance on strengthening their academic profiles and professional experience to showcase the best possible résumé for college admissions.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Comprehensive counseling to develop balanced college lists and tailor-made admissions strategies.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Essay support, including brainstorming, editing, and managing submission deadlines.&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;At MP College Counseling, we take pride in preparing and empowering the next generation of medical professionals. By expertly guiding ambitious students through the complex medical admissions landscape, we help them pursue their dreams of a career in medicine.&lt;/p&gt;
+&lt;p&gt;To achieve this vision, we have built a diverse team of passionate experts who thrive in a culture of ethics, transparency, flexibility, collaboration, and kindness. We believe in going the extra mile for our clients and for each other.&lt;/p&gt;
+&lt;p&gt;If you are passionate about the admissions process, transforming young lives, and making a meaningful impact—and if you enjoy working with a motivated, independent, and supportive team—this may be the perfect role for you.&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Training &amp;amp; Role Overview&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;Direct medical admissions programs are a specialized niche within admissions counseling. We provide in-depth training for new counselors during onboarding.&lt;/p&gt;
+&lt;p&gt;As a College Counselor, you will:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;Work independently with students through one-on-one Zoom meetings and offline essay editing.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Be paired with a Lead Counselor for mentorship and support as needed.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Take the lead on all assigned student work, including building college lists, advising on applications, guiding essay development, and helping students manage deadlines.&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;This role requires a strong background in brainstorming and editing, as most applicants apply to 20–30 schools and write 60+ essays.&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Key Details&lt;/strong&gt;&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;Position Type: Part-time, 1099 contractor.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Schedule: Flexible, remote role; requires availability nights and weekends to match high school student schedules across U.S. time zones.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Workload:&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;10–25 hours per week, depending on season.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Fall/winter (Oct–Jan) is the busiest period, including holiday weeks.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Spring/early summer tends to be lighter.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Commitment: A minimum of 10 students is required for all new hires.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Restrictions: Candidates cannot be employed by direct competitors. All contractors must sign a standard non-compete agreement.&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;Responsibilities&lt;/strong&gt;&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;Support students in developing 4-year course plans.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Guide academic profile and résumé building.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Build balanced college lists.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Provide essay support for personal statements and supplemental essays.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Assist with application platforms (Common App, Coalition, UC, CUNY, SUNY).&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Guide students in activity list/résumé preparation.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Manage application deadlines.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Provide interview preparation.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Communicate promptly with students and families via email.&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;Minimum Requirements&lt;/strong&gt;&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;Bachelor’s degree required (advanced degree preferred).&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Minimum of 5 years of professional experience in the college admissions industry, working directly with students on all aspects of the college admissions process.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Direct Medical (BS/MD) experience required. Must be able to confidently guide applicants through the BS/MD and BS/DO application process.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Strong background in writing, brainstorming, and editing.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Tech-savvy (Google Docs, Google Drive, Zoom required).&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Flexibility to work nights/weekends and during busy holiday seasons.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Ability to accommodate 10 hours/week during the quiet part of the year and 25 hours/week during the admissions cycle.&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;Selection Process&lt;/strong&gt;&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;Candidates must provide proof of education and two professional references.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Candidates must submit writing samples and complete a practical essay editing assessment before interviews. Writing samples may include before/after essay edits, recommendation letters, blog posts, newsletters, or articles.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Candidates will complete a core competency interview.&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;Why Join Us?&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;This role offers the chance to make a lasting impact on students’ lives and careers while being part of a mission-driven, supportive team. If you are dedicated to education, passionate about counseling, and excited to grow in a specialized admissions niche, we encourage you to apply.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;To apply:&lt;/strong&gt; &lt;a href="https://weworkremotely.com/remote-jobs/mp-college-consulting-college-counselor-specializing-in-bs-md-admissions-remote-part-time"&gt;https://weworkremotely.com/remote-jobs/mp-college-consulting-college-counselor-specializing-in-bs-md-admissions-remote-part-time&lt;/a&gt;&lt;/p&gt;
+</description>
+      <pubDate>Fri, 17 Jul 2026 19:19:15 +0000</pubDate>
+      <expires_at>Sun, 16 Aug 2026 19:19:15 +0000</expires_at>
+      <guid>https://weworkremotely.com/remote-jobs/mp-college-consulting-college-counselor-specializing-in-bs-md-admissions-remote-part-time</guid>
+      <link>https://weworkremotely.com/remote-jobs/mp-college-consulting-college-counselor-specializing-in-bs-md-admissions-remote-part-time</link>
+    </item>
+  </channel>
+</rss>

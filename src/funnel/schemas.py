@@ -4,9 +4,15 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, computed_field
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, computed_field, field_validator
 
 from funnel.models import SourceKind, compute_content_hash
+
+#: The String(255) columns behind location/external_id (models.py). Boards occasionally send
+#: much longer values (WeWorkRemotely packs a country list into `region`), so the contract
+#: truncates them here rather than letting a DataError blow up the whole ingest batch. Unlike
+#: title/company, an over-long location or id is noise, not a parse bug — trim, don't reject.
+_MAX_DB_STRING = 255
 
 
 class NormalizedJob(BaseModel):
@@ -25,6 +31,14 @@ class NormalizedJob(BaseModel):
     is_remote: bool = False
     posted_at: datetime | None = None
     external_id: str | None = None
+
+    @field_validator("location", "external_id")
+    @classmethod
+    def _fit_db_column(cls, value: str | None) -> str | None:
+        """Keep DB-bounded strings within their column width; over-long values are noise."""
+        if value is not None and len(value) > _MAX_DB_STRING:
+            return value[:_MAX_DB_STRING].rstrip()
+        return value
 
     @computed_field  # type: ignore[prop-decorator]
     @property
