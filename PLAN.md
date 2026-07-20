@@ -173,7 +173,7 @@ visible by actually submitting the forms:
 
 Both are guarded by tests in `tests/test_invariants.py` (verified to fail without the fixes).
 
-### [ ] Phase 3 — Ingest layer
+### [x] Phase 3 — Ingest layer
 - The base interface `BaseAdapter.fetch() -> list[NormalizedJob]` (NormalizedJob is a
   Pydantic model).
 - Dedup on `content_hash` (a repeat run breeds no duplicates).
@@ -201,10 +201,19 @@ holds). Two traps, both found only by running it against live data:
   those two fields to the column width (they are noise past that, unlike title/company which
   still reject). Guarded by a test.
 
-Still to do for Phase 3: the **Gmail alert parser** (`gmail-alerts`, seeded but disabled).
-OAuth is already done (`funnel auth-gmail`, read-only). Real `.eml` samples for Habr and hh
-live in `data/samples/emails/` (gitignored); redacted fixtures go under `tests/fixtures/`
-when the parser is written. LinkedIn awaits its first alert email.
+Progress 2026-07-20 — **Gmail alert parser done; Phase 3 closed.** One `gmail-alerts` source,
+three senders: `fetch()` runs the source query, pulls each message `format=raw`, and dispatches
+by sender to a per-board parser (hh.ru, career.habr.com, LinkedIn). The pipeline never learns
+which boards these are. Parsers are **structural, not textual** — they key on the job-link shape
+(`/vacancy/<id>`, `/vacancies/<id>`, `/jobs/view/<id>`) and the per-card lines around it, so the
+one-off LinkedIn "your alert has been created" wording (and whatever the later "new jobs" emails
+say) is irrelevant. Habr wraps every link in an email-tracking redirect; the real URL is decoded
+out of the `url` query param. Verified live against the mailbox: **197 real postings** in one run
+(habr 125, hh 60, LinkedIn 12) with company/location/remote extracted. Offline tests run on
+redacted `.eml` fixtures under `tests/fixtures/emails/` (real board markup, synthetic postings,
+no personal data). The source stays `enabled=False` in the seed — flip it on in the admin once a
+fresh alert is in the mailbox. Adding a board later = a new sender branch + a query term; no
+pipeline change. Indeed/Glassdoor await their first alert emails.
 
 ### [ ] Phase 4 — Matching
 - **4a. Hard filters (code, free):** remote, timezone, seniority, stack, stop-list

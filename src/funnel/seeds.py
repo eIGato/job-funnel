@@ -36,15 +36,20 @@ DEFAULT_SOURCES: list[SourceConfig] = [
         kind=SourceKind.RSS,
         config={"base_url": "https://weworkremotely.com/remote-jobs.rss"},
     ),
-    # Disabled until the Gmail alert parser lands (Phase 3). The token is already in place
-    # (`funnel auth-gmail`); the query spans the boards that email alerts. Enable in the admin.
+    # The token is already in place (`funnel auth-gmail`); the query spans every board that
+    # emails alerts. Parsers exist for hh, Habr and LinkedIn; add senders here as more boards
+    # come online (Indeed, Glassdoor). Left disabled by default — enable in the admin once a
+    # real alert has landed in the mailbox, so a first run has something to read.
     SourceConfig(
         name="gmail-alerts",
         kind=SourceKind.GMAIL,
         enabled=False,
         config={
-            "query": "newer_than:2d (from:career.habr.com OR from:hh.ru)",
-            "max_results": 50,
+            "query": (
+                "newer_than:7d (from:hh.ru OR from:career.habr.com "
+                "OR from:jobalerts-noreply@linkedin.com)"
+            ),
+            "max_results": 100,
         },
     ),
 ]
