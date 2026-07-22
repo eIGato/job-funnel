@@ -312,7 +312,7 @@ posting scores on par with its EN twin — the reason for the multilingual e5 mo
   this sort, not a score penalty. No Application rows are created here; drafting (Phase 5) picks
   top-N.
 
-### [ ] Phase 5 — Cover letter (RAG)
+### [x] Phase 5 — Cover letter (RAG)
 - The CV is split into bullets/sections. For a given posting, **the same cosine** picks the
   relevant bullets (rather than the whole CV) → that is the RAG: the prompt only gets the
   hooks that match the requirements.
@@ -323,7 +323,10 @@ posting scores on par with its EN twin — the reason for the multilingual e5 mo
 **Done when:** `funnel draft` puts a draft on a shortlisted posting that is readable and
 editable in sqladmin.
 
-Built 2026-07-23 (live generation still pending the LLM key). `funnel draft` walks the top of the
+Done 2026-07-23 — live-verified: `funnel draft --limit 3` drafted three real letters against the
+top of the shortlist (Proxify backend/fullstack) grounded in the retrieved bullets and stored under
+`Application.cover_letter` (status `drafted`), readable in the admin. Cost is ~$0.003–0.004/letter
+on `claude-haiku-4-5` ($1/$5 per 1M). `funnel draft` walks the top of the
 shortlist (`(is_remote DESC, match_score DESC)`, capped at `match_top_k` or `--limit`), drafts a
 letter per posting, and writes `Application.cover_letter` with status `drafted`. It never sends
 (invariant 2). Idempotent: a posting whose Application has moved past `shortlisted` is skipped, so a
@@ -339,7 +342,7 @@ re-run neither regenerates nor clobbers a letter (or a human edit). Details:
   `LLM_API_KEY` onto it (`anthropic`→`ANTHROPIC_API_KEY`, etc.). With the key empty, `draft` exits
   with a clear pointer and sends nothing.
 - Offline tests use a pydantic-ai `TestModel` + monkeypatched retrieval — no network, no model
-  download. **Open:** set `LLM_API_KEY` in `.env`, then a live `funnel draft` to close the box.
+  download. `LLM_API_KEY` is now set in `.env` (gitignored).
 
 ### [ ] Phase 6 — Tracking + reply handling
 - The human sets status `sent` from sqladmin (after sending by hand).
