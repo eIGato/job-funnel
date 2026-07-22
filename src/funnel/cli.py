@@ -134,10 +134,58 @@ def match() -> None:
 def draft(
     limit: int = typer.Option(None, help="How many shortlisted postings to process."),
 ) -> None:
-    """Draft cover letters for the shortlist. DOES NOT SEND."""
-    # TODO Phase 5: take top-k by match_score, draft_cover_letter(job), store into
-    #   Application.cover_letter, set status to drafted.
-    raise NotImplementedError("Phase 5: drafting")
+    """Draft cover letters for the top of the shortlist. DOES NOT SEND (invariant 2).
+
+    Idempotent: a posting whose Application has moved past `shortlisted` (already drafted, or
+    touched by the human) is skipped, so a re-run neither regenerates nor clobbers a letter.
+    """
+    from sqlalchemy import desc
+
+    from funnel.drafting.cover_letter import draft_cover_letter
+    from funnel.models import Application, ApplicationStatus
+
+    settings = get_settings()
+    if not (settings.llm_api_key and settings.llm_api_key.get_secret_value()):
+        typer.secho(
+            "draft: LLM_API_KEY is empty. Set it in .env (provider for llm_model="
+            f"{settings.llm_model}). Drafting needs it; nothing was sent.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+
+    # The shortlist order (PLAN.md section 7): remote first, then by score.
+    top_n = limit or settings.match_top_k
+    with session_scope() as session:
+        jobs = session.scalars(
+            select(Job)
+            .where(Job.match_score.isnot(None), Job.hard_filter_passed.is_(True))
+            .order_by(desc(Job.is_remote), desc(Job.match_score))
+            .limit(top_n)
+        ).all()
+
+        drafted = 0
+        for job in jobs:
+            application = job.application
+            if application is not None and application.status != ApplicationStatus.SHORTLISTED:
+                continue  # already drafted or human-touched — never overwrite
+
+            try:
+                letter = asyncio.run(draft_cover_letter(job))
+            except Exception as exc:  # one bad posting must not sink the batch
+                typer.secho(f"  {job.company} — {job.title[:40]}: ERROR {exc}", fg=typer.colors.RED)
+                continue
+
+            if application is None:
+                application = Application(job_id=job.id)
+                session.add(application)
+            application.cover_letter = f"Subject: {letter.subject}\n\n{letter.body}"
+            application.status = ApplicationStatus.DRAFTED
+            if letter.matched_points:
+                application.notes = "Leans on: " + "; ".join(letter.matched_points)
+            drafted += 1
+            typer.echo(f"  drafted: {job.company} — {job.title[:50]}")
+
+        typer.secho(f"draft: {drafted} letters drafted (NOT sent)", fg=typer.colors.GREEN)
 
 
 @app.command(name="run-funnel")

@@ -323,6 +323,24 @@ posting scores on par with its EN twin — the reason for the multilingual e5 mo
 **Done when:** `funnel draft` puts a draft on a shortlisted posting that is readable and
 editable in sqladmin.
 
+Built 2026-07-23 (live generation still pending the LLM key). `funnel draft` walks the top of the
+shortlist (`(is_remote DESC, match_score DESC)`, capped at `match_top_k` or `--limit`), drafts a
+letter per posting, and writes `Application.cover_letter` with status `drafted`. It never sends
+(invariant 2). Idempotent: a posting whose Application has moved past `shortlisted` is skipped, so a
+re-run neither regenerates nor clobbers a letter (or a human edit). Details:
+- **RAG.** `retrieve_cv_bullets` splits the active profile into bullets, embeds them once (e5
+  `passage:` side), and cosine-ranks them against the posting (`query:` side) — the same machinery
+  as matching. The prompt gets only the top bullets, with an explicit "invent nothing beyond this".
+- **Generation** is pydantic-ai only (invariant 4), model `settings.llm_model` (chosen
+  `anthropic:claude-haiku-4-5`, cheap — invariant 5), structured output `CoverLetterDraft`
+  (subject / body / matched_points). Letter **language is detected in code** — Cyrillic in the
+  posting → Russian, else the configured default (invariant 4), never by the LLM.
+- **Key bridge.** pydantic-ai reads the provider's own env var; the adapter copies our single
+  `LLM_API_KEY` onto it (`anthropic`→`ANTHROPIC_API_KEY`, etc.). With the key empty, `draft` exits
+  with a clear pointer and sends nothing.
+- Offline tests use a pydantic-ai `TestModel` + monkeypatched retrieval — no network, no model
+  download. **Open:** set `LLM_API_KEY` in `.env`, then a live `funnel draft` to close the box.
+
 ### [ ] Phase 6 — Tracking + reply handling
 - The human sets status `sent` from sqladmin (after sending by hand).
 - Incoming: the Gmail API pulls replies; a **pydantic-ai** classifier with structured output
