@@ -45,6 +45,11 @@ human does the sending.
    phase (Phase 8), not now.
 7. **No heavy framework.** The entry points are CLI commands (Typer). The review UI is
    sqladmin, and it is for review only.
+8. **Data-fetch policy (ToS).** Data comes only from official public APIs/feeds and from
+   email/Telegram alerts — never a crawl of a board's HTML with a token or cookie. **Telegram
+   and LinkedIn accounts are sacred**: LinkedIn is never touched; Telegram is read only through a
+   dedicated ingest account (Telethon, read-only) or bypassed via teletype RSS. For other boards,
+   an anonymous few-pages-a-day request is fine where ToS enforcement is lax; no heavy crawling.
 
 ---
 
@@ -225,6 +230,54 @@ with company/title/location lines inside (employer rating and the salary/Easy-Ap
 stripped). **Glassdoor URL is a chosen canonical** `…/job-listing/j?jl=<id>` built from the id (not
 the volatile tracking href) so dedup stays stable across re-alerts — worth a human confirm that it
 resolves. Redacted fixtures + tests added. Indeed is the last sender still awaiting a first alert.
+
+### [ ] Phase 3.5 — Widen the source pool (ongoing)
+
+The funnel's goal is a wider pool (web → web + ETL + AI, globally). Every source below is a new
+`BaseAdapter` + `@register`; the pipeline stays source-agnostic. All of it is governed by the
+data-fetch policy (invariant 9 / section 2.8): official APIs/feeds and email/Telegram alerts only;
+Telegram and LinkedIn accounts are sacred. This phase also feeds Phase 5 — the aggregator/ATS/
+teletype sources carry **full descriptions**, which is what makes a real cover letter possible
+(email alerts give only card snippets).
+
+- **A. Teletype RSS (`teletype`).** The @Remoteit network publishes every vacancy as a
+  `teletype.in` post; the channel is only a subset, so we read the **author's whole feed**, not the
+  channel. `teletype.in/rss/{author}` is valid RSS 2.0 with the full body in `content:encoded`
+  (verified 2026-07-22). Config holds the author handles — `kovesh` (old), `courierus` (current);
+  the handle rotates, so the list is append-only and the current one can be rediscovered from a
+  fresh post. Full descriptions, no Telegram, no account risk. Parse position/company/location/
+  apply-link structurally (no LLM). **Done when:** `teletype` ingests real posts with full text;
+  RU-located ones are dropped by the 4a filter.
+- **B. Aggregator APIs (`adzuna`, `themuse`).** Public, free-tier keys, no slugs, full descriptions
+  — the answer to "aggregator, not a hand-kept slug list" (a free, current, ToS-clean slug
+  aggregator does not exist; the ones that discover slugs are paid Apify scrapers). Adzuna spans
+  ~12 countries (broad EU coverage). Keys in `.env` (`ADZUNA_APP_ID`/`ADZUNA_APP_KEY` provided
+  2026-07-22; `THEMUSE_API_KEY` optional). OPEN sub-decision: which Adzuna countries and the search
+  query (default: the active profile's role keywords). **Done when:** both ingest real postings with
+  full descriptions; a repeat run dedups.
+- **C. Telegram channels (`telegram`).** Telethon user-session on a **dedicated ingest account —
+  not disposable** (the human has 3 phone numbers, one on the main account; keep the session strictly
+  read-only and gentle, the account is not expendable). One-time `funnel auth-telegram` stores a
+  session under `secrets/`. Per-channel structural parsers (no LLM, invariant 4): `python_vakansii1`
+  (structured), `BlockHire` (blockchain, incl. non-smart-contract roles like Zubr), and the
+  `@g_jobbot` getmatch bot (getmatch has no public API — read its filtered notifications). Deferred:
+  `opento_relocate` (mixed; partly-paywalled WantApply digests). Dropped: `remotegeekjob`
+  (heterogeneous LinkedIn/geekjob links, no full text, not parseable without an LLM). **Done when:**
+  `telegram` ingests from ≥1 channel via a read-only session.
+- **D. Self-growing ATS slugs (`greenhouse` / `lever` / `ashby`).** No hand-kept slug list. Instead:
+  when any ingested posting links to an ATS board, extract the company slug and record it; the ATS
+  adapters then monitor those slugs via the public no-auth board APIs (full descriptions — Greenhouse
+  `boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true`, Lever `api.lever.co/v0/postings/
+  {slug}?mode=json`, Ashby `api.ashbyhq.com/posting-api/job-board/{slug}`). Optionally cross-probe a
+  new slug on the other two ATSs. Bound the set: prune a slug that 404s or yields no filter-passing
+  posting after N runs. OPEN sub-decisions: where slugs live (a small `AtsBoard` table vs
+  `Source.config`), the pruning threshold, and whether to cross-probe. **Done when:** a slug spotted
+  in a link is auto-monitored on its ATS and yields full-description postings, and the set stays
+  bounded.
+
+**Done when (phase):** at least `teletype` + `adzuna` are live and ingesting full-description
+postings; the Telegram and ATS-slug tracks are wired or explicitly deferred with their sub-decisions
+recorded here.
 
 ### [x] Phase 4 — Matching
 - **4a. Hard filters (code, free):** remote, timezone, seniority, stack, stop-list

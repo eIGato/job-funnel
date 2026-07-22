@@ -39,6 +39,13 @@ and to automate the drudgery of applying. It doubles as a portfolio piece for th
 8. **Do not invent decisions.** If something is not in this file or in `PLAN.md` (whether a
    source's API is available, the path to the CV, the LLM provider), see "Open questions" in
    `PLAN.md` and **ask the human**.
+9. **Data-fetch policy (ToS).** Job data comes only from official public APIs/feeds and from
+   email/Telegram alerts. We **never** crawl a board's HTML with any auth token or cookie.
+   **Telegram and LinkedIn accounts are sacred** — no automation that risks the human's main
+   account: LinkedIn is never touched at all (invariant 1); Telegram is read only through a
+   **dedicated ingest account** (Telethon, read-only) or bypassed entirely via teletype RSS.
+   For other boards an anonymous request (no token, no cookies) for a handful of pages a day is
+   acceptable where ToS enforcement is known to be lax — no aggressive crawling.
 
 ---
 
