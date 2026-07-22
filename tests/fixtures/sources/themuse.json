@@ -1,0 +1,22 @@
+{
+  "results": [
+    {
+      "id": 111,
+      "name": "Senior Python Engineer",
+      "company": {"name": "Nimbus Labs"},
+      "locations": [{"name": "Flexible / Remote"}],
+      "contents": "<p>Build <strong>FastAPI</strong> services with PostgreSQL and Kafka.</p>",
+      "refs": {"landing_page": "https://www.themuse.com/jobs/nimbus/senior-python"},
+      "publication_date": "2026-07-20T09:00:00Z"
+    },
+    {
+      "id": 222,
+      "name": "Data Engineer",
+      "company": {"name": "Orbital"},
+      "locations": [{"name": "Berlin, Germany"}],
+      "contents": "<p>Own the ETL pipelines end to end.</p>",
+      "refs": {"landing_page": "https://www.themuse.com/jobs/orbital/data-eng"},
+      "publication_date": "2026-07-19T09:00:00Z"
+    }
+  ]
+}

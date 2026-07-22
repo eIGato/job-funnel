@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+<channel>
+<title>Test Recruiter Feed</title>
+<link>https://teletype.in/@testauthor</link>
+<item>
+<title>Senior Python Engineer</title>
+<link>https://teletype.in/@testauthor/aBc123?utm_source=teletype&amp;utm_medium=feed_rss</link>
+<guid>https://teletype.in/@testauthor/aBc123</guid>
+<pubDate>Wed, 22 Jul 2026 19:53:55 GMT</pubDate>
+<description><![CDATA[<img src="hero.png"></img>RELOCATION TO POLAND OR REMOTE FROM EUROPE]]></description>
+<content:encoded><![CDATA[<p>RELOCATION TO POLAND OR REMOTE FROM EUROPE</p><p>We are hiring a Senior Python Engineer to build FastAPI services with PostgreSQL and Kafka.</p><p>APPLY | CONTACT</p><p><a href="https://www.linkedin.com/in/recruiter/">recruiter</a></p>]]></content:encoded>
+</item>
+<item>
+<title>Backend Developer</title>
+<link>https://teletype.in/@testauthor/XyZ789</link>
+<guid>https://teletype.in/@testauthor/XyZ789</guid>
+<pubDate>Tue, 21 Jul 2026 10:00:00 GMT</pubDate>
+<content:encoded><![CDATA[<p>REMOTE RUSSIA</p><p>Backend developer role, Django and DRF.</p>]]></content:encoded>
+</item>
+</channel>
+</rss>

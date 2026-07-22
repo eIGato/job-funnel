@@ -36,6 +36,34 @@ DEFAULT_SOURCES: list[SourceConfig] = [
         kind=SourceKind.RSS,
         config={"base_url": "https://weworkremotely.com/remote-jobs.rss"},
     ),
+    # Teletype author feeds behind the @Remoteit Telegram network (Phase 3.5). We read the whole
+    # author feed, not the channel, and never touch Telegram. Full descriptions; blind recruiter
+    # posts (no employer). The handle rotates — append every known one here.
+    SourceConfig(
+        name="teletype",
+        kind=SourceKind.RSS,
+        config={"authors": ["kovesh", "courierus"]},
+    ),
+    # Adzuna aggregator (Phase 3.5): broad EU + remote-US, human-chosen 2026-07-22. Keys in .env.
+    SourceConfig(
+        name="adzuna",
+        kind=SourceKind.API,
+        config={
+            "countries": ["gb", "de", "nl", "pl", "es", "at", "us", "ca"],
+            "what": "python backend developer",
+            "results_per_page": 50,
+            "max_days_old": 14,
+        },
+    ),
+    # The Muse aggregator (Phase 3.5): full descriptions, keyless (optional key raises the limit).
+    SourceConfig(
+        name="themuse",
+        kind=SourceKind.API,
+        config={
+            "categories": ["Software Engineering", "Data Science", "Data and Analytics"],
+            "pages": 2,
+        },
+    ),
     # The token is already in place (`funnel auth-gmail`); the query spans every board that
     # emails alerts. Parsers exist for hh, Habr, LinkedIn, Wellfound and Glassdoor; add senders
     # here as more boards come online (Indeed next). Left disabled by default — enable in the

@@ -5,10 +5,13 @@ Importing the modules below populates the registry. Keep those imports here so t
 """
 
 from funnel.adapters import (  # noqa: F401  (imported for registration)
+    adzuna,
     arbeitnow,
     gmail,
     remoteok,
     remotive,
+    teletype,
+    themuse,
     weworkremotely,
 )
 from funnel.adapters.base import BaseAdapter, get_adapter, register, registry

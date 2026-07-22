@@ -46,6 +46,14 @@ class Settings(BaseSettings):
         description="The role header file (<name>.md) matched against, minus the .md suffix.",
     )
 
+    # --- Source APIs (aggregators). Keys are secrets, so they live here, never in Source.config
+    #     (invariant 7); non-secret params like countries/query stay in Source.config. ---
+    adzuna_app_id: str | None = Field(default=None)
+    adzuna_app_key: SecretStr | None = Field(default=None)
+    themuse_api_key: SecretStr | None = Field(
+        default=None, description="Optional; The Muse works keyless at a lower rate limit."
+    )
+
     # --- LLM: confined to drafting/ and replies/ ---
     llm_model: str = Field(
         default="anthropic:claude-haiku-4-5",
