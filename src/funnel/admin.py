@@ -40,8 +40,10 @@ class JobAdmin(ModelView, model=Job):
         Job.posted_at,
     ]
     column_searchable_list = [Job.company, Job.title]
-    column_sortable_list = [Job.match_score, Job.posted_at, Job.company]
-    column_default_sort = [(Job.match_score, True)]  # best matches on top
+    column_sortable_list = [Job.match_score, Job.is_remote, Job.posted_at, Job.company]
+    # The shortlist order the human reviews and drafting picks top-N from (PLAN.md section 7):
+    # remote first, then by score. "Rank below remote" is this sort, not a score penalty.
+    column_default_sort = [(Job.is_remote, True), (Job.match_score, True)]
     column_details_exclude_list = [Job.embedding]  # raw bytes are noise in the UI
     # content_hash is derived on write (models._fill_content_hash) — nobody types a sha256.
     # Job.application is cascade="all, delete-orphan": leaving it off this form is what stops

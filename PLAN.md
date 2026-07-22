@@ -226,7 +226,7 @@ stripped). **Glassdoor URL is a chosen canonical** `…/job-listing/j?jl=<id>` b
 the volatile tracking href) so dedup stays stable across re-alerts — worth a human confirm that it
 resolves. Redacted fixtures + tests added. Indeed is the last sender still awaiting a first alert.
 
-### [ ] Phase 4 — Matching
+### [x] Phase 4 — Matching
 - **4a. Hard filters (code, free):** remote, timezone, seniority, stack, stop-list
   (`security clearance` and friends) → `hard_filter_passed`.
 - **4b. Embedding ranking (fastembed):** the CV is embedded once and cached; every posting
@@ -234,6 +234,30 @@ resolves. Redacted fixtures + tests added. Indeed is the last sender still await
 - The `funnel match` command.
 
 **Done when:** `funnel match` sets the score and sqladmin shows a ranked shortlist.
+
+Done 2026-07-22 — verified end to end against the 339 real postings already in the DB. `funnel
+match` is incremental (only `match_score IS NULL` is considered) and idempotent: a re-run scores
+nothing, and the only repeated work is re-applying the cheap deterministic filters to the hard
+rejects. Result: 337 scored, 2 filtered. The top of the shortlist is exactly the target role
+(Proxify "Senior Backend/Fullstack Developer (Python)", ~0.855), and a RU-language backend
+posting scores on par with its EN twin — the reason for the multilingual e5 model.
+
+- **4a filters** implement PLAN section 7's *answered* geography rules only: RU/BY location is a
+  hard stop (keyed on the location field, not a passing mention); a *remote* posting with an
+  explicit geo lock is rejected **unless** it welcomes a contractor/B2B arrangement **or still
+  admits Europe / worldwide** (the human is in Montenegro). That last clause was added after the
+  first live run wrongly filtered A·Team's "must be located in the Americas, Europe, or Israel" —
+  a permissive net, not an exclusion. On-site postings are kept (they rank below remote via the
+  sort, not this predicate). The seniority floor and stop-stack stay OPEN (section 7) — a small
+  `security clearance` seed is the only unconditional stop.
+- **4b ranking**: the active profile (`backend.md` header first, then `_experience.md`, so the
+  desired-position lines survive e5's ~512-token truncation) is embedded once, `query:`-side;
+  each posting is embedded `passage:`-side; numpy cosine → `match_score`. Vectors are cached in
+  `Job.embedding` (raw float32). e5-large on CPU took ~11 min cold for 339 postings incl. the
+  2.24 GB weight fetch; steady-state is incremental (new postings only), so a timer run is cheap.
+- **Shortlist**: the admin sorts `(is_remote DESC, match_score DESC)` — "rank below remote" is
+  this sort, not a score penalty. No Application rows are created here; drafting (Phase 5) picks
+  top-N.
 
 ### [ ] Phase 5 — Cover letter (RAG)
 - The CV is split into bullets/sections. For a given posting, **the same cosine** picks the
@@ -339,9 +363,12 @@ trick as "chat with your PDF", except the retrieval is over CV bullets.
   gameplay/UE line so hybrid postings still surface. No shipped game work justifies more. See §4.
 - **The cover letter language.** EN by default; RU when the posting itself is Russian. The
   posting's language is detected in **code, not by the LLM** (invariant 4).
-- **The embedding model.** Follows from the above: `intfloat/multilingual-e5-small`, since
-  RU postings must embed sensibly. e5 requires prefixes — **profile text gets `query: `,
-  posting text gets `passage: `**. Missing prefixes degrade e5 silently, with no error.
+- **The embedding model.** e5, since RU postings must embed sensibly. e5 requires prefixes —
+  **profile text gets `query: `, posting text gets `passage: `**; missing prefixes degrade e5
+  silently, with no error. Decided `intfloat/multilingual-e5-small`, but it is absent from
+  fastembed 0.8.0, so we run `intfloat/multilingual-e5-large` (same family, human-confirmed
+  2026-07-22): 1024-dim, 2.24 GB weights, acceptable on CPU for a 3×/day batch. Verified that a
+  RU backing posting then scores on par with its EN twin.
 - **Non-CV experience to include in the profile.** Only the 220 Volt material (load testing,
   Yandex.Tank, the area-code scraper, Docker/GitLab CI). Explicitly **excluded**: TTK
   (networks/switches/DSLAM — would pull network-engineer postings) and Nexign (would pull the

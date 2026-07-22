@@ -153,9 +153,11 @@ docker compose run --rm app uv run funnel run-funnel
   pydantic-ai. Everything else is deterministic code.
 - **We send nothing.** There is no code path that sends an email or an application. `draft`
   writes to the database; the human sends it and then sets the status to `sent` in the admin.
-- **Multilingual embeddings.** Decided: `intfloat/multilingual-e5-small`, because letters are
-  EN but RU postings must still embed sensibly. **e5 requires prefixes: profile text gets
-  `query: `, posting text gets `passage: `.** Omitting them degrades scores silently.
+- **Multilingual embeddings.** e5, because letters are EN but RU postings must still embed
+  sensibly. Decided `intfloat/multilingual-e5-small`, but it is not in fastembed 0.8.0, so we run
+  `intfloat/multilingual-e5-large` (same family, human-confirmed 2026-07-22). **e5 requires
+  prefixes: profile text gets `query: `, posting text gets `passage: `** (handled in
+  `matching/embed.py`). Omitting them degrades scores silently.
 - **One active profile (multi-profile shelved).** `data/profiles/` (gitignored) holds
   `_experience.md` (shared) prepended to the active header, `backend.md`. `match_score` is just
   cosine(job, that profile) — no `max`, no `matched_profile`. `backend.md` carries one truthful

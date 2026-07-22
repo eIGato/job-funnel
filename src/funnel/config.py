@@ -23,10 +23,12 @@ class Settings(BaseSettings):
 
     # --- Embeddings: local, fastembed/ONNX, zero tokens ---
     embedding_model: str = Field(
-        default="BAAI/bge-small-en-v1.5",
+        default="intfloat/multilingual-e5-large",
         description=(
-            "Multilingual alternative: intfloat/multilingual-e5-small, which requires "
-            "query:/passage: prefixes. See the conventions section of CLAUDE.md."
+            "Multilingual e5 (letters are EN, but RU postings must embed sensibly). e5 models "
+            "require query:/passage: prefixes — handled in matching/embed.py. The decided "
+            "e5-small is not in fastembed 0.8.0; e5-large is the same family (human confirmed "
+            "2026-07-22). See the conventions section of CLAUDE.md."
         ),
     )
     embedding_cache_dir: Path = Field(
@@ -34,10 +36,14 @@ class Settings(BaseSettings):
         description="Where fastembed stores downloaded ONNX weights.",
     )
 
-    # --- Profile ---
-    cv_path: Path = Field(
-        default=Path("data/cv.md"),
-        description="OPEN QUESTION (PLAN.md section 7): the real path and format of the CV.",
+    # --- Profile (one active profile; multi-profile shelved, see PLAN.md section 4) ---
+    profiles_dir: Path = Field(
+        default=Path("data/profiles"),
+        description="Gitignored. Holds _experience.md (shared) plus one header per role.",
+    )
+    active_profile: str = Field(
+        default="backend",
+        description="The role header file (<name>.md) matched against, minus the .md suffix.",
     )
 
     # --- LLM: confined to drafting/ and replies/ ---

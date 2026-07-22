@@ -86,12 +86,48 @@ def ingest() -> None:
 
 @app.command()
 def match() -> None:
-    """Hard filters plus embedding ranking. No LLM, no tokens."""
-    # TODO Phase 4:
-    #   1. Run passes_hard_filters over postings with no hard_filter_passed yet.
-    #   2. Embed the survivors in batches into Job.embedding (embed.to_bytes).
-    #   3. Embed the CV (cached), cosine_similarity -> Job.match_score, take top-k.
-    raise NotImplementedError("Phase 4: matching")
+    """Hard filters plus embedding ranking. No LLM, no tokens.
+
+    Incremental: only postings not yet scored (match_score IS NULL) are considered, so a
+    re-run is cheap. Rejects stay unscored (NULL) — re-running just re-applies the cheap,
+    deterministic filters to them; only survivors are embedded, and once scored they drop out.
+    """
+    from funnel.matching.embed import cosine_similarity, embed_texts, to_bytes
+    from funnel.matching.filters import passes_hard_filters
+    from funnel.matching.profile import get_profile_vector
+
+    with session_scope() as session:
+        pending = session.scalars(select(Job).where(Job.match_score.is_(None))).all()
+        if not pending:
+            typer.secho("match: nothing to score", fg=typer.colors.YELLOW)
+            return
+
+        survivors: list[Job] = []
+        for job in pending:
+            job.hard_filter_passed = passes_hard_filters(job)
+            if job.hard_filter_passed:
+                survivors.append(job)
+
+        if not survivors:
+            typer.secho(
+                f"match: {len(pending)} scanned, 0 passed the hard filters", fg=typer.colors.YELLOW
+            )
+            return
+
+        # Postings are the passage side of the e5 pair; the profile is the query side.
+        texts = [f"{j.title}\n{j.company}\n{j.description}".strip() for j in survivors]
+        matrix = embed_texts(texts, is_query=False)
+        scores = cosine_similarity(matrix, get_profile_vector())
+        for job, vector, score in zip(survivors, matrix, scores, strict=True):
+            job.embedding = to_bytes(vector)
+            job.match_score = float(score)
+
+        top = max(scores)
+        typer.secho(
+            f"match: {len(pending)} scanned, {len(survivors)} scored "
+            f"({len(pending) - len(survivors)} filtered out), top score {top:.3f}",
+            fg=typer.colors.GREEN,
+        )
 
 
 @app.command()
@@ -206,11 +242,11 @@ def doctor() -> None:
             fg=typer.colors.YELLOW,
         )
 
-    cv: Path = settings.cv_path
-    if cv.is_file():
-        typer.secho(f"cv              : ok ({cv})", fg=typer.colors.GREEN)
+    profile: Path = settings.profiles_dir / f"{settings.active_profile}.md"
+    if profile.is_file():
+        typer.secho(f"profile         : ok ({profile})", fg=typer.colors.GREEN)
     else:
-        typer.secho(f"cv              : missing file {cv}", fg=typer.colors.YELLOW)
+        typer.secho(f"profile         : missing file {profile}", fg=typer.colors.YELLOW)
 
     raise typer.Exit(0 if ok else 1)
 
