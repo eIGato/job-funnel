@@ -215,6 +215,17 @@ no personal data). The source stays `enabled=False` in the seed — flip it on i
 fresh alert is in the mailbox. Adding a board later = a new sender branch + a query term; no
 pipeline change. Indeed/Glassdoor await their first alert emails.
 
+Progress 2026-07-22 — **Two more senders: Wellfound and Glassdoor.** Both verified against real
+sample alerts. Wellfound forced a small generalization: its HTML wraps every posting in an opaque
+`links.wellfound.com/s/c/...` tracking redirect with no job id, so a parser now receives both
+rendered bodies (`_Alert(html, text)`) and Wellfound reads the `text/plain` alternative, which keeps
+the real `wellfound.com/jobs?job_listing_slug=<id>` URLs; it anchors each card on the "Company / N
+Employees" line. Glassdoor is HTML: each posting is one `<a>` card, id in the href's `jobListingId`,
+with company/title/location lines inside (employer rating and the salary/Easy-Apply/age chrome
+stripped). **Glassdoor URL is a chosen canonical** `…/job-listing/j?jl=<id>` built from the id (not
+the volatile tracking href) so dedup stays stable across re-alerts — worth a human confirm that it
+resolves. Redacted fixtures + tests added. Indeed is the last sender still awaiting a first alert.
+
 ### [ ] Phase 4 — Matching
 - **4a. Hard filters (code, free):** remote, timezone, seniority, stack, stop-list
   (`security clearance` and friends) → `hard_filter_passed`.

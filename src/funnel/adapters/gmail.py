@@ -9,10 +9,15 @@ query, and each message is dispatched to the parser for its sender's board. The 
 never learns which boards these are — that lives here, behind the `gmail-alerts` name.
 
 The parsers are deliberately structural, not textual: they key on the job-posting links
-(hh `/vacancy/<id>`, habr `/vacancies/<id>`, LinkedIn `/jobs/view/<id>`) and the card body
-around them, never on a subject line or a greeting. A board's wording changes between the
-first "your alert has been created" email and the later "new jobs" ones; the link shapes
-and the per-card labels do not.
+(hh `/vacancy/<id>`, habr `/vacancies/<id>`, LinkedIn `/jobs/view/<id>`, Glassdoor's
+`jobListingId`) and the card body around them, never on a subject line or a greeting. A
+board's wording changes between the first "your alert has been created" email and the later
+"new jobs" ones; the link shapes and the per-card labels do not.
+
+Most boards are parsed from the `text/html` part. Wellfound is the exception: its HTML wraps
+every posting link in an opaque `links.wellfound.com/s/c/...` tracking redirect that carries
+no job id, while the `text/plain` alternative keeps the real `wellfound.com/jobs?job_listing_slug=<id>`
+URLs. So a parser is handed both bodies (`_Alert`) and reads whichever one carries a stable id.
 """
 
 from __future__ import annotations
@@ -107,6 +112,13 @@ def _write_token(token_path: Path, creds: Credentials) -> None:
 # --------------------------------------------------------------------------------------
 
 
+class _Alert(NamedTuple):
+    """The two rendered bodies of one alert email; a parser reads whichever it needs."""
+
+    html: str
+    text: str
+
+
 class _Card(NamedTuple):
     """A single posting pulled from an alert: the title anchor plus its trailing lines."""
 
@@ -180,8 +192,9 @@ _HH_REMOTE = "Можно удал"
 _HH_VIEW = "Посмотреть вакансию"
 
 
-def _parse_hh(html: str) -> list[NormalizedJob]:
+def _parse_hh(alert: _Alert) -> list[NormalizedJob]:
     """hh.ru alerts: each card is a title link, then salary/company/location lines."""
+    html = alert.html
     titles = [
         _Card(text, m.group(1), f"https://hh.ru/vacancy/{m.group(1)}", [])
         for href, text in _anchors(html)
@@ -225,8 +238,9 @@ def _habr_destination(href: str) -> str:
     return parse_qs(urlparse(href.replace("&amp;", "&")).query).get("url", [""])[0]
 
 
-def _parse_habr(html: str) -> list[NormalizedJob]:
+def _parse_habr(alert: _Alert) -> list[NormalizedJob]:
     """Habr Career alerts: labelled fields (Компания / Город / Дополнительно / навыки)."""
+    html = alert.html
     titles = [
         _Card(text, m.group(1), f"https://career.habr.com/vacancies/{m.group(1)}", [])
         for href, text in _anchors(html)
@@ -273,8 +287,9 @@ _LI_NOISE = re.compile(
 )
 
 
-def _parse_linkedin(html: str) -> list[NormalizedJob]:
+def _parse_linkedin(alert: _Alert) -> list[NormalizedJob]:
     """LinkedIn job-alert emails: title link, then a "Company · Location" line."""
+    html = alert.html
     seen: set[str] = set()
     titles: list[_Card] = []
     for href, text in _anchors(html):
@@ -308,30 +323,143 @@ def _parse_linkedin(html: str) -> list[NormalizedJob]:
     return jobs
 
 
-#: Sender-domain substring -> parser. First match wins; unknown senders yield nothing.
-_PARSERS: tuple[tuple[str, Callable[[str], list[NormalizedJob]]], ...] = (
-    ("hh.ru", _parse_hh),
-    ("career.habr.com", _parse_habr),
-    ("linkedin.com", _parse_linkedin),
+def _paragraphs(text: str) -> list[str]:
+    """Blank-line-separated paragraphs, each with its soft-wrapped lines joined into one.
+
+    A plain-text alert wraps a field (Wellfound's location can be a 60-city list) across many
+    physical lines but separates real fields with a blank line. Collapsing to paragraphs turns
+    those wraps back into one logical value per field.
+    """
+    paras: list[str] = []
+    buffer: list[str] = []
+    for line in text.splitlines():
+        stripped = " ".join(line.split())
+        if stripped:
+            buffer.append(stripped)
+        elif buffer:
+            paras.append(" ".join(buffer))
+            buffer = []
+    if buffer:
+        paras.append(" ".join(buffer))
+    return paras
+
+
+#: A Wellfound card's "Company / 11-50 Employees" line — the structural anchor of each posting.
+_WF_COMPANY = re.compile(r"^(?P<name>.+?) / .+ Employees$")
+#: The real posting link, present only in the text/plain body (the HTML link is opaque).
+_WF_JOB = re.compile(r"wellfound\.com/jobs\?job_listing_slug=(\d+)-[^\s>|]*")
+#: Non-place segments of the "salary | location | exp | type" line.
+_WF_JOBTYPE = frozenset({"Full-time", "Part-time", "Contract", "Internship"})
+
+
+def _parse_wellfound(alert: _Alert) -> list[NormalizedJob]:
+    """Wellfound alerts, from the text/plain body: title, "Company / size", "… location …".
+
+    Each posting is a run of paragraphs anchored on its "Company / N Employees" line: the
+    paragraph before it is the title, the one after is the "salary | location | exp | type"
+    line, and the next `job_listing_slug` URL is the posting's stable link and id.
+    """
+    paras = _paragraphs(alert.text)
+    jobs: list[NormalizedJob] = []
+    for i, para in enumerate(paras):
+        company_match = _WF_COMPANY.match(para)
+        if not company_match or i == 0:
+            continue
+        job_match = next((m for p in paras[i + 1 :] if (m := _WF_JOB.search(p))), None)
+        if job_match is None:
+            continue
+        location_line = paras[i + 1] if i + 1 < len(paras) else ""
+        segments = [seg.strip() for seg in location_line.split("|")]
+        remote = any("remote" in seg.lower() for seg in segments)
+        places = [
+            seg
+            for seg in segments
+            if seg and seg[0] not in "$€£" and "years of exp" not in seg and seg not in _WF_JOBTYPE
+        ]
+        location = re.sub(r"^Remote only,?\s*", "", ", ".join(places)).strip() or None
+        jobs.append(
+            NormalizedJob(
+                url="https://" + job_match.group(0),
+                company=company_match.group("name").strip(),
+                title=paras[i - 1],
+                location=location,
+                is_remote=remote,
+                external_id=job_match.group(1),
+            )
+        )
+    return jobs
+
+
+#: Each Glassdoor posting is one <a> wrapping the whole card; the id rides in the href.
+_GD_ANCHOR = re.compile(r"<a\b[^>]*jobListing\.htm[^>]*>(.*?)</a>", re.DOTALL | re.IGNORECASE)
+_GD_HREF = re.compile(r'href="([^"]*)"', re.IGNORECASE)
+_GD_JID = re.compile(r"jobListingId=(\d+)")
+#: A trailing " 4.2 ★" employer rating hangs off the company name; drop it.
+_GD_RATING = re.compile(r"\s+\d(?:\.\d)?\s*★.*$")
+#: Chrome lines under the location (salary estimate, apply badge, posting age, footer CTAs).
+_GD_NOISE = re.compile(
+    r"Employer est\.|Easy Apply|Just posted|^\d+[hdwm]$|See more jobs|Want more", re.IGNORECASE
 )
 
 
-def parse_message(sender: str, html: str) -> list[NormalizedJob]:
+def _parse_glassdoor(alert: _Alert) -> list[NormalizedJob]:
+    """Glassdoor alerts: each posting is a single <a> card of company / title / location lines."""
+    jobs: list[NormalizedJob] = []
+    for anchor in _GD_ANCHOR.finditer(alert.html):
+        href_match = _GD_HREF.search(anchor.group(0))
+        id_match = _GD_JID.search(href_match.group(1)) if href_match else None
+        lines = [line for line in strip_html(anchor.group(1)).splitlines() if line.strip()]
+        if id_match is None or len(lines) < 2:
+            continue
+        company = _GD_RATING.sub("", lines[0]).strip()
+        title = lines[1].strip()
+        location = next((line.strip() for line in lines[2:] if not _GD_NOISE.search(line)), None)
+        if not company or not title:
+            continue
+        jobs.append(
+            NormalizedJob(
+                url=f"https://www.glassdoor.com/job-listing/j?jl={id_match.group(1)}",
+                company=company,
+                title=title,
+                location=location,
+                is_remote="remote" in f"{title} {location or ''}".lower(),
+                external_id=id_match.group(1),
+            )
+        )
+    return jobs
+
+
+#: Sender-domain substring -> parser. First match wins; unknown senders yield nothing.
+_PARSERS: tuple[tuple[str, Callable[[_Alert], list[NormalizedJob]]], ...] = (
+    ("hh.ru", _parse_hh),
+    ("career.habr.com", _parse_habr),
+    ("linkedin.com", _parse_linkedin),
+    ("wellfound.com", _parse_wellfound),
+    ("glassdoor.com", _parse_glassdoor),
+)
+
+
+def parse_message(sender: str, html: str, text: str = "") -> list[NormalizedJob]:
     """Dispatch one alert email to the parser for its board. Unknown sender -> []."""
+    alert = _Alert(html=html, text=text)
     low = sender.lower()
     for needle, parser in _PARSERS:
         if needle in low:
-            return parser(html)
+            return parser(alert)
     return []
 
 
-def _sender_and_html(msg: EmailMessage) -> tuple[str, str]:
-    """Pull the From header and the text/html body out of a parsed email."""
+def _sender_and_bodies(msg: EmailMessage) -> tuple[str, str, str]:
+    """Pull the From header and the text/html and text/plain bodies out of a parsed email."""
     sender = str(msg.get("From", ""))
+    html = text = ""
     for part in msg.walk():
-        if part.get_content_type() == "text/html":
-            return sender, part.get_content()
-    return sender, ""
+        content_type = part.get_content_type()
+        if content_type == "text/html" and not html:
+            html = part.get_content()
+        elif content_type == "text/plain" and not text:
+            text = part.get_content()
+    return sender, html, text
 
 
 def parse_raw_email(raw: bytes) -> list[NormalizedJob]:
@@ -339,8 +467,8 @@ def parse_raw_email(raw: bytes) -> list[NormalizedJob]:
     msg = message_from_bytes(raw, policy=policy.default)
     if not isinstance(msg, EmailMessage):  # pragma: no cover - default policy yields EmailMessage
         return []
-    sender, html = _sender_and_html(msg)
-    return parse_message(sender, html) if html else []
+    sender, html, text = _sender_and_bodies(msg)
+    return parse_message(sender, html, text) if (html or text) else []
 
 
 @register
@@ -349,7 +477,8 @@ class GmailAlertsAdapter(BaseAdapter):
 
     Expected config keys (Source.config JSONB):
       query: str, a Gmail search query spanning every board that emails alerts, e.g.
-             'newer_than:2d (from:hh.ru OR from:career.habr.com OR from:linkedin.com)'
+             'newer_than:2d (from:hh.ru OR from:career.habr.com OR from:linkedin.com
+              OR from:wellfound.com OR from:glassdoor.com)'
       max_results: int, cap on messages pulled per run.
     """
 

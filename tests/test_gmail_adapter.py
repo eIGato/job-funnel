@@ -65,8 +65,45 @@ def test_linkedin_splits_company_and_reads_remote_from_location() -> None:
     assert jobs[1].is_remote is True  # "Remote (Europe)"
 
 
+def test_wellfound_reads_the_plaintext_body_not_the_opaque_html_links() -> None:
+    # Wellfound's HTML wraps each posting in a link-less tracking redirect; the real URL and id
+    # live only in text/plain. Parsing must come from there.
+    jobs = _jobs("wellfound")
+    assert len(jobs) == 2
+    first = jobs[0]
+    assert first.title == "Senior Python Engineer"
+    assert first.company == "Nimbus Labs"  # taken from the "Company / N Employees" line
+    assert first.is_remote is True
+    assert first.location == "Berlin, Lisbon, Remote"  # "Remote only, " prefix stripped
+    assert (
+        str(first.url)
+        == "https://wellfound.com/jobs?job_listing_slug=4468480-senior-python-engineer"
+    )
+    assert first.external_id == "4468480"
+    # A single-city, non-remote posting keeps its city and is not flagged remote.
+    assert jobs[1].company == "Orbital Freight"
+    assert jobs[1].location == "Amsterdam"
+    assert jobs[1].is_remote is False
+
+
+def test_glassdoor_reads_the_card_anchor_and_builds_a_stable_url() -> None:
+    jobs = _jobs("glassdoor")
+    assert len(jobs) == 3  # the trailing "See more jobs" link is not a jobListing anchor
+    first = jobs[0]
+    assert first.title == "Senior Python Developer (m/w/d)"
+    assert first.company == "Acme Analytics"  # the " 4.5 ★" employer rating was stripped
+    assert first.location == "Berlin"  # salary / Easy Apply / age lines were skipped
+    assert first.is_remote is False
+    # The URL is a stable canonical built from jobListingId, not the volatile tracking href.
+    assert str(first.url) == "https://www.glassdoor.com/job-listing/j?jl=1010200000001"
+    assert first.external_id == "1010200000001"
+    # Remote is read from the title text.
+    assert jobs[1].title.startswith("Backend Engineer") and jobs[1].title.endswith("Remote")
+    assert jobs[1].is_remote is True
+
+
 def test_content_hashes_are_distinct_within_a_message() -> None:
-    for name in ("hh", "habr", "linkedin"):
+    for name in ("hh", "habr", "linkedin", "wellfound", "glassdoor"):
         jobs = _jobs(name)
         hashes = [j.content_hash for j in jobs]
         assert len(set(hashes)) == len(hashes)
