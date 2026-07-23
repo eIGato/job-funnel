@@ -47,8 +47,10 @@ _PROVIDER_ENV: dict[str, str] = {
 _INSTRUCTIONS = (
     "You draft short, honest cover letters for a job seeker. You are given a posting and a "
     "set of the seeker's real experience bullets already selected as most relevant. Write a "
-    "concise letter (roughly 150-220 words) that connects that experience to the posting's "
-    "needs. Ground every claim in the provided bullets — never invent employers, titles, "
+    "short letter that connects that experience to the posting's needs. Length follows the "
+    "style sample rather than a word target — usually 40-120 words, and one or two sentences "
+    "for a chat message. Never pad to reach a length. "
+    "Ground every claim in the provided bullets — never invent employers, titles, "
     "numbers, or skills the bullets do not support. No greeting-name guesses, no placeholders "
     "like [Company]; use the real company name given. Write in the language you are told to. "
     "You produce a draft only; a human reviews and sends it.\n\n"
@@ -128,8 +130,9 @@ def _build_prompt(job: Job, bullets: list[str], language: str) -> str:
     experience = "\n".join(f"- {bullet}" for bullet in bullets) or "- (no bullets retrieved)"
     style = _writing_style()
     style_block = (
-        "\n\nMY WRITING STYLE — a sample of how I actually write. Match its tone, rhythm and "
-        "plainness; do NOT reuse its wording or its facts:\n"
+        "\n\nMY WRITING STYLE — how I actually write to recruiters. Match its tone, rhythm and "
+        "length. Its scaffolding (greeting, CV link, closing) is meant to be reused verbatim; "
+        "its role-specific claims are NOT — those come from MY RELEVANT EXPERIENCE above:\n"
         f"{style}"
         if style
         else ""
