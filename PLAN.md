@@ -534,10 +534,31 @@ trick as "chat with your PDF", except the retrieval is over CV bullets.
   pure cosine (no invented penalty multiplier); the ordering is a composite sort
   **`(is_remote DESC, match_score DESC)`** in the admin and when picking top-N for drafting.
 
+- **Seniority floor and stop-stack (Phase 4a)** (2026-07-24).
+  - **Floor is Middle.** A posting whose *title* names a level below Middle (junior / intern /
+    trainee / entry-level) with no Middle-or-above level is dropped. A range that reaches the
+    floor ("Junior/Middle") is kept; an unspecified level is kept. Read from the title only, so
+    "we mentor junior engineers" in a senior role's body does not trip it.
+  - **Stop-stack: one hard item — training neural networks as the primary role**, keyed on the
+    title. Working *with* AI/LLMs is wanted (the funnel widens toward AI orchestration), so this
+    targets model-training titles ("ML Engineer", "Deep Learning Scientist"), not "AI Engineer".
+    An ML *platform/infra/backend* title is ordinary backend work and is kept.
+  - **Soft preferences are NOT hard filters.** PHP / Node / fullstack as a *secondary* focus, or
+    with extra pay, and "is training the priority here?" are judgments about a role's emphasis
+    that pure code cannot make well. They are deferred to the **decide-worth-it** node of the
+    Phase 7 agent layer, which reads the whole posting — not forced into a regex. This preserves
+    the pure-cosine `match_score` decision above.
+
+- **Montenegro on-site** (2026-07-24). **Not filtered.** The local IT market is a fraction of a
+  percent of the input stream and the human would take a cheap local gig, so a hard filter would
+  cost more in false positives than it could ever save. The DNV question is moot for the funnel.
+
+- **The agent layer: pydantic-graph** (2026-07-24). Coherent with the existing pydantic /
+  pydantic-ai stack, lighter, no second ecosystem. LangGraph's resume-line recognizability was
+  weighed and declined. Not built yet — this only records the library choice for Phase 7.
+
 ### Still open
 
-- **Montenegro on-site postings**: the DNV is believed to forbid working for local employers,
-  which would make them a reject. Not a lawyer, rules change — the human confirms.
 - **Which boards actually have an available API/alerts today** — verify while building Phase 3.
-- **The rest of the hard-filter criteria** (Phase 4a): seniority floor, stop-stack.
-- **The agent layer:** LangGraph or pydantic-graph.
+- **Telegram ingest account** (Phase 3.5 C): a dedicated number + login code. Deferred by the
+  human (2026-07-24) — it only widens the ingest funnel and is not needed for the MVP.

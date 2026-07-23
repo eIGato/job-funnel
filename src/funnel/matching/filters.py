@@ -1,8 +1,6 @@
 """Hard filters (Phase 4a). Deterministic code, no LLM, no tokens.
 
-Cheaply discards obvious misses *before* embedding, so only survivors get embedded. The rules
-here are the ones PLAN.md section 7 records as *answered*; the still-open criteria (a seniority
-floor, a stop-stack) are not invented here.
+Cheaply discards obvious misses *before* embedding, so only survivors get embedded.
 
 Answered geography rules (PLAN.md section 7):
   - RU / BY work locations: a hard stop.
@@ -12,6 +10,19 @@ Answered geography rules (PLAN.md section 7):
   - On-site / hybrid without explicit sponsorship: KEPT (companies sponsor on request without
     saying so); it merely ranks below remote, and ranking is a sort, not this predicate.
   - Timezone: not filtered at all.
+  - Montenegro on-site: deliberately NOT filtered (decided 2026-07-24). The local IT market is
+    a fraction of a percent of the input stream, and the human would take a cheap local gig, so
+    a hard filter there would cost more in false positives than it could ever save.
+
+Answered seniority / stop-stack (PLAN.md section 7, decided 2026-07-24):
+  - Seniority floor is Middle: a posting whose *title* names a level below Middle
+    (junior / intern / trainee / entry-level) and no Middle-or-above level is dropped.
+  - The only hard stop-stack item is training neural networks *as the primary role*, keyed on
+    the title (the title is the "is this the priority?" signal). Working *with* AI/LLMs is
+    wanted, not stopped — this targets model-training roles, not AI-orchestration ones. The
+    softer preferences (PHP / Node / fullstack as a secondary focus, extra pay) are a judgment
+    about a role's *emphasis*, which pure code cannot make well; they are deferred to the
+    decide-worth-it node of the Phase 7 agent layer, not forced into a regex here.
 """
 
 from __future__ import annotations
@@ -61,9 +72,46 @@ _CONTRACTOR_OK = re.compile(
 #: multi-region net like "must be located in the Americas, Europe, or Israel" is a false positive.
 _REGION_OK = re.compile(r"europe|\beu\b|\beea\b|\bemea\b|anywhere|world-?wide", re.IGNORECASE)
 
-#: Unconditional stops: clearances a RU citizen cannot obtain. OPEN (PLAN.md section 7): the
-#: seniority floor and stop-stack are still to be agreed — this stays a small, honest seed.
+#: Unconditional stops: clearances a RU citizen cannot obtain.
 STOP_PHRASES: frozenset[str] = frozenset({"security clearance"})
+
+#: A level below the Middle floor, read from the TITLE only — level is a title thing, and this
+#: keeps "we mentor junior engineers" in a senior role's body from tripping the filter.
+_JUNIOR_TITLE = re.compile(
+    r"\b(?:junior|jr\.?|intern(?:ship)?|trainee|entry[-\s]?level|new[-\s]?grad(?:uate)?)\b"
+    r"|стаж[её]р|младш|джуниор|начинающ",  # noqa: RUF001 (Cyrillic is the point)
+    re.IGNORECASE,
+)
+#: Middle-or-above named in the title. A junior-tagged title that ALSO admits one of these
+#: ("Junior/Middle", "Middle/Senior") is a range that reaches the floor, so it is kept.
+_MIDDLE_PLUS_TITLE = re.compile(
+    r"\b(?:middle|mid[-\s]?level|mid[-\s]?senior|senior|sr\.?|lead|staff|principal|architect)\b"
+    r"|миддл|мидл|сеньор|ведущ|старш",
+    re.IGNORECASE,
+)
+
+#: Training neural networks as the primary role, keyed on the title. Working *with* AI is wanted
+#: (the funnel widens toward AI orchestration), so "AI Engineer" is deliberately absent — this
+#: targets model-building/training titles, not LLM-application ones.
+_ML_TRAINING_TITLE = re.compile(
+    r"\b(?:machine[-\s]learning engineer|ml engineer|ml scientist|"
+    r"machine[-\s]learning scientist|deep[-\s]learning (?:engineer|scientist))\b",
+    re.IGNORECASE,
+)
+#: ...unless the title marks it as the engineering *around* ML rather than training models. An
+#: ML platform / infra / backend role is ordinary backend work and stays.
+_ML_ADJACENT_TITLE = re.compile(
+    r"platform|infrastructure|\binfra\b|backend|back[-\s]end|devops|mlops|data engineer",
+    re.IGNORECASE,
+)
+
+
+def _below_middle(title: str) -> bool:
+    return bool(_JUNIOR_TITLE.search(title)) and not _MIDDLE_PLUS_TITLE.search(title)
+
+
+def _ml_training_primary(title: str) -> bool:
+    return bool(_ML_TRAINING_TITLE.search(title)) and not _ML_ADJACENT_TITLE.search(title)
 
 
 def passes_hard_filters(job: _Filterable) -> bool:
@@ -73,6 +121,9 @@ def passes_hard_filters(job: _Filterable) -> bool:
     haystack = f"{job.title}\n{job.description}\n{job.location or ''}"
     folded = haystack.casefold()
     if any(phrase in folded for phrase in STOP_PHRASES):
+        return False
+    # Seniority and the one hard stop-stack item read the title only (its priority signal).
+    if _below_middle(job.title) or _ml_training_primary(job.title):
         return False
     # A remote posting locked to a geography we cannot satisfy, with no contractor door and no
     # Europe/worldwide admission, is out.

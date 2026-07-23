@@ -130,3 +130,52 @@ def test_empty_matrix_is_handled() -> None:
 def test_embedding_bytes_roundtrip() -> None:
     vector = np.array([0.1, -0.2, 0.3], dtype=np.float32)
     assert np.array_equal(from_bytes(to_bytes(vector)), vector)
+
+
+def test_junior_title_is_below_the_middle_floor(job: NormalizedJob) -> None:
+    for title in (
+        "Junior Python Developer",
+        "Backend Intern",
+        "Trainee Engineer",
+        "Младший разработчик",
+    ):
+        blocked = job.model_copy(update={"title": title})
+        assert passes_hard_filters(blocked) is False, title
+
+
+def test_a_junior_middle_range_is_kept(job: NormalizedJob) -> None:
+    # The floor is Middle; a range that reaches it stays.
+    ok = job.model_copy(update={"title": "Junior/Middle Python Developer"})
+    assert passes_hard_filters(ok) is True
+
+
+def test_unspecified_and_senior_levels_are_kept(job: NormalizedJob) -> None:
+    for title in ("Backend Developer", "Senior Python Engineer", "Lead Backend Engineer"):
+        ok = job.model_copy(update={"title": title})
+        assert passes_hard_filters(ok) is True, title
+
+
+def test_mentoring_juniors_in_the_body_does_not_trip_the_floor(job: NormalizedJob) -> None:
+    ok = job.model_copy(
+        update={"title": "Backend Engineer", "description": "You will mentor junior developers."}
+    )
+    assert passes_hard_filters(ok) is True
+
+
+def test_ml_training_role_is_stopped(job: NormalizedJob) -> None:
+    for title in ("Machine Learning Engineer", "ML Engineer", "Deep Learning Scientist"):
+        blocked = job.model_copy(update={"title": title})
+        assert passes_hard_filters(blocked) is False, title
+
+
+def test_working_with_ai_is_not_stopped(job: NormalizedJob) -> None:
+    # Using AI/LLMs is wanted; only training models as the primary role is stopped.
+    for title in ("AI Engineer", "Backend Engineer (LLM apps)", "Python Developer, AI tooling"):
+        ok = job.model_copy(update={"title": title})
+        assert passes_hard_filters(ok) is True, title
+
+
+def test_ml_platform_engineering_is_kept(job: NormalizedJob) -> None:
+    # Engineering around ML is ordinary backend work, not model training.
+    ok = job.model_copy(update={"title": "Machine Learning Platform Engineer"})
+    assert passes_hard_filters(ok) is True
