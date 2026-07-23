@@ -51,3 +51,19 @@ def test_draft_cover_letter_returns_structured_output_offline(
     letter = asyncio.run(draft_cover_letter(job, agent=agent))
     assert isinstance(letter, CoverLetterDraft)
     assert letter.subject and letter.body  # the structured fields are populated
+
+
+def test_ungrounded_points_flags_invented_claims() -> None:
+    """The live 2026-07-23 failure: matched_points listing CV entries that do not exist."""
+    bullets = [
+        "Python backend developer with FastAPI, PostgreSQL and Kafka",
+        "Maintained a crypto derivatives exchange backend under high load",
+    ]
+    invented = ["Hands-on experience with AI video tools (Kling, Seedance)"]
+    assert cover_letter.ungrounded_points(bullets, invented) == invented
+
+
+def test_ungrounded_points_accepts_paraphrase_of_real_bullets() -> None:
+    bullets = ["Python backend developer with FastAPI, PostgreSQL and Kafka"]
+    genuine = ["Python backend developer, FastAPI and PostgreSQL"]
+    assert cover_letter.ungrounded_points(bullets, genuine) == []

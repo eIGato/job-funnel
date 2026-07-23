@@ -60,8 +60,16 @@ _INSTRUCTIONS = (
     "something'), state the match as fact, and end on one concrete next step. Persuade with "
     "evidence and specifics, never with adjectives.\n"
     "- Carry the posting's own words for its key requirement — that phrase is what a skimming "
-    "recruiter and a keyword filter both look for. Work in the technologies the posting names, "
-    "as long as the bullets support them.\n\n"
+    "recruiter and a keyword filter both look for — BUT only when a bullet actually supports "
+    "the claim. Naming a requirement is not the same as having met it.\n\n"
+    "GROUNDING, which overrides everything above. The bullets are the only facts you have. If "
+    "they do not support the posting's core requirement, do NOT claim it: write the shorter, "
+    "honest letter about the overlap that does exist, or state plainly that the overlap is "
+    "partial. Never restate a requirement from the posting as your own experience, and never "
+    "name a tool, platform or domain that is absent from the bullets. `matched_points` must "
+    "quote the bullets you actually used, close to verbatim — it is the human's audit trail, "
+    "and inventing entries there is the worst thing you can do here. Copy any URL character "
+    "for character; never shorten, tidy or reconstruct a link.\n\n"
     "FORMATTING: `body` must contain real newline characters and never be one run-on block. "
     "Greeting on its own line, then one or two short paragraphs, then the closing/next step as "
     "its own last paragraph. Separate paragraphs with a blank line. This holds for every "
@@ -95,6 +103,47 @@ def _profile_bullets() -> tuple[str, ...]:
 def _bullet_matrix() -> NDArray[np.float32]:
     """Embed the profile bullets once (passage side of the e5 pair)."""
     return embed_texts(list(_profile_bullets()), is_query=False)
+
+
+#: A word shorter than this is a preposition or filler; counting it would let any sentence look
+#: grounded just by sharing "with" and "the".
+_MIN_TOKEN_CHARS = 5
+#: Share of a matched_point's words that must also appear in the retrieved bullets for it to
+#: count as grounded. Loose enough for paraphrase, tight enough to catch a fabricated claim.
+_GROUNDING_RATIO = 0.5
+
+
+class UngroundedDraftError(RuntimeError):
+    """The model claimed experience the retrieved bullets do not support.
+
+    Raised instead of returning the letter. Observed live on 2026-07-23: for a posting whose
+    requirements the profile does not meet at all, the model wrote a fluent letter asserting the
+    *posting's* requirements as the seeker's experience, and filled `matched_points` with CV
+    points that do not exist. A fabricated draft in front of a human is worse than no draft — it
+    only has to be believed once to be sent.
+    """
+
+
+def _tokens(text: str) -> set[str]:
+    return {w for w in re.split(r"[^\w]+", text.lower()) if len(w) >= _MIN_TOKEN_CHARS}
+
+
+def ungrounded_points(bullets: list[str], points: list[str]) -> list[str]:
+    """The claimed CV points that the retrieved bullets do not actually support.
+
+    Deterministic and cheap: the model is asked to quote what it leaned on, and this checks that
+    the quotes came from what it was given. It cannot catch every hallucination in the prose,
+    but it catches the failure that matters — inventing the evidence itself.
+    """
+    vocabulary = _tokens(" ".join(bullets))
+    if not vocabulary:
+        return []
+    offenders = []
+    for point in points:
+        words = _tokens(point)
+        if words and len(words & vocabulary) / len(words) < _GROUNDING_RATIO:
+            offenders.append(point)
+    return offenders
 
 
 @lru_cache
@@ -175,4 +224,16 @@ async def draft_cover_letter(
     bullets = retrieve_cv_bullets(job)
     prompt = _build_prompt(job, bullets, _detect_language(job))
     result = await active.run(prompt)
-    return result.output
+    draft = result.output
+
+    # Refuse the draft rather than hand a human a fluent fabrication to review. This fires when
+    # the posting is a poor fit: with no relevant bullets to use, the model fills the gap from
+    # the posting's own requirements. Note the match score does not catch it — the live case
+    # scored 0.841, barely under the best genuine match in the shortlist.
+    offenders = ungrounded_points(bullets, draft.matched_points) if bullets else []
+    if offenders and len(offenders) * 2 > len(draft.matched_points):
+        raise UngroundedDraftError(
+            f"{len(offenders)}/{len(draft.matched_points)} claimed CV points are not supported "
+            f"by the retrieved bullets, e.g. {offenders[0]!r}. Not drafted."
+        )
+    return draft
