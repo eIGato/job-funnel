@@ -7,6 +7,7 @@ Importing the modules below populates the registry. Keep those imports here so t
 from funnel.adapters import (  # noqa: F401  (imported for registration)
     adzuna,
     arbeitnow,
+    ats,
     gmail,
     remoteok,
     remotive,

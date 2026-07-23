@@ -18,9 +18,11 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Index,
+    Integer,
     LargeBinary,
     String,
     Text,
+    UniqueConstraint,
     event,
     func,
 )
@@ -47,6 +49,14 @@ class SourceKind(enum.StrEnum):
     RSS = "rss"
     API = "api"
     GMAIL = "gmail"
+
+
+class AtsProvider(enum.StrEnum):
+    """Applicant tracking systems with a public, no-auth board API (PLAN.md Phase 3.5 D)."""
+
+    GREENHOUSE = "greenhouse"
+    LEVER = "lever"
+    ASHBY = "ashby"
 
 
 class ApplyChannel(enum.StrEnum):
@@ -224,6 +234,38 @@ class Application(Base):
 
     def __str__(self) -> str:
         return f"{self.job_id}: {self.status}"
+
+
+class AtsBoard(Base):
+    """A company board on an ATS, discovered rather than hand-listed (PLAN.md Phase 3.5 D).
+
+    DECIDED (2026-07-23), resolving the plan's open sub-decisions:
+    - **Its own table, not `Source.config`.** Each slug carries mutable per-slug state — when
+      it was last productive, how many empty runs it has had — and a JSONB blob rewritten by
+      three adapters on every run would be both awkward and a lost-update waiting to happen.
+    - **Pruned after `_MAX_EMPTY_RUNS` consecutive barren runs** (or a 404). Disabled, never
+      deleted, so the same slug is not rediscovered and re-probed forever.
+    - **No cross-probing** a new slug against the other two ATSs: slugs are namespaced per
+      vendor, the hit rate is tiny, and it would triple outbound requests for it.
+    """
+
+    __tablename__ = "ats_boards"
+    __table_args__ = (UniqueConstraint("provider", "slug", name="uq_ats_boards_provider_slug"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider: Mapped[AtsProvider] = mapped_column(Enum(AtsProvider, native_enum=False), index=True)
+    slug: Mapped[str] = mapped_column(String(120))
+    #: The posting URL the slug was spotted in — the audit trail for "why are we watching this".
+    discovered_from: Mapped[str | None] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    #: Consecutive runs that returned nothing. Reset on any success; at the cap, `enabled` goes
+    #: false and the board stops costing a request per run.
+    empty_runs: Mapped[int] = mapped_column(Integer, default=0)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    def __str__(self) -> str:
+        return f"{self.provider}:{self.slug}"
 
 
 class Reply(Base):

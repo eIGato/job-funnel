@@ -271,7 +271,7 @@ teletype sources carry **full descriptions**, which is what makes a real cover l
   `opento_relocate` (mixed; partly-paywalled WantApply digests). Dropped: `remotegeekjob`
   (heterogeneous LinkedIn/geekjob links, no full text, not parseable without an LLM). **Done when:**
   `telegram` ingests from ≥1 channel via a read-only session.
-- **[ ] D. Self-growing ATS slugs (`greenhouse` / `lever` / `ashby`).** No hand-kept slug list. Instead:
+- **[x] D. Self-growing ATS slugs (`greenhouse` / `lever` / `ashby`).** No hand-kept slug list. Instead:
   when any ingested posting links to an ATS board, extract the company slug and record it; the ATS
   adapters then monitor those slugs via the public no-auth board APIs (full descriptions — Greenhouse
   `boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true`, Lever `api.lever.co/v0/postings/
@@ -285,6 +285,21 @@ teletype sources carry **full descriptions**, which is what makes a real cover l
 **Done when (phase):** at least `teletype` + `adzuna` are live and ingesting full-description
 postings; the Telegram and ATS-slug tracks are wired or explicitly deferred with their sub-decisions
 recorded here.
+
+Progress 2026-07-23 — **D done; only C (Telegram) is left, and it is blocked on the human.** The
+three ATS adapters share one base: each run scans the most recent postings for links to *its own*
+ATS, records new company slugs, then polls every enabled board. Discovery lives in the adapter, not
+in ingest, so the pipeline still knows nothing about specific sources. The plan's three open
+sub-decisions are now answered in `models.AtsBoard`: slugs live in their **own table** (each carries
+mutable per-slug state that a JSONB blob rewritten by three adapters would turn into lost updates);
+a board is **disabled after 4 consecutive barren runs** or a 404, never deleted, so a dead slug is
+not rediscovered and re-probed forever; and there is **no cross-probing** a slug on the other two
+ATSs (slugs are vendor-namespaced, the hit rate is tiny, and it would triple outbound requests).
+All three endpoints verified live: Greenhouse `stripe` → 527 postings with ~3 kB descriptions,
+Lever `ro` → 51, Ashby `ramp` → 121 with `isRemote` parsed. Slug discovery over the 339 postings
+already in the database finds **nothing yet**, which is expected and not a bug: those came from
+boards whose clipped descriptions carry no apply-links. The mechanism starts paying out once
+teletype/Adzuna/alert postings — which do carry them — have been ingested.
 
 ### [x] Phase 4 — Matching
 - **4a. Hard filters (code, free):** remote, timezone, seniority, stack, stop-list
@@ -351,12 +366,35 @@ re-run neither regenerates nor clobbers a letter (or a human edit). Details:
 - Offline tests use a pydantic-ai `TestModel` + monkeypatched retrieval — no network, no model
   download. `LLM_API_KEY` is now set in `.env` (gitignored).
 
-### [ ] Phase 6 — Tracking + reply handling
+### [x] Phase 6 — Tracking + reply handling
 - The human sets status `sent` from sqladmin (after sending by hand).
 - Incoming: the Gmail API pulls replies; a **pydantic-ai** classifier with structured output
   (Enum `rejection` / `interview` / `no_reply`) sets `reply_type`.
 
 **Done when:** sqladmin shows the funnel with statuses, and incoming replies get a `reply_type`.
+
+Built 2026-07-23 — `funnel check-replies`, offline-tested but **not yet live-verified**, because
+nothing has been marked `sent` yet: with no sent application there is nothing to correlate, and a
+live run would only classify unrelated personal mail and store its bodies in the database. Run it
+against the first real answer instead. Three passes, none of which guesses:
+1. **Link.** For applications marked sent with no thread yet, search *Sent* mail (the read-only
+   scope covers it) for the message the human sent by hand. Only an unambiguous hit is stored, so
+   the system learns the thread without ever touching the outbox.
+2. **Fetch.** Read incoming mail, skipping anything already recorded. Idempotent on Gmail's
+   message id: nothing is re-classified or re-billed.
+3. **Classify and apply.** pydantic-ai structured output sets `reply_type`. An unmatched reply, or
+   one below `reply_confidence_threshold` (0.7), is **recorded but leaves the Application status
+   alone** — a wrong auto-status hides a real interview, an unread row does not.
+
+Correlation (`replies/match.py`) is deterministic and offline-testable: by thread, then sender
+domain, then company name in the subject, each requiring a *unique* hit. ATS and freemail domains
+are excluded from domain matching — which is exactly the case a `form` application produces, hence
+the subject fallback. A new **`Reply`** table rather than columns on Application, because a reply
+can match nothing and still need review, the classifier's confidence and reasoning need a home,
+and one application can draw several replies (auto-ack, then the real answer). `ON DELETE SET
+NULL`: losing an Application must not erase the record that somebody wrote back. The admin gained
+a Replies view — unmatched rows have no Application, and linking one by hand is how a human
+corrects the machine.
 
 ### [ ] Phase 7 — Orchestration
 - `funnel run-funnel` = `ingest` → `match` → `draft` (no sending).
@@ -371,6 +409,15 @@ re-run neither regenerates nor clobbers a letter (or a human edit). Details:
 
 **Done when:** the timer runs the whole funnel end to end and a shortlist + drafts arrive at
 your desk.
+
+Progress 2026-07-23 — **units written, install is the human's to run.** `deploy/funnel.service`
+(oneshot) + `deploy/funnel.timer` (3x/day, `Persistent=true` so a sleeping laptop runs the missed
+occurrence once on the next boot), verified with `systemd-analyze verify`, plus `deploy/README.md`.
+A **user** timer, so no root — at the cost of two things that silently break it and are documented
+there: `loginctl enable-linger` (or it only runs while logged in) and `docker` group membership.
+`check-replies` is deliberately **not** on the schedule: it needs applications the human has marked
+sent, it reads the mailbox and calls the LLM, and a Gmail token due for re-auth must not fail a
+nightly ingest. The agent layer stays open — it waits on the LangGraph/pydantic-graph decision.
 
 ### [ ] Phase 8 — AWS (DEFERRED; do not start until Phases 1–7 work)
 A portfolio artifact, not the funnel's home. The shape is **serverless batch**, NOT

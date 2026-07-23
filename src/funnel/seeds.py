@@ -64,6 +64,14 @@ DEFAULT_SOURCES: list[SourceConfig] = [
             "pages": 2,
         },
     ),
+    # Self-growing ATS boards (Phase 3.5 D). Config is empty on purpose: these adapters keep
+    # their company slugs in the `ats_boards` table, because each slug carries mutable state
+    # (last run, consecutive empty runs) that does not belong in a JSONB blob three adapters
+    # rewrite concurrently. Each run discovers new slugs from postings already ingested, so
+    # these do nothing until a source carrying apply-links (teletype, Adzuna, alerts) has run.
+    SourceConfig(name="greenhouse", kind=SourceKind.API, config={}),
+    SourceConfig(name="lever", kind=SourceKind.API, config={}),
+    SourceConfig(name="ashby", kind=SourceKind.API, config={}),
     # The token is already in place (`funnel auth-gmail`); the query spans every board that
     # emails alerts. Parsers exist for hh, Habr, LinkedIn, Wellfound and Glassdoor; add senders
     # here as more boards come online (Indeed next). Left disabled by default — enable in the
