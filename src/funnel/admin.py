@@ -13,7 +13,7 @@ from sqladmin import Admin, ModelView
 from starlette.applications import Starlette
 
 from funnel.db import get_engine
-from funnel.models import Application, Job, Source
+from funnel.models import Application, Job, Reply, Source
 
 
 def _multiline(model: Any, attribute: str) -> Markup:
@@ -97,7 +97,41 @@ class ApplicationAdmin(ModelView, model=Application):
         Application.cover_letter: _multiline,
         Application.notes: _multiline,
     }
-    form_excluded_columns = [Application.created_at, Application.updated_at]
+    # Application.replies is a plain relationship (no delete-orphan), so an empty submit would
+    # only detach rows rather than delete them — but detaching silently is still the Phase 2
+    # failure mode. check-replies owns this collection; keep it off the form.
+    form_excluded_columns = [Application.created_at, Application.updated_at, Application.replies]
+    page_size = 50
+
+
+class ReplyAdmin(ModelView, model=Reply):
+    """Incoming mail and what the classifier made of it.
+
+    The review surface for everything `check-replies` refused to decide: rows with no
+    Application are unmatched, and a low `confidence` means the Application status was left
+    untouched on purpose. Setting `Reply.application` here is how a human links one by hand,
+    so that relationship stays ON the form.
+    """
+
+    name = "Reply"
+    name_plural = "Replies"
+    icon = "fa-solid fa-inbox"
+    column_list = [
+        Reply.id,
+        Reply.received_at,
+        Reply.from_address,
+        Reply.subject,
+        Reply.reply_type,
+        Reply.confidence,
+        Reply.application,
+    ]
+    column_searchable_list = [Reply.from_address, Reply.subject]
+    column_sortable_list = [Reply.received_at, Reply.reply_type, Reply.confidence]
+    column_default_sort = [(Reply.received_at, True)]
+    column_formatters_detail = {Reply.body: _multiline, Reply.reasoning: _multiline}
+    # gmail_message_id is the idempotency key: editing it by hand would let check-replies
+    # re-fetch and re-bill a message already processed.
+    form_excluded_columns = [Reply.gmail_message_id, Reply.created_at]
     page_size = 50
 
 
@@ -106,3 +140,4 @@ admin = Admin(app, get_engine(), title="Job Funnel")
 admin.add_view(SourceAdmin)
 admin.add_view(JobAdmin)
 admin.add_view(ApplicationAdmin)
+admin.add_view(ReplyAdmin)

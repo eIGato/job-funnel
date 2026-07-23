@@ -192,9 +192,141 @@ def draft(
         typer.secho(f"draft: {drafted} letters drafted (NOT sent)", fg=typer.colors.GREEN)
 
 
+@app.command(name="check-replies")
+def check_replies(
+    days: int = typer.Option(None, help="How far back to scan the mailbox."),
+) -> None:
+    """Pull replies, classify them, and update the funnel. Reads mail only; sends nothing.
+
+    Three passes, and every one of them refuses to guess:
+
+    1. **Link.** For applications the human marked `sent` but that have no thread yet, look in
+       Sent mail for the message they sent. Only an unambiguous hit is stored.
+    2. **Fetch.** Read incoming mail, skipping any message already recorded — `check-replies`
+       is idempotent and never re-bills a classification.
+    3. **Classify and apply.** An unmatched reply, or one classified below
+       `reply_confidence_threshold`, is stored for review but leaves the Application status
+       untouched. A wrong auto-status would hide a real interview; an unread row would not.
+    """
+    from funnel.models import Application, ApplicationStatus, Reply, ReplyType
+    from funnel.replies.classify import classify_reply
+    from funnel.replies.inbox import build_service, fetch_recent, find_sent_thread
+    from funnel.replies.match import match_reply
+
+    settings = get_settings()
+    if not (settings.llm_api_key and settings.llm_api_key.get_secret_value()):
+        typer.secho(
+            "check-replies: LLM_API_KEY is empty. Set it in .env (provider for llm_model="
+            f"{settings.llm_model}). Classification needs it.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+
+    service = build_service()
+    lookback = days or settings.reply_lookback_days
+
+    with session_scope() as session:
+        sent = list(
+            session.scalars(
+                select(Application).where(
+                    Application.status.in_(
+                        [
+                            ApplicationStatus.SENT,
+                            ApplicationStatus.INTERVIEW,
+                            ApplicationStatus.REJECTED,
+                        ]
+                    )
+                )
+            ).all()
+        )
+
+        # 1. Link applications to their Gmail thread.
+        linked = 0
+        for application in sent:
+            if application.thread_id or application.sent_at is None:
+                continue
+            thread_id = find_sent_thread(
+                service, company=application.job.company, sent_at=application.sent_at
+            )
+            if thread_id:
+                application.thread_id = thread_id
+                linked += 1
+
+        # 2. Fetch what is new.
+        messages = fetch_recent(service, days=lookback)
+        seen = set(
+            session.scalars(
+                select(Reply.gmail_message_id).where(
+                    Reply.gmail_message_id.in_([m.gmail_message_id for m in messages] or [""])
+                )
+            ).all()
+        )
+        fresh = [m for m in messages if m.gmail_message_id not in seen]
+
+        # 3. Match, classify, apply.
+        applied = unmatched = uncertain = 0
+        for message in fresh:
+            matched = match_reply(message, sent)
+            try:
+                verdict = asyncio.run(
+                    classify_reply(message.subject, message.from_address, message.body)
+                )
+            except Exception as exc:  # one bad message must not sink the batch
+                typer.secho(f"  {message.subject[:40]}: ERROR {exc}", fg=typer.colors.RED)
+                continue
+
+            session.add(
+                Reply(
+                    application_id=matched.id if matched else None,
+                    gmail_message_id=message.gmail_message_id,
+                    thread_id=message.thread_id or None,
+                    from_address=message.from_address,
+                    subject=message.subject,
+                    body=message.body,
+                    received_at=message.received_at,
+                    reply_type=verdict.reply_type,
+                    confidence=verdict.confidence,
+                    reasoning=verdict.reasoning,
+                )
+            )
+
+            if matched is None:
+                unmatched += 1
+                continue
+            if verdict.confidence < settings.reply_confidence_threshold:
+                uncertain += 1
+                continue
+            if verdict.reply_type is ReplyType.NO_REPLY:
+                continue  # an auto-acknowledgement is not an answer; leave the status alone
+
+            matched.reply_type = verdict.reply_type
+            matched.reply_at = message.received_at
+            matched.status = (
+                ApplicationStatus.INTERVIEW
+                if verdict.reply_type is ReplyType.INTERVIEW
+                else ApplicationStatus.REJECTED
+            )
+            applied += 1
+            typer.echo(
+                f"  {verdict.reply_type.value}: {matched.job.company} ({verdict.confidence:.2f})"
+            )
+
+        typer.secho(
+            f"check-replies: {len(fresh)} new, {applied} applied, {uncertain} below threshold, "
+            f"{unmatched} unmatched, {linked} threads linked",
+            fg=typer.colors.GREEN,
+        )
+        if unmatched or uncertain:
+            typer.echo("  Review them in the admin under Replies (unmatched have no Application).")
+
+
 @app.command(name="run-funnel")
 def run_funnel(ctx: typer.Context) -> None:
-    """Run ingest, then match, then draft. This is what the systemd timer calls."""
+    """Run ingest, then match, then draft. This is what the systemd timer calls.
+
+    `check-replies` is deliberately NOT part of this: it depends on the human having marked
+    things sent, and it should not fail a nightly ingest when the Gmail token needs a refresh.
+    """
     ctx.invoke(ingest)
     ctx.invoke(match)
     ctx.invoke(draft)

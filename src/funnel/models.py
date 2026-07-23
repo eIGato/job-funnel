@@ -204,6 +204,11 @@ class Application(Base):
     )
     cover_letter: Mapped[str | None] = mapped_column(Text)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The Gmail thread of the application the human sent by hand. Found by `check-replies`
+    # searching Sent mail (the read-only scope sees it), or pasted in by the human. Null for a
+    # web-form application, where there is no thread to follow and matching falls back to the
+    # sender's domain.
+    thread_id: Mapped[str | None] = mapped_column(String(255), index=True)
     reply_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reply_type: Mapped[ReplyType | None] = mapped_column(Enum(ReplyType, native_enum=False))
     notes: Mapped[str | None] = mapped_column(Text)
@@ -214,6 +219,49 @@ class Application(Base):
     )
 
     job: Mapped[Job] = relationship(back_populates="application")
+    # No delete-orphan here: a Reply outlives its Application on purpose (see Reply).
+    replies: Mapped[list[Reply]] = relationship(back_populates="application")
 
     def __str__(self) -> str:
         return f"{self.job_id}: {self.status}"
+
+
+class Reply(Base):
+    """One incoming email that looks like an answer to an application.
+
+    Its own table rather than a couple of columns on Application, for three reasons:
+    a reply can match nothing (an ATS auto-acknowledgement for a form application, a recruiter
+    writing out of the blue) and still needs to be seen; the classifier's confidence and
+    reasoning need somewhere to live so a human can audit a call; and one application can draw
+    several replies (auto-ack, then a real answer). `Application.reply_type` stays the summary,
+    this is the evidence behind it.
+
+    `application_id` is nullable and ON DELETE SET NULL: losing an Application must not erase
+    the record that somebody actually wrote back.
+    """
+
+    __tablename__ = "replies"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    application_id: Mapped[int | None] = mapped_column(
+        ForeignKey("applications.id", ondelete="SET NULL"), index=True
+    )
+    #: Gmail's message id. Unique, and it is what makes `check-replies` idempotent — a message
+    #: already stored is never re-fetched, re-classified or re-billed.
+    gmail_message_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    thread_id: Mapped[str | None] = mapped_column(String(255), index=True)
+    from_address: Mapped[str] = mapped_column(String(320), default="")
+    subject: Mapped[str] = mapped_column(Text, default="")
+    body: Mapped[str] = mapped_column(Text, default="")
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    reply_type: Mapped[ReplyType | None] = mapped_column(Enum(ReplyType, native_enum=False))
+    confidence: Mapped[float | None] = mapped_column(Float)
+    reasoning: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    application: Mapped[Application | None] = relationship(back_populates="replies")
+
+    def __str__(self) -> str:
+        return f"{self.from_address}: {self.subject[:60]}"

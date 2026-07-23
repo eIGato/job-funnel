@@ -1,5 +1,6 @@
 """Configuration via Pydantic Settings. The only place that reads the environment."""
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -68,6 +69,18 @@ class Settings(BaseSettings):
         default="en",
         description="OPEN QUESTION (PLAN.md section 7): cover letter language.",
     )
+    reply_confidence_threshold: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Below this, a classified reply is recorded but the Application status is left "
+            "alone. A wrong auto-status is worse than no status: it hides a real interview."
+        ),
+    )
+    reply_lookback_days: int = Field(
+        default=14, ge=1, description="How far back `funnel check-replies` scans the mailbox."
+    )
 
     # --- Gmail: board alerts. We do not scrape LinkedIn. ---
     gmail_credentials_path: Path = Field(default=Path("secrets/gmail_credentials.json"))
@@ -86,3 +99,31 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Cached singleton. Call this instead of constructing Settings() directly."""
     return Settings()
+
+
+#: `llm_model` is "provider:model"; each provider SDK reads its own env var for the key, so
+#: our single LLM_API_KEY has to be bridged onto it. Provider-agnostic apart from this map.
+_PROVIDER_ENV: dict[str, str] = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "google-gla": "GEMINI_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+}
+
+
+def bridge_llm_api_key() -> None:
+    """Copy LLM_API_KEY onto the env var the configured provider expects.
+
+    Lives here rather than next to the agents because both LLM call sites (`drafting/` and
+    `replies/`) need it, and duplicating the map would let the two drift. It deliberately
+    does not import pydantic-ai: this is environment plumbing, not a model call, which is
+    what keeps it outside the invariant-4 boundary.
+    """
+    settings = get_settings()
+    key = settings.llm_api_key.get_secret_value() if settings.llm_api_key else ""
+    if not key:
+        return
+    env_var = _PROVIDER_ENV.get(settings.llm_model.split(":", 1)[0])
+    if env_var and not os.environ.get(env_var):
+        os.environ[env_var] = key

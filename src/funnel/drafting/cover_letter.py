@@ -11,7 +11,6 @@ and the human does the sending (invariant 2). The model is reached only through 
 
 from __future__ import annotations
 
-import os
 import re
 from functools import lru_cache
 from typing import TYPE_CHECKING
@@ -20,7 +19,7 @@ import numpy as np
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 
-from funnel.config import get_settings
+from funnel.config import bridge_llm_api_key, get_settings
 from funnel.matching.embed import cosine_similarity, embed_texts
 from funnel.matching.profile import load_profile_text, load_writing_style
 from funnel.models import ApplyChannel
@@ -35,16 +34,6 @@ if TYPE_CHECKING:
 _MIN_BULLET_CHARS = 30
 #: Cyrillic anywhere in the posting -> write in Russian (detected in code, not by the LLM).
 _CYRILLIC = re.compile(r"[а-яё]", re.IGNORECASE)  # noqa: RUF001 (Cyrillic is the point)
-#: settings.llm_model is "provider:model"; pydantic-ai reads the provider's own env var for the
-#: key, so bridge our single LLM_API_KEY onto it. Provider-agnostic apart from this name map.
-_PROVIDER_ENV: dict[str, str] = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "google-gla": "GEMINI_API_KEY",
-    "groq": "GROQ_API_KEY",
-    "mistral": "MISTRAL_API_KEY",
-}
-
 _INSTRUCTIONS = (
     "You draft short, honest cover letters for a job seeker. You are given a posting and a "
     "set of the seeker's real experience bullets already selected as most relevant. Write a "
@@ -174,14 +163,8 @@ def make_agent(model: Model | str) -> Agent[None, CoverLetterDraft]:
 
 @lru_cache
 def _production_agent() -> Agent[None, CoverLetterDraft]:
-    settings = get_settings()
-    key = settings.llm_api_key.get_secret_value() if settings.llm_api_key else ""
-    if key:
-        provider = settings.llm_model.split(":", 1)[0]
-        env_var = _PROVIDER_ENV.get(provider)
-        if env_var and not os.environ.get(env_var):
-            os.environ[env_var] = key
-    return make_agent(settings.llm_model)
+    bridge_llm_api_key()
+    return make_agent(get_settings().llm_model)
 
 
 async def draft_cover_letter(

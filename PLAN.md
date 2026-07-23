@@ -94,6 +94,12 @@ scheduler lives on the host: `docker compose run --rm app uv run funnel run-funn
 **`Job`** — a posting
 - `source` (FK), `external_id`, `url`, `company`, `title`, `description`, `location`,
   `is_remote` (bool), `posted_at`, `fetched_at`
+- `apply_channel` (Enum: `email` / `telegram` / `form`) — how the human *replies*, which is a
+  different thing from `Source.kind` (how the posting was *found*). It decides the shape of the
+  draft: a chat message is two lines with no attachment, an email has a greeting and mentions
+  the attached CV, a web form must never mention an attachment. Derived from the URL on insert
+  and only when unset, so an adapter that genuinely knows the channel can declare it and the
+  human can correct a bad guess in the admin without the next edit clobbering it.
 - `content_hash` (unique — dedup on company+title+url)
 - `embedding` (nullable — a float32 vector; stored as `BYTEA`/`JSONB` for the numpy path,
   or as a `vector` column if pgvector is added)
@@ -240,7 +246,7 @@ Telegram and LinkedIn accounts are sacred. This phase also feeds Phase 5 — the
 teletype sources carry **full descriptions**, which is what makes a real cover letter possible
 (email alerts give only card snippets).
 
-- **A. Teletype RSS (`teletype`).** The @Remoteit network publishes every vacancy as a
+- **[x] A. Teletype RSS (`teletype`).** The @Remoteit network publishes every vacancy as a
   `teletype.in` post; the channel is only a subset, so we read the **author's whole feed**, not the
   channel. `teletype.in/rss/{author}` is valid RSS 2.0 with the full body in `content:encoded`
   (verified 2026-07-22). Config holds the author handles — `kovesh` (old), `courierus` (current);
@@ -248,14 +254,15 @@ teletype sources carry **full descriptions**, which is what makes a real cover l
   fresh post. Full descriptions, no Telegram, no account risk. Parse position/company/location/
   apply-link structurally (no LLM). **Done when:** `teletype` ingests real posts with full text;
   RU-located ones are dropped by the 4a filter.
-- **B. Aggregator APIs (`adzuna`, `themuse`).** Public, free-tier keys, no slugs, full descriptions
+- **[x] B. Aggregator APIs (`adzuna`, `themuse`).** Public, free-tier keys, no slugs, full descriptions
   — the answer to "aggregator, not a hand-kept slug list" (a free, current, ToS-clean slug
   aggregator does not exist; the ones that discover slugs are paid Apify scrapers). Adzuna spans
   ~12 countries (broad EU coverage). Keys in `.env` (`ADZUNA_APP_ID`/`ADZUNA_APP_KEY` provided
   2026-07-22; `THEMUSE_API_KEY` optional). OPEN sub-decision: which Adzuna countries and the search
   query (default: the active profile's role keywords). **Done when:** both ingest real postings with
   full descriptions; a repeat run dedups.
-- **C. Telegram channels (`telegram`).** Telethon user-session on a **dedicated ingest account —
+- **[ ] C. Telegram channels (`telegram`).** BLOCKED on the human: needs the dedicated ingest
+  account (a phone number and a login code). Nothing here can be built ahead of that. Telethon user-session on a **dedicated ingest account —
   not disposable** (the human has 3 phone numbers, one on the main account; keep the session strictly
   read-only and gentle, the account is not expendable). One-time `funnel auth-telegram` stores a
   session under `secrets/`. Per-channel structural parsers (no LLM, invariant 4): `python_vakansii1`
@@ -264,7 +271,7 @@ teletype sources carry **full descriptions**, which is what makes a real cover l
   `opento_relocate` (mixed; partly-paywalled WantApply digests). Dropped: `remotegeekjob`
   (heterogeneous LinkedIn/geekjob links, no full text, not parseable without an LLM). **Done when:**
   `telegram` ingests from ≥1 channel via a read-only session.
-- **D. Self-growing ATS slugs (`greenhouse` / `lever` / `ashby`).** No hand-kept slug list. Instead:
+- **[ ] D. Self-growing ATS slugs (`greenhouse` / `lever` / `ashby`).** No hand-kept slug list. Instead:
   when any ingested posting links to an ATS board, extract the company slug and record it; the ATS
   adapters then monitor those slugs via the public no-auth board APIs (full descriptions — Greenhouse
   `boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true`, Lever `api.lever.co/v0/postings/
@@ -457,6 +464,15 @@ trick as "chat with your PDF", except the retrieval is over CV bullets.
   as a filter basis. Filter on **signals in the posting text** instead — `is_remote`, geo
   restrictions, sponsorship markers — which is deterministic and survives rule changes.
 
+- **The LLM provider and model** (2026-07-23). `anthropic:claude-sonnet-5`. Haiku drafted
+  competently but the letters read as machine-written; Sonnet 5 at roughly 2x the cost is the
+  accepted trade, and it is the "explicit decision" invariant 5 asks for (Sonnet is a mid tier,
+  not frontier). Still ~$0.01/letter against a handful of letters per run. The style work that
+  came with it lives in `data/profiles/_writing_style.md` (gitignored): a tone anchor built
+  from the human's real messages, plus the anti-cliché rules in `drafting/`. The style file
+  also drives `Job.apply_channel` (§4) — the channel decides length, greeting and whether an
+  attachment may be mentioned.
+
 - **Geography / filter rules (Phase 4a).**
   - RU and BY locations: hard stop.
   - Remote on a foreign employer: the main stream (exactly what the DNV permits).
@@ -476,8 +492,5 @@ trick as "chat with your PDF", except the retrieval is over CV bullets.
 - **Montenegro on-site postings**: the DNV is believed to forbid working for local employers,
   which would make them a reject. Not a lawyer, rules change — the human confirms.
 - **Which boards actually have an available API/alerts today** — verify while building Phase 3.
-- **The LLM provider and model** to default to for pydantic-ai (the human has the key).
-  `.env.example` currently suggests a cheap Anthropic model; unconfirmed, and `LLM_API_KEY`
-  is empty.
 - **The rest of the hard-filter criteria** (Phase 4a): seniority floor, stop-stack.
 - **The agent layer:** LangGraph or pydantic-graph.
