@@ -6,7 +6,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, computed_field, field_validator
 
-from funnel.models import SourceKind, compute_content_hash
+from funnel.models import ApplyChannel, SourceKind, compute_content_hash
 
 #: The String(255) columns behind location/external_id (models.py). Boards occasionally send
 #: much longer values (WeWorkRemotely packs a country list into `region`), so the contract
@@ -31,6 +31,10 @@ class NormalizedJob(BaseModel):
     is_remote: bool = False
     posted_at: datetime | None = None
     external_id: str | None = None
+    #: Set this only when the adapter actually knows how the human replies — a Telegram source
+    #: does, a job board does not. Left None, `Job` derives it from the URL on insert, which
+    #: cannot tell "apply on this page" from "DM the poster".
+    apply_channel: ApplyChannel | None = None
 
     @field_validator("location", "external_id")
     @classmethod

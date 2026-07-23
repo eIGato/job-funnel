@@ -49,6 +49,10 @@ def _persist(session: Session, source: Source, fetched: list[NormalizedJob]) -> 
                 location=item.location,
                 is_remote=item.is_remote,
                 posted_at=item.posted_at,
+                # None here means "adapter doesn't know" — the before_insert hook then
+                # derives it from the URL. Passing it through is what lets a source that
+                # does know (Telegram) override that guess.
+                apply_channel=item.apply_channel,
                 content_hash=item.content_hash,
             )
         )

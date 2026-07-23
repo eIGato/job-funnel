@@ -23,6 +23,7 @@ from pydantic_ai import Agent
 from funnel.config import get_settings
 from funnel.matching.embed import cosine_similarity, embed_texts
 from funnel.matching.profile import load_profile_text, load_writing_style
+from funnel.models import ApplyChannel
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -65,7 +66,17 @@ _INSTRUCTIONS = (
     "- Vary sentence length. Avoid the tidy tricolon ('X, Y, and Z'), the 'not only… but also' "
     "construction, and a relentless em-dash rhythm. A little plain or a little blunt is fine.\n"
     "- Don't restate the whole CV. Pick the two or three things that actually matter for this "
-    "posting and say them well."
+    "posting and say them well.\n"
+    "- Plain does not mean passive. Cut hedges ('maybe we are a fit', 'if you ever have "
+    "something'), state the match as fact, and end on one concrete next step. Persuade with "
+    "evidence and specifics, never with adjectives.\n"
+    "- Carry the posting's own words for its key requirement — that phrase is what a skimming "
+    "recruiter and a keyword filter both look for. Work in the technologies the posting names, "
+    "as long as the bullets support them.\n\n"
+    "FORMATTING: `body` must contain real newline characters and never be one run-on block. "
+    "Greeting on its own line, then one or two short paragraphs, then the closing/next step as "
+    "its own last paragraph. Separate paragraphs with a blank line. This holds for every "
+    "channel — a long chat message is still broken into greeting, substance, and ask."
 )
 
 
@@ -137,10 +148,17 @@ def _build_prompt(job: Job, bullets: list[str], language: str) -> str:
         if style
         else ""
     )
+    # A Job read back from the database always has one; fall back anyway, because FORM is the
+    # conservative choice (it is the channel that must never mention an attachment).
+    channel = job.apply_channel or ApplyChannel.FORM
     return (
-        f"Write the cover letter in {language_name}.\n\n"
+        f"Write the cover letter in {language_name}.\n"
+        f"CHANNEL: {channel.value} — follow that channel's rules in MY WRITING "
+        f"STYLE below (they decide the length, the greeting, and whether an attached CV may "
+        f"be mentioned at all).\n\n"
         f"POSTING\n"
         f"Title: {job.title}\n"
+        f"URL: {job.url}\n"
         f"Company: {job.company}\n"
         f"Location: {job.location or 'n/a'}\n"
         f"Description:\n{job.description or '(none provided)'}\n\n"

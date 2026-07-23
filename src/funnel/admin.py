@@ -55,12 +55,19 @@ class JobAdmin(ModelView, model=Job):
         Job.company,
         Job.title,
         Job.is_remote,
+        Job.apply_channel,
         Job.hard_filter_passed,
         Job.match_score,
         Job.posted_at,
     ]
     column_searchable_list = [Job.company, Job.title]
-    column_sortable_list = [Job.match_score, Job.is_remote, Job.posted_at, Job.company]
+    column_sortable_list = [
+        Job.match_score,
+        Job.is_remote,
+        Job.apply_channel,
+        Job.posted_at,
+        Job.company,
+    ]
     # The shortlist order the human reviews and drafting picks top-N from (PLAN.md section 7):
     # remote first, then by score. "Rank below remote" is this sort, not a score penalty.
     column_default_sort = [(Job.is_remote, True), (Job.match_score, True)]
