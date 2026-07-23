@@ -26,6 +26,10 @@ if TYPE_CHECKING:
 
 #: The shared block prepended-role aside; files starting with `_` are not profiles themselves.
 SHARED_FILE = "_experience.md"
+#: Optional gitignored sample of the human's own writing, fed to drafting/ as a style anchor
+#: (never embedded — it must not skew match scores). Absent by default; drafting degrades to
+#: its plain instructions when missing.
+WRITING_STYLE_FILE = "_writing_style.md"
 
 
 def load_profile_text() -> str:
@@ -42,6 +46,19 @@ def load_profile_text() -> str:
     if shared.is_file():
         parts.append(shared.read_text(encoding="utf-8").strip())
     return "\n\n".join(parts).strip()
+
+
+def load_writing_style() -> str:
+    """Return the human's writing-style sample, or "" if none is provided.
+
+    A `query:`/`passage:`-free plain read: this text is only ever handed to `drafting/` as a
+    tone anchor, never embedded, so it cannot influence matching. Optional by design — a fresh
+    checkout has no `data/profiles/` at all.
+    """
+    sample = get_settings().profiles_dir / WRITING_STYLE_FILE
+    if not sample.is_file():
+        return ""
+    return sample.read_text(encoding="utf-8").strip()
 
 
 @lru_cache

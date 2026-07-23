@@ -22,7 +22,7 @@ from pydantic_ai import Agent
 
 from funnel.config import get_settings
 from funnel.matching.embed import cosine_similarity, embed_texts
-from funnel.matching.profile import load_profile_text
+from funnel.matching.profile import load_profile_text, load_writing_style
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -50,9 +50,20 @@ _INSTRUCTIONS = (
     "concise letter (roughly 150-220 words) that connects that experience to the posting's "
     "needs. Ground every claim in the provided bullets — never invent employers, titles, "
     "numbers, or skills the bullets do not support. No greeting-name guesses, no placeholders "
-    "like [Company]; use the real company name given. Plain, direct, first-person prose. "
-    "Write in the language you are told to. You produce a draft only; a human reviews and "
-    "sends it."
+    "like [Company]; use the real company name given. Write in the language you are told to. "
+    "You produce a draft only; a human reviews and sends it.\n\n"
+    "Write like a specific human being, not like a language model:\n"
+    "- No cover-letter clichés or resume-speak. Never write 'excited/thrilled to', 'passionate "
+    "about', 'proven track record', 'results-driven', 'detail-oriented', 'team player', 'hit "
+    "the ground running', 'wear many hats', 'fast-paced environment', 'I believe I would be a "
+    "great fit', 'leverage', 'synergy', or their equivalents in any language.\n"
+    "- No polished marketing gloss and no throat-clearing opener. Plain, direct, first-person "
+    "prose. Be concrete: name the actual thing built or problem solved instead of describing "
+    "yourself with adjectives. Open with something specific to this role or company.\n"
+    "- Vary sentence length. Avoid the tidy tricolon ('X, Y, and Z'), the 'not only… but also' "
+    "construction, and a relentless em-dash rhythm. A little plain or a little blunt is fine.\n"
+    "- Don't restate the whole CV. Pick the two or three things that actually matter for this "
+    "posting and say them well."
 )
 
 
@@ -84,6 +95,12 @@ def _bullet_matrix() -> NDArray[np.float32]:
     return embed_texts(list(_profile_bullets()), is_query=False)
 
 
+@lru_cache
+def _writing_style() -> str:
+    """The human's style sample, read once. Empty string when no sample file is present."""
+    return load_writing_style()
+
+
 def _job_query(job: Job) -> str:
     return f"{job.title}\n{job.company}\n{job.description}".strip()
 
@@ -109,6 +126,14 @@ def _detect_language(job: Job) -> str:
 def _build_prompt(job: Job, bullets: list[str], language: str) -> str:
     language_name = "Russian" if language == "ru" else "English"
     experience = "\n".join(f"- {bullet}" for bullet in bullets) or "- (no bullets retrieved)"
+    style = _writing_style()
+    style_block = (
+        "\n\nMY WRITING STYLE — a sample of how I actually write. Match its tone, rhythm and "
+        "plainness; do NOT reuse its wording or its facts:\n"
+        f"{style}"
+        if style
+        else ""
+    )
     return (
         f"Write the cover letter in {language_name}.\n\n"
         f"POSTING\n"
@@ -117,6 +142,7 @@ def _build_prompt(job: Job, bullets: list[str], language: str) -> str:
         f"Location: {job.location or 'n/a'}\n"
         f"Description:\n{job.description or '(none provided)'}\n\n"
         f"MY RELEVANT EXPERIENCE (use only what fits; invent nothing beyond this):\n{experience}"
+        f"{style_block}"
     )
 
 

@@ -56,10 +56,11 @@ class Settings(BaseSettings):
 
     # --- LLM: confined to drafting/ and replies/ ---
     llm_model: str = Field(
-        default="anthropic:claude-haiku-4-5",
+        default="anthropic:claude-sonnet-5",
         description=(
-            "pydantic-ai model string (provider:model). Cheap by default; a frontier model "
-            "only on an explicit decision. OPEN QUESTION (PLAN.md section 7): the provider."
+            "pydantic-ai model string (provider:model). Human-confirmed decision 2026-07-23: "
+            "Sonnet 5 over the cheaper Haiku for cover-letter quality (~2x cost, accepted) — "
+            "the 'explicit decision' invariant 4 asks for. Still not a frontier model."
         ),
     )
     llm_api_key: SecretStr | None = Field(default=None)

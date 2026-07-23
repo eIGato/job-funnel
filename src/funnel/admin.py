@@ -6,11 +6,31 @@ human has sent an application themselves. It sends nothing.
 
 from __future__ import annotations
 
+from typing import Any
+
+from markupsafe import Markup, escape
 from sqladmin import Admin, ModelView
 from starlette.applications import Starlette
 
 from funnel.db import get_engine
 from funnel.models import Application, Job, Source
+
+
+def _multiline(model: Any, attribute: str) -> Markup:
+    """Detail-view formatter: render long text with newlines preserved.
+
+    The edit form already uses a textarea, but the details table renders every value on
+    one line. Wrap the (escaped) value so a cover letter or a job description keeps its
+    paragraphs instead of collapsing into an unreadable strip. `pre-wrap` keeps newlines
+    and wraps at whitespace; `overflow-wrap: anywhere` breaks the odd very long URL/token.
+    """
+    value = getattr(model, attribute)
+    if value is None:
+        return Markup("")
+    return Markup(
+        '<div style="white-space: pre-wrap; overflow-wrap: anywhere; max-width: 60rem">'
+        f"{escape(value)}</div>"
+    )
 
 
 class SourceAdmin(ModelView, model=Source):
@@ -45,6 +65,7 @@ class JobAdmin(ModelView, model=Job):
     # remote first, then by score. "Rank below remote" is this sort, not a score penalty.
     column_default_sort = [(Job.is_remote, True), (Job.match_score, True)]
     column_details_exclude_list = [Job.embedding]  # raw bytes are noise in the UI
+    column_formatters_detail = {Job.description: _multiline}
     # content_hash is derived on write (models._fill_content_hash) — nobody types a sha256.
     # Job.application is cascade="all, delete-orphan": leaving it off this form is what stops
     # a Job edit from deleting the application and its cover letter.
@@ -65,6 +86,10 @@ class ApplicationAdmin(ModelView, model=Application):
         Application.reply_at,
     ]
     column_sortable_list = [Application.status, Application.sent_at]
+    column_formatters_detail = {
+        Application.cover_letter: _multiline,
+        Application.notes: _multiline,
+    }
     form_excluded_columns = [Application.created_at, Application.updated_at]
     page_size = 50
 
