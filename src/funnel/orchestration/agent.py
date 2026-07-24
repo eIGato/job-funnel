@@ -162,8 +162,9 @@ class AgentResult:
 _WORTH_IT_INSTRUCTIONS = (
     "You screen a job posting for a backend / data-engineering / AI-orchestration specialist "
     "before a cover letter is written. The posting already ranked highly against the seeker's "
-    "profile, so DEFAULT TO worth_it=True. Only return False when the role's primary emphasis "
-    "is clearly something the seeker does not want. Concretely:\n"
+    "profile, so DEFAULT TO worth_it=True. Judge ONLY the ROLE'S CONTENT AND EMPHASIS — the "
+    "technical shape of the work. Only return False when the role's primary emphasis is clearly "
+    "something the seeker does not want. Concretely:\n"
     "- Training or researching ML models as the core job (title/'responsibilities' centre on "
     "building and training neural networks, e.g. a Deep Learning / ML Research role) -> False. "
     "But WORKING WITH AI/LLMs — orchestration, RAG, agents, wiring models into a backend — is "
@@ -171,9 +172,13 @@ _WORTH_IT_INSTRUCTIONS = (
     "- A role whose PRIMARY focus is PHP, Node/JavaScript, or general fullstack/frontend work. "
     "If backend (Python) is the main thing and those are secondary, or the posting offers extra "
     "pay for them, keep it (worth_it=True).\n"
-    "- An obvious mismatch that slipped through the ranking (pure frontend, pure DevOps/SRE with "
-    "no backend, sales/management, on-site-only in a country the seeker cannot work in) -> False.\n"
-    "When unsure, keep it. Give one short line of reasoning either way."
+    "- An obvious content mismatch that slipped through the ranking (pure frontend, pure "
+    "DevOps/SRE with no backend, sales/management) -> False.\n"
+    "DO NOT consider geography, location, timezone, relocation, on-site vs remote, or work "
+    "authorization — those are decided upstream by deterministic filters (PLAN.md section 7) and "
+    "must NEVER be a reason here, nor appear in your reasoning. The seeker works remotely, "
+    "contracts B2B, and adapts to any timezone; assume that is handled. "
+    "When unsure, keep it. Give one short line of reasoning about the role's content either way."
 )
 
 _RESEARCH_INSTRUCTIONS = (
