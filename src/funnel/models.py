@@ -96,6 +96,10 @@ def detect_apply_channel(url: str) -> ApplyChannel:
 class ApplicationStatus(enum.StrEnum):
     SHORTLISTED = "shortlisted"
     DRAFTED = "drafted"
+    # We chose not to apply — the Phase 7 agent's decide-worth-it node judged the role a poor
+    # fit on the soft stop-stack (PLAN.md section 7). Distinct from REJECTED, which is *them*
+    # declining *us*. Kept off the plain-draft path so it is never re-drafted by the timer.
+    DECLINED = "declined"
     SENT = "sent"
     REJECTED = "rejected"
     INTERVIEW = "interview"

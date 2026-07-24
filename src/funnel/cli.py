@@ -192,6 +192,102 @@ def draft(
         typer.secho(f"draft: {drafted} letters drafted (NOT sent)", fg=typer.colors.GREEN)
 
 
+@app.command(name="agent-draft")
+def agent_draft(
+    limit: int = typer.Option(5, help="How many top shortlisted postings to run the agent over."),
+    research: bool = typer.Option(True, help="Do the web-search company research node."),
+) -> None:
+    """Run the Phase 7 agent over the very top of the shortlist. DOES NOT SEND (invariant 2).
+
+    The graph is `decide-worth-it -> research-company -> draft -> critic`. It is the richer,
+    more expensive pass — four model calls plus a web search per posting — so it is a deliberate
+    MANUAL command over a handful, and is deliberately NOT part of `run-funnel` (the timer stays
+    cheap). Three outcomes per posting:
+
+    - the decide-worth-it node judges the role a poor fit on the soft stop-stack (PLAN.md
+      section 7) -> status `declined`, with the reason in notes; never drafted by the timer after;
+    - a letter is drafted (grounded, critiqued, possibly revised once) -> status `drafted`;
+    - the grounding backstop refuses a fabrication -> status `declined`, reason recorded.
+
+    Re-running re-bills: it reprocesses `shortlisted`/`drafted` postings (upgrading a plain
+    draft), and skips anything the human has moved on (`sent` and beyond) or already `declined`.
+    """
+    from sqlalchemy import desc
+
+    from funnel.models import Application, ApplicationStatus
+    from funnel.orchestration.agent import JobBrief, build_agent_deps, run_agent
+
+    settings = get_settings()
+    if not (settings.llm_api_key and settings.llm_api_key.get_secret_value()):
+        typer.secho(
+            "agent-draft: LLM_API_KEY is empty. Set it in .env (provider for llm_model="
+            f"{settings.llm_model}). The agent needs it; nothing was sent.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+
+    # Only fresh or plainly-drafted postings — never clobber a human-progressed application.
+    processable = {ApplicationStatus.SHORTLISTED, ApplicationStatus.DRAFTED}
+    deps = build_agent_deps(do_research=research)
+
+    with session_scope() as session:
+        jobs = session.scalars(
+            select(Job)
+            .where(Job.match_score.isnot(None), Job.hard_filter_passed.is_(True))
+            .order_by(desc(Job.is_remote), desc(Job.match_score))
+            .limit(limit)
+        ).all()
+
+        drafted = declined = 0
+        for job in jobs:
+            application = job.application
+            if application is not None and application.status not in processable:
+                continue
+
+            try:
+                result = asyncio.run(run_agent(JobBrief.from_job(job), deps))
+            except Exception as exc:  # one bad posting must not sink the batch
+                typer.secho(f"  {job.company} — {job.title[:40]}: ERROR {exc}", fg=typer.colors.RED)
+                continue
+
+            if application is None:
+                application = Application(job_id=job.id)
+                session.add(application)
+
+            if not result.worth_it:
+                application.status = ApplicationStatus.DECLINED
+                application.notes = f"Agent declined: {result.reasoning}"
+                declined += 1
+                typer.echo(f"  declined: {job.company} — {job.title[:50]} ({result.reasoning})")
+                continue
+
+            if result.draft is None:  # the grounding backstop suppressed a fabrication
+                application.status = ApplicationStatus.DECLINED
+                application.notes = f"Agent refused (ungrounded): {result.critique}"
+                declined += 1
+                typer.echo(f"  refused (ungrounded): {job.company} — {job.title[:50]}")
+                continue
+
+            application.cover_letter = f"Subject: {result.draft.subject}\n\n{result.draft.body}"
+            application.status = ApplicationStatus.DRAFTED
+            notes: list[str] = []
+            if result.draft.matched_points:
+                notes.append("Leans on: " + "; ".join(result.draft.matched_points))
+            if result.critique and not result.approved:
+                notes.append("Reviewer (unresolved): " + result.critique)
+            if result.research:
+                notes.append("Company: " + result.research)
+            application.notes = "\n".join(notes) or None
+            drafted += 1
+            flag = "" if result.approved else " [critic not satisfied]"
+            typer.echo(f"  drafted: {job.company} — {job.title[:50]}{flag}")
+
+        typer.secho(
+            f"agent-draft: {drafted} drafted, {declined} declined (NOT sent)",
+            fg=typer.colors.GREEN,
+        )
+
+
 @app.command(name="check-replies")
 def check_replies(
     days: int = typer.Option(None, help="How far back to scan the mailbox."),

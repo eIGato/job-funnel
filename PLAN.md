@@ -136,8 +136,9 @@ No CTO profile: the human declined one. CTO alerts will therefore be scored agai
 backend profile and land mid-table. Revisit if the CTO alerts turn out to be noisy.
 
 **`Application`** — an application (one-to-one with Job)
-- `job` (FK), `status` (Enum: `shortlisted` / `drafted` / `sent` / `rejected` /
-  `interview` / `no_reply`)
+- `job` (FK), `status` (Enum: `shortlisted` / `drafted` / `declined` / `sent` / `rejected` /
+  `interview` / `no_reply`). `declined` = *we* chose not to apply (the Phase 7 agent's
+  decide-worth-it node), distinct from `rejected` = *they* declined us.
 - `cover_letter` (text), `sent_at`, `reply_at`, `reply_type`, `notes`
 
 ---
@@ -396,7 +397,7 @@ NULL`: losing an Application must not erase the record that somebody wrote back.
 a Replies view — unmatched rows have no Application, and linking one by hand is how a human
 corrects the machine.
 
-### [ ] Phase 7 — Orchestration
+### [x] Phase 7 — Orchestration
 - `funnel run-funnel` = `ingest` → `match` → `draft` (no sending).
 - A host systemd timer with `Persistent=true`, 3×/day, driving
   `docker compose run --rm app uv run funnel run-funnel`.
@@ -417,7 +418,30 @@ A **user** timer, so no root — at the cost of two things that silently break i
 there: `loginctl enable-linger` (or it only runs while logged in) and `docker` group membership.
 `check-replies` is deliberately **not** on the schedule: it needs applications the human has marked
 sent, it reads the mailbox and calls the LLM, and a Gmail token due for re-auth must not fail a
-nightly ingest. The agent layer stays open — it waits on the LangGraph/pydantic-graph decision.
+nightly ingest.
+
+Progress 2026-07-24 — **agent layer built on pydantic-graph; phase closed.** `funnel agent-draft
+--limit N` runs the graph `decide-worth-it → research-company → draft → critic` over the very top
+of the shortlist. It is a deliberate MANUAL command, NOT on the timer (`run-funnel` stays the cheap
+ingest→match→plain-draft path — the funnel already squeezed the stream down for free; the agent
+spends tokens only on the handful a human is about to act on). Design:
+- **decide-worth-it** carries the soft stop-stack from §7 (is PHP/Node/fullstack the *emphasis*? is
+  *training* models the job?) — the whole-posting judgment the 4a regex filters deliberately skip. A
+  "no" writes the new `ApplicationStatus.DECLINED` with the reason in notes, and is never re-drafted.
+- **research-company** does a provider-native web search (`pydantic_ai.capabilities.WebSearch`, local
+  fallback) so the opener is company-specific. A nicety: on failure or `--no-research` the draft still
+  happens.
+- **draft** reuses the exact Phase 5 core (`cover_letter.generate_letter`, extracted for this), so the
+  grounding backstop and anti-cliché rules are identical; it only gets research + critic feedback as
+  extra context. The backstop still refuses a fabrication → `DECLINED`, reason recorded.
+- **critic** is a second LLM pass; it can bounce the draft back once (`max_revisions=1`), then the
+  letter is kept even if unapproved, with the unresolved critique surfaced in notes.
+All four calls go through pydantic-ai (invariant 4); the module lives under `orchestration/`, which
+the invariant test already allows. Agents are injected via `AgentDeps`, so `tests/test_orchestration.py`
+drives the whole graph with a `TestModel` — decline, draft, critic loop, ungrounded refusal — offline.
+Not yet live-verified (it spends real tokens + web search); run it against the top of a real shortlist.
+**pydantic-graph 2.9.1** is the builder-based redesign: BaseNode nodes wired via `GraphBuilder`, edges
+inferred from node return annotations.
 
 ### [ ] Phase 8 — AWS (DEFERRED; do not start until Phases 1–7 work)
 A portfolio artifact, not the funnel's home. The shape is **serverless batch**, NOT

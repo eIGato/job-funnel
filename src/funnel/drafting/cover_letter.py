@@ -174,7 +174,7 @@ def _detect_language(job: Job) -> str:
     return get_settings().cover_letter_language
 
 
-def _build_prompt(job: Job, bullets: list[str], language: str) -> str:
+def _build_prompt(job: Job, bullets: list[str], language: str, extra_context: str = "") -> str:
     language_name = "Russian" if language == "ru" else "English"
     experience = "\n".join(f"- {bullet}" for bullet in bullets) or "- (no bullets retrieved)"
     style = _writing_style()
@@ -186,6 +186,11 @@ def _build_prompt(job: Job, bullets: list[str], language: str) -> str:
         if style
         else ""
     )
+    # Company research and reviewer feedback the agent layer supplies (Phase 7). Empty on the
+    # plain `draft` path. Appended last so it can override the opener, and the header inside it
+    # (written by the caller) makes clear that research is context to draw on, not experience to
+    # claim — the grounding rule in _INSTRUCTIONS still governs what may be asserted.
+    context_block = f"\n\n{extra_context}" if extra_context else ""
     # A Job read back from the database always has one; fall back anyway, because FORM is the
     # conservative choice (it is the channel that must never mention an attachment).
     channel = job.apply_channel or ApplyChannel.FORM
@@ -202,6 +207,7 @@ def _build_prompt(job: Job, bullets: list[str], language: str) -> str:
         f"Description:\n{job.description or '(none provided)'}\n\n"
         f"MY RELEVANT EXPERIENCE (use only what fits; invent nothing beyond this):\n{experience}"
         f"{style_block}"
+        f"{context_block}"
     )
 
 
@@ -216,14 +222,23 @@ def _production_agent() -> Agent[None, CoverLetterDraft]:
     return make_agent(get_settings().llm_model)
 
 
-async def draft_cover_letter(
-    job: Job, *, agent: Agent[None, CoverLetterDraft] | None = None
+async def generate_letter(
+    job: Job,
+    bullets: list[str],
+    *,
+    language: str,
+    agent: Agent[None, CoverLetterDraft],
+    extra_context: str = "",
 ) -> CoverLetterDraft:
-    """Generate a draft. Does not send, and must never learn how."""
-    active = agent or _production_agent()
-    bullets = retrieve_cv_bullets(job)
-    prompt = _build_prompt(job, bullets, _detect_language(job))
-    result = await active.run(prompt)
+    """Prompt the model over already-retrieved bullets and enforce the grounding backstop.
+
+    The generation core shared by the plain `draft` path (`draft_cover_letter`) and the Phase 7
+    agent layer, which passes pre-retrieved bullets, a detected language, its own drafting agent,
+    and `extra_context` (company research plus reviewer feedback). Keeping the grounding check
+    here means both paths refuse a fabrication the same way.
+    """
+    prompt = _build_prompt(job, bullets, language, extra_context)
+    result = await agent.run(prompt)
     draft = result.output
 
     # Refuse the draft rather than hand a human a fluent fabrication to review. This fires when
@@ -237,3 +252,12 @@ async def draft_cover_letter(
             f"by the retrieved bullets, e.g. {offenders[0]!r}. Not drafted."
         )
     return draft
+
+
+async def draft_cover_letter(
+    job: Job, *, agent: Agent[None, CoverLetterDraft] | None = None
+) -> CoverLetterDraft:
+    """Generate a draft. Does not send, and must never learn how."""
+    active = agent or _production_agent()
+    bullets = retrieve_cv_bullets(job)
+    return await generate_letter(job, bullets, language=_detect_language(job), agent=active)
