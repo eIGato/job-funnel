@@ -58,6 +58,7 @@ _GENERIC_DOMAINS = frozenset(
         "wellfound.com",
         "hh.ru",
         "habr.com",
+        "landing.jobs",
     }
 )
 

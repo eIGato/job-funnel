@@ -118,7 +118,8 @@ def fetch_recent(service: Any, *, days: int, max_results: int = 100) -> list[Inc
     query = (
         f"newer_than:{days}d in:inbox -category:promotions "
         "-from:linkedin.com -from:hh.ru -from:career.habr.com "
-        "-from:wellfound.com -from:glassdoor.com -from:indeed.com"
+        "-from:wellfound.com -from:glassdoor.com -from:indeed.com "
+        "-from:landing.jobs"
     )
     return [parse_message(payload) for payload in _iter_messages(service, query, max_results)]
 

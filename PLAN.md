@@ -238,6 +238,23 @@ stripped). **Glassdoor URL is a chosen canonical** `…/job-listing/j?jl=<id>` b
 the volatile tracking href) so dedup stays stable across re-alerts — worth a human confirm that it
 resolves. Redacted fixtures + tests added. Indeed is the last sender still awaiting a first alert.
 
+Progress 2026-07-27 — **Indeed and Landing.Jobs parsed; every alert sender now has a parser.**
+Both verified against real samples (Indeed: 22/22 cards; Landing.Jobs: its single posting).
+Indeed reads `text/plain`, one blank-line block per card, and is the first parser to read a card
+by **counting in from both ends** — head is title + "Company - Location", tail is snippet +
+posting age + link, and the variable middle (salary estimate, "Schnellbewerbung", employer
+badges) is skipped by position because those labels are localized to the country site that sent
+the alert (the sample is de.indeed.com, in German). The plain-text card also hands us a snippet,
+which the HTML buries in table chrome. Landing.Jobs is the thinnest alert yet: an `<ol>` of bare
+"Title @ Company" links grouped by subscription — no location, no snippet — and one posting
+matching two subscriptions is listed twice, so the parser dedups on the posting path. Its hrefs
+are per-recipient `ahoy` click redirects, same shape as Habr's, so `_habr_destination` became the
+shared `_redirect_target`. **Both URLs are rebuilt from the id** (`…/viewjob?jk=<id>`,
+`landing.jobs/at/<company>/<slug>`): Indeed states outright that its links are personalized, and
+none of that belongs in the database. `_paragraphs` now sits on a line-preserving `_blocks`
+(Wellfound wants the lines joined, Indeed wants them apart). Redacted fixtures + tests added; the
+seed query and the reply-side sender exclusions grew both senders.
+
 ### [ ] Phase 3.5 — Widen the source pool (ongoing)
 
 The funnel's goal is a wider pool (web → web + ETL + AI, globally). Every source below is a new

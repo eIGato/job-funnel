@@ -10,14 +10,23 @@ never learns which boards these are — that lives here, behind the `gmail-alert
 
 The parsers are deliberately structural, not textual: they key on the job-posting links
 (hh `/vacancy/<id>`, habr `/vacancies/<id>`, LinkedIn `/jobs/view/<id>`, Glassdoor's
-`jobListingId`) and the card body around them, never on a subject line or a greeting. A
-board's wording changes between the first "your alert has been created" email and the later
-"new jobs" ones; the link shapes and the per-card labels do not.
+`jobListingId`, Indeed's `jk`) and the card body around them, never on a subject line or a
+greeting. A board's wording changes between the first "your alert has been created" email and
+the later "new jobs" ones; the link shapes and the per-card labels do not. Indeed pushes this
+further: its cards are read by counting in from both ends, because the middle lines are
+localized to whichever country site sent the alert.
 
-Most boards are parsed from the `text/html` part. Wellfound is the exception: its HTML wraps
-every posting link in an opaque `links.wellfound.com/s/c/...` tracking redirect that carries
-no job id, while the `text/plain` alternative keeps the real `wellfound.com/jobs?job_listing_slug=<id>`
-URLs. So a parser is handed both bodies (`_Alert`) and reads whichever one carries a stable id.
+Most boards are parsed from the `text/html` part. Wellfound and Indeed are the exceptions and
+read `text/plain`: Wellfound's HTML wraps every posting link in an opaque
+`links.wellfound.com/s/c/...` tracking redirect that carries no job id, while the plain-text
+alternative keeps the real `wellfound.com/jobs?job_listing_slug=<id>` URLs; Indeed's plain-text
+cards carry a snippet the HTML buries in table chrome. So a parser is handed both bodies
+(`_Alert`) and reads whichever one carries a stable id.
+
+Several boards (Habr, Landing.Jobs) hide the posting URL behind a per-recipient click
+redirect, and Indeed and Glassdoor hang tracking tokens off theirs. In every one of those the
+stored URL is rebuilt from the id alone (`_redirect_target`, or a canonical built from the
+id), so nothing personal to this mailbox ends up in the database.
 """
 
 from __future__ import annotations
@@ -233,8 +242,12 @@ def _parse_hh(alert: _Alert) -> list[NormalizedJob]:
 _HABR_VACANCY = re.compile(r"/vacancies/(\d+)")
 
 
-def _habr_destination(href: str) -> str:
-    """Habr wraps every link in an email-tracking redirect; the target is the `url` param."""
+def _redirect_target(href: str) -> str:
+    """The destination behind an email-tracking redirect: its `url` query param, decoded.
+
+    Habr and Landing.Jobs both wrap every link this way, and in both the real posting URL is
+    the only place a stable id survives. A link that is not such a redirect yields "".
+    """
     return parse_qs(urlparse(href.replace("&amp;", "&")).query).get("url", [""])[0]
 
 
@@ -244,7 +257,7 @@ def _parse_habr(alert: _Alert) -> list[NormalizedJob]:
     titles = [
         _Card(text, m.group(1), f"https://career.habr.com/vacancies/{m.group(1)}", [])
         for href, text in _anchors(html)
-        if (m := _HABR_VACANCY.search(_habr_destination(href))) and text
+        if (m := _HABR_VACANCY.search(_redirect_target(href))) and text
     ]
     jobs: list[NormalizedJob] = []
     for card in _build_cards(html, titles):
@@ -323,6 +336,27 @@ def _parse_linkedin(alert: _Alert) -> list[NormalizedJob]:
     return jobs
 
 
+def _blocks(text: str) -> list[list[str]]:
+    """Blank-line-separated blocks of a plain-text body, each a list of collapsed lines.
+
+    The blank line is the one piece of structure a text/plain alert always has. What a block
+    means differs per board: for Indeed it is one whole posting card (so the lines matter,
+    below), for Wellfound one field of a card (so the lines are joined back up).
+    """
+    blocks: list[list[str]] = []
+    buffer: list[str] = []
+    for line in text.splitlines():
+        stripped = " ".join(line.split())
+        if stripped:
+            buffer.append(stripped)
+        elif buffer:
+            blocks.append(buffer)
+            buffer = []
+    if buffer:
+        blocks.append(buffer)
+    return blocks
+
+
 def _paragraphs(text: str) -> list[str]:
     """Blank-line-separated paragraphs, each with its soft-wrapped lines joined into one.
 
@@ -330,18 +364,7 @@ def _paragraphs(text: str) -> list[str]:
     physical lines but separates real fields with a blank line. Collapsing to paragraphs turns
     those wraps back into one logical value per field.
     """
-    paras: list[str] = []
-    buffer: list[str] = []
-    for line in text.splitlines():
-        stripped = " ".join(line.split())
-        if stripped:
-            buffer.append(stripped)
-        elif buffer:
-            paras.append(" ".join(buffer))
-            buffer = []
-    if buffer:
-        paras.append(" ".join(buffer))
-    return paras
+    return [" ".join(block) for block in _blocks(text)]
 
 
 #: A Wellfound card's "Company / 11-50 Employees" line — the structural anchor of each posting.
@@ -429,6 +452,79 @@ def _parse_glassdoor(alert: _Alert) -> list[NormalizedJob]:
     return jobs
 
 
+#: The job key on an Indeed posting link, with the country host it was served from. Every
+#: link in the mail is a per-recipient tracking URL ("personalisierte, sichere Links" says
+#: the footer), so only the key is kept and the stored URL is rebuilt from it.
+_INDEED_JK = re.compile(r"https?://([\w.-]*indeed\.com)/\S*[?&]jk=([0-9a-f]+)")
+#: Remote wording Indeed puts in the title or the location, across its country sites.
+_INDEED_REMOTE = re.compile(r"remote|home\s?office|telearbeit", re.IGNORECASE)
+
+
+def _parse_indeed(alert: _Alert) -> list[NormalizedJob]:
+    """Indeed alerts, from the text/plain body: one blank-line-separated block per posting.
+
+    A card is fixed at both ends — title, then "Company - Location" at the head; snippet,
+    posting age, link at the tail — with a variable middle (salary estimate, "Easy Apply",
+    employer badges). So the fields are counted in from the ends rather than matched by
+    label: the labels are localized to whichever country site sent the alert (this one is
+    de.indeed.com, in German), the card shape is not.
+    """
+    jobs: list[NormalizedJob] = []
+    for block in _blocks(alert.text):
+        # Under five lines there is no room for the full head+tail, so the count would be
+        # reading the company line as the snippet. Skip rather than guess.
+        if len(block) < 5 or (m := _INDEED_JK.search(block[-1])) is None:
+            continue
+        head, separator, tail = block[1].rpartition(" - ")
+        company, location = (head, tail) if separator else (tail, "")
+        if not company:
+            continue
+        jobs.append(
+            NormalizedJob(
+                url=f"https://{m.group(1)}/viewjob?jk={m.group(2)}",
+                company=company,
+                title=block[0],
+                description=clip(block[-3]),
+                location=location or None,
+                is_remote=bool(_INDEED_REMOTE.search(f"{block[0]} {location}")),
+                external_id=m.group(2),
+            )
+        )
+    return jobs
+
+
+#: A Landing.Jobs posting path, `/at/<company-slug>/<job-slug>`: the only stable id in the
+#: alert, since every href is a per-recipient `ahoy` click redirect (see `_redirect_target`).
+_LJ_JOB = re.compile(r"^https?://(?:www\.)?landing\.jobs(/at/[^/?#]+/[^/?#]+)")
+
+
+def _parse_landing_jobs(alert: _Alert) -> list[NormalizedJob]:
+    """Landing.Jobs alerts: a bare list of "Title @ Company" links, grouped by subscription.
+
+    There is no card here — the anchor text is the whole posting, so no location or snippet
+    is available and the job link carries everything we get. The subscription grouping above
+    the links is the human's own filter names, not posting data, and is ignored.
+    """
+    jobs: list[NormalizedJob] = []
+    seen: set[str] = set()
+    for href, text in _anchors(alert.html):
+        match = _LJ_JOB.match(_redirect_target(href))
+        title, separator, company = text.rpartition(" @ ")
+        if match is None or not separator or match.group(1) in seen:
+            continue
+        seen.add(match.group(1))
+        jobs.append(
+            NormalizedJob(
+                url=f"https://landing.jobs{match.group(1)}",
+                company=company.strip(),
+                title=title.strip(),
+                is_remote="remote" in title.lower(),
+                external_id=match.group(1).removeprefix("/at/"),
+            )
+        )
+    return jobs
+
+
 #: Sender-domain substring -> parser. First match wins; unknown senders yield nothing.
 _PARSERS: tuple[tuple[str, Callable[[_Alert], list[NormalizedJob]]], ...] = (
     ("hh.ru", _parse_hh),
@@ -436,6 +532,8 @@ _PARSERS: tuple[tuple[str, Callable[[_Alert], list[NormalizedJob]]], ...] = (
     ("linkedin.com", _parse_linkedin),
     ("wellfound.com", _parse_wellfound),
     ("glassdoor.com", _parse_glassdoor),
+    ("indeed.com", _parse_indeed),
+    ("landing.jobs", _parse_landing_jobs),
 )
 
 
@@ -478,7 +576,8 @@ class GmailAlertsAdapter(BaseAdapter):
     Expected config keys (Source.config JSONB):
       query: str, a Gmail search query spanning every board that emails alerts, e.g.
              'newer_than:2d (from:hh.ru OR from:career.habr.com OR from:linkedin.com
-              OR from:wellfound.com OR from:glassdoor.com)'
+              OR from:wellfound.com OR from:glassdoor.com OR from:indeed.com
+              OR from:landing.jobs)'
       max_results: int, cap on messages pulled per run.
     """
 

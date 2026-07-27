@@ -102,8 +102,51 @@ def test_glassdoor_reads_the_card_anchor_and_builds_a_stable_url() -> None:
     assert jobs[1].is_remote is True
 
 
+def test_indeed_counts_the_card_in_from_both_ends_past_the_localized_middle() -> None:
+    # The salary / "Aktiver Arbeitgeber" / "Schnellbewerbung" lines sit between the head and the
+    # tail of a card and are localized to the country site; the parser must skip them by
+    # position, not by label. The stored URL is rebuilt from the job key: every link in the
+    # mail is a per-recipient tracking URL.
+    jobs = _jobs("indeed")
+    assert len(jobs) == 3  # the header and the two footer blocks are not cards
+    first = jobs[0]
+    assert first.title == "Senior Python Developer"
+    assert first.company == "Acme Robotics"
+    assert first.location == "Remote"
+    assert first.is_remote is True
+    assert str(first.url) == "https://de.indeed.com/viewjob?jk=0cbc44a1c73f2ecc"
+    assert first.external_id == "0cbc44a1c73f2ecc"
+    assert first.description is not None and first.description.startswith("Strong Python")
+    # The long middle: company and location still come off the head, the snippet off the tail.
+    assert jobs[1].company == "Globex Systems GmbH"
+    assert jobs[1].location == "Berlin"
+    assert jobs[1].description is not None and jobs[1].description.startswith("Sehr gute")
+    # A card with no " - " on its second line is all company, no location.
+    assert jobs[2].company == "Initech"
+    assert jobs[2].location is None
+
+
+def test_landing_jobs_decodes_the_click_redirect_and_splits_title_from_company() -> None:
+    # Every href is an opaque per-recipient `ahoy` redirect; the posting path only exists in
+    # its `url` param. One posting matching two subscriptions is listed twice and must not
+    # become two jobs.
+    jobs = _jobs("landing.jobs")
+    assert len(jobs) == 2
+    first = jobs[0]
+    assert first.title == "Senior Python Engineer"
+    assert first.company == "Acme Robotics"
+    assert str(first.url) == "https://landing.jobs/at/acme-robotics/senior-python-engineer"
+    assert first.external_id == "acme-robotics/senior-python-engineer"
+    assert first.location is None  # the alert carries no location at all
+    assert first.is_remote is False
+    assert jobs[1].title == "Backend Developer (Remote)"
+    assert jobs[1].is_remote is True
+    # The "here" / "change your settings" / logo links are not postings.
+    assert all("/at/" in str(job.url) for job in jobs)
+
+
 def test_content_hashes_are_distinct_within_a_message() -> None:
-    for name in ("hh", "habr", "linkedin", "wellfound", "glassdoor"):
+    for name in ("hh", "habr", "linkedin", "wellfound", "glassdoor", "indeed", "landing.jobs"):
         jobs = _jobs(name)
         hashes = [j.content_hash for j in jobs]
         assert len(set(hashes)) == len(hashes)
