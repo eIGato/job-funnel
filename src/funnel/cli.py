@@ -420,8 +420,9 @@ def check_replies(
 def run_funnel(ctx: typer.Context) -> None:
     """Run ingest, then match, then draft. This is what the systemd timer calls.
 
-    `check-replies` is deliberately NOT part of this: it depends on the human having marked
-    things sent, and it should not fail a nightly ingest when the Gmail token needs a refresh.
+    `check-replies` is deliberately NOT part of this: it is a no-op until the human has marked
+    applications `sent`, so the clock is the wrong trigger for it. (Not because it calls the
+    LLM — `draft`, right below, does that on every timer tick.)
     """
     ctx.invoke(ingest)
     ctx.invoke(match)

@@ -44,9 +44,13 @@ systemctl --user start funnel.service       # run once, right now, without waiti
 
 `funnel check-replies` (Phase 6) is **not** part of `run-funnel` and has no timer of its own:
 
-- it only does anything once you have marked applications `sent` by hand, and
-- it reads your mailbox and calls the LLM, so it should not fire unattended, and a Gmail token
-  that needs re-authorizing should not fail your nightly ingest.
+- it is a no-op until you have marked applications `sent` by hand, so the clock is the wrong
+  trigger for it — the trigger is a human action, and
+- every run re-reads the inbox window and re-bills the classifier, so three ticks a day would
+  mostly pay to re-classify mail it has already seen.
+
+"It calls the LLM" is **not** a reason: `draft` calls the LLM too and is on the timer. Nor is a
+stale Gmail token: `ingest` catches a source's failure per source, so it survives one anyway.
 
 Run it yourself when you are expecting answers:
 
