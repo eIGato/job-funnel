@@ -6,6 +6,7 @@ that there is no network and no token spend. Vectors live in Job.embedding as ra
 
 from __future__ import annotations
 
+import warnings
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
@@ -23,12 +24,21 @@ _E5_MARKER = "e5"
 
 @lru_cache
 def get_model() -> TextEmbedding:
-    """Loaded once per process."""
+    """Loaded once per process.
+
+    fastembed >=0.6 switched the e5 family from CLS to MEAN pooling, and warns about it on load.
+    Mean pooling is the pooling e5 was *trained* with (the model card averages the last hidden
+    state under the attention mask); the old CLS default was incorrect for e5, so this is a fix,
+    not a regression — human-accepted 2026-07-24. We take the new behaviour and re-embedded the
+    stored vectors for consistency, so the once-per-process warning is expected noise; silence it.
+    """
     settings = get_settings()
-    return TextEmbedding(
-        model_name=settings.embedding_model,
-        cache_dir=str(settings.embedding_cache_dir),
-    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*mean pooling.*", category=UserWarning)
+        return TextEmbedding(
+            model_name=settings.embedding_model,
+            cache_dir=str(settings.embedding_cache_dir),
+        )
 
 
 def _needs_e5_prefix() -> bool:
