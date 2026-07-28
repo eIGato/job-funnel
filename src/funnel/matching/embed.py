@@ -49,13 +49,18 @@ def embed_texts(texts: list[str], *, is_query: bool = False) -> NDArray[np.float
     """Embed texts into an (n, dim) float32 matrix.
 
     is_query distinguishes the two sides only for e5 models; it is a no-op for bge.
+
+    The batch size is ours, not fastembed's default 256: peak memory is one forward pass,
+    and at 256 e5-large's activations are large enough to get the process OOM-killed. See
+    `embedding_batch_size` in config.
     """
     if not texts:
         return np.empty((0, 0), dtype=np.float32)
     if _needs_e5_prefix():
         prefix = "query: " if is_query else "passage: "
         texts = [prefix + t for t in texts]
-    return np.asarray(list(get_model().embed(texts)), dtype=np.float32)
+    vectors = get_model().embed(texts, batch_size=get_settings().embedding_batch_size)
+    return np.asarray(list(vectors), dtype=np.float32)
 
 
 def cosine_similarity(

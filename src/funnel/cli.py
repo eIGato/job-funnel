@@ -26,6 +26,13 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
+#: Postings scored per commit in `match`. Embedding a backlog takes minutes, and the box is a
+#: laptop that gets suspended or runs out of memory; committing as we go means a killed run
+#: keeps what it already computed and the next one resumes where it stopped, instead of
+#: throwing away the whole pass. Independent of the ONNX batch size (config), which is about
+#: peak memory rather than durability.
+_SCORE_CHUNK = 100
+
 
 def _persist(session: Session, source: Source, fetched: list[NormalizedJob]) -> int:
     """Store postings, skipping ones already known. Deduplicated on content_hash."""
@@ -119,14 +126,20 @@ def match() -> None:
             return
 
         # Postings are the passage side of the e5 pair; the profile is the query side.
-        texts = [f"{j.title}\n{j.company}\n{j.description}".strip() for j in survivors]
-        matrix = embed_texts(texts, is_query=False)
-        scores = cosine_similarity(matrix, get_profile_vector())
-        for job, vector, score in zip(survivors, matrix, scores, strict=True):
-            job.embedding = to_bytes(vector)
-            job.match_score = float(score)
+        profile = get_profile_vector()
+        top = float("-inf")
+        for start in range(0, len(survivors), _SCORE_CHUNK):
+            chunk = survivors[start : start + _SCORE_CHUNK]
+            texts = [f"{j.title}\n{j.company}\n{j.description}".strip() for j in chunk]
+            matrix = embed_texts(texts, is_query=False)
+            scores = cosine_similarity(matrix, profile)
+            for job, vector, score in zip(chunk, matrix, scores, strict=True):
+                job.embedding = to_bytes(vector)
+                job.match_score = float(score)
+            session.commit()
+            top = max(top, float(scores.max()))
+            typer.echo(f"  scored {start + len(chunk)}/{len(survivors)}")
 
-        top = max(scores)
         typer.secho(
             f"match: {len(pending)} scanned, {len(survivors)} scored "
             f"({len(pending) - len(survivors)} filtered out), top score {top:.3f}",
@@ -136,7 +149,7 @@ def match() -> None:
 
 @app.command()
 def draft(
-    limit: int = typer.Option(None, help="How many shortlisted postings to process."),
+    limit: int | None = typer.Option(None, help="How many shortlisted postings to process."),
 ) -> None:
     """Draft cover letters for the top of the shortlist. DOES NOT SEND (invariant 2).
 
@@ -426,7 +439,11 @@ def run_funnel(ctx: typer.Context) -> None:
     """
     ctx.invoke(ingest)
     ctx.invoke(match)
-    ctx.invoke(draft)
+    # `limit=None` explicitly: an omitted parameter here keeps Python's declared default, which
+    # for a Typer command is the OptionInfo sentinel, not the value inside it. Typer only swaps
+    # that in when the parser runs, so leaving it out sends an OptionInfo into SQLAlchemy's
+    # .limit() and the timer run dies after match. Pass every defaulted parameter by hand.
+    ctx.invoke(draft, limit=None)
 
 
 @app.command(name="seed-sources")

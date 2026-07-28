@@ -36,6 +36,16 @@ class Settings(BaseSettings):
         default=Path(".cache/fastembed"),
         description="Where fastembed stores downloaded ONNX weights.",
     )
+    embedding_batch_size: int = Field(
+        default=16,
+        gt=0,
+        description=(
+            "Postings per ONNX forward pass. fastembed defaults to 256, which on e5-large "
+            "(24 layers, 1024 hidden, 512 tokens) allocates activations by the gigabyte and "
+            "got the run OOM-killed at ~13GB on a 24GB laptop. 16 keeps the peak under a "
+            "gigabyte; the throughput difference is small because the CPU saturates anyway."
+        ),
+    )
 
     # --- Profile (one active profile; multi-profile shelved, see PLAN.md section 4) ---
     profiles_dir: Path = Field(
