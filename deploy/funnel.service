@@ -13,7 +13,10 @@ WorkingDirectory=%h/src/common/job-funnel
 # `run --rm` starts a throwaway container against the compose project's own db service.
 # UV_NO_SYNC=1 is baked into the image (Phase 1) so a timer run never needs PyPI.
 ExecStartPre=/usr/bin/docker compose up -d db
-ExecStart=/usr/bin/docker compose run --rm app uv run funnel run-funnel
+# `--build` because the code lives in the image, not in a bind mount: without it compose
+# reuses whatever was built last, and the timer keeps running a checkout from weeks ago.
+# When nothing changed the build is a cached no-op of a couple of seconds.
+ExecStart=/usr/bin/docker compose run --rm --build app uv run funnel run-funnel
 
 # The embedding model is the slow part: a cold e5-large fetch took ~11 min for 339 postings.
 # Steady state is incremental and quick, but leave room rather than kill a first run.

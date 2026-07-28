@@ -43,5 +43,7 @@ uv run pytest
 ## How systemd drives it
 
 ```bash
-docker compose run --rm app uv run funnel run-funnel
+# --build: the code is in the image, not a bind mount — without it the timer keeps
+# running whatever was built last. See deploy/README.md.
+docker compose run --rm --build app uv run funnel run-funnel
 ```

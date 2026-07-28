@@ -137,8 +137,9 @@ uv run ruff check . && uv run ruff format .
 uv run mypy src
 uv run pytest
 
-# how systemd drives it
-docker compose run --rm app uv run funnel run-funnel
+# how systemd drives it (--build: the code is baked into the image, not bind-mounted,
+# so without it the timer runs the checkout as of the last build)
+docker compose run --rm --build app uv run funnel run-funnel
 ```
 
 ---

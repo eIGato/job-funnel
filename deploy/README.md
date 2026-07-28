@@ -1,8 +1,13 @@
 # Scheduling the funnel (Phase 7)
 
 A **user** systemd timer, not a system one: the funnel runs as you, out of your checkout, and
-needs no root. It calls `docker compose run --rm app uv run funnel run-funnel` — the container
-starts, does the batch, and exits.
+needs no root. It calls `docker compose run --rm --build app uv run funnel run-funnel` — the
+container starts, does the batch, and exits.
+
+`--build` matters: the code is **baked into the image**, not bind-mounted. Without it compose
+happily reuses the last image it built, so the timer goes on running the checkout as it was on
+build day while your commits land in the working tree unnoticed. A build with nothing to do is
+a couple of cached seconds.
 
 `run-funnel` is `ingest → match → draft`. It **never sends** (invariant 2); it leaves drafts in
 the database for you to review in the admin.
@@ -55,7 +60,7 @@ stale Gmail token: `ingest` catches a source's failure per source, so it survive
 Run it yourself when you are expecting answers:
 
 ```bash
-docker compose run --rm app uv run funnel check-replies
+docker compose run --rm --build app uv run funnel check-replies
 ```
 
 Add a second timer for it later if the manual run becomes a chore — the unit above is an easy

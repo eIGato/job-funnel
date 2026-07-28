@@ -82,7 +82,8 @@ human does the sending.
   configure indexes via `[tool.uv.sources]`, but this funnel does not need it.
 
 Docker: `docker compose` (v2) with two services — `db` (Postgres 18) and `app`. The
-scheduler lives on the host: `docker compose run --rm app uv run funnel run-funnel`.
+scheduler lives on the host: `docker compose run --rm --build app uv run funnel run-funnel`
+(`--build` because the code is baked into the image, not bind-mounted).
 
 ---
 
@@ -417,7 +418,7 @@ corrects the machine.
 ### [x] Phase 7 — Orchestration
 - `funnel run-funnel` = `ingest` → `match` → `draft` (no sending).
 - A host systemd timer with `Persistent=true`, 3×/day, driving
-  `docker compose run --rm app uv run funnel run-funnel`.
+  `docker compose run --rm --build app uv run funnel run-funnel`.
 - **Optional, agent layer over top-N only:** the graph `decide-worth-it → research-company
   (web search) → draft → critic`.
   - **LangGraph** — a recognizable "agent orchestration" line on a resume.
