@@ -83,8 +83,15 @@ def get_credentials(*, interactive: bool = False) -> Credentials:
 
     creds: Credentials | None = None
     if token_path.exists():
-        # google-auth ships py.typed but leaves these methods unannotated.
-        creds = Credentials.from_authorized_user_file(str(token_path), GMAIL_SCOPES)  # type: ignore[no-untyped-call]
+        try:
+            # google-auth ships py.typed but leaves these methods unannotated.
+            creds = Credentials.from_authorized_user_file(str(token_path), GMAIL_SCOPES)  # type: ignore[no-untyped-call]
+        except ValueError:
+            # Empty, truncated or hand-edited: `from_authorized_user_file` raises
+            # "Authorized user info was not in the expected format". Same stance as the revoked
+            # refresh token below — a broken token file must never block the command whose one
+            # job is to replace it. Discard and re-authorize.
+            creds = None
 
     if creds and creds.valid:
         return creds
