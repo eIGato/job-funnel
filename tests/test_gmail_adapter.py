@@ -164,3 +164,70 @@ def test_parsing_ignores_the_subject_wording() -> None:
 
 def test_adapter_is_registered_under_its_name() -> None:
     assert registry()["gmail-alerts"] is GmailAlertsAdapter
+
+
+def test_a_revoked_token_does_not_block_reauthorization(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Regression: `auth-gmail` could not run while the token it exists to replace was on disk.
+
+    Google revokes a refresh token on a password change, a "remove access", or six months of
+    disuse. `creds.refresh()` then raises RefreshError — which used to propagate straight out of
+    get_credentials, so the browser flow below it was never reached and the command appeared to
+    do nothing at all ("the browser doesn't open").
+    """
+    from google.auth.exceptions import RefreshError
+
+    from funnel.adapters import gmail
+    from funnel.config import Settings, get_settings
+
+    token = tmp_path / "token.json"
+    token.write_text("{}", encoding="utf-8")
+    secret = tmp_path / "client.json"
+    secret.write_text("{}", encoding="utf-8")
+
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        gmail,
+        "get_settings",
+        lambda: Settings(gmail_token_path=token, gmail_credentials_path=secret),
+        raising=False,
+    )
+
+    class _Dead:
+        valid = False
+        expired = True
+        refresh_token = "stale"
+
+        def refresh(self, _request: object) -> None:
+            raise RefreshError("invalid_grant: Token has been expired or revoked.")
+
+        def to_json(self) -> str:
+            return "{}"
+
+    class _Fresh(_Dead):
+        valid = True
+
+        def refresh(self, _request: object) -> None:  # pragma: no cover - never called
+            raise AssertionError("a freshly minted token must not need refreshing")
+
+    monkeypatch.setattr(
+        "google.oauth2.credentials.Credentials.from_authorized_user_file",
+        staticmethod(lambda *_a, **_kw: _Dead()),
+    )
+    reached = []
+
+    class _Flow:
+        @staticmethod
+        def from_client_secrets_file(*_a: object, **_kw: object) -> _Flow:
+            return _Flow()
+
+        def run_local_server(self, **_kw: object) -> _Fresh:
+            reached.append(True)
+            return _Fresh()
+
+    monkeypatch.setattr("google_auth_oauthlib.flow.InstalledAppFlow", _Flow)
+
+    creds = gmail.get_credentials(interactive=True)
+
+    assert reached == [True], "the browser flow was never reached"
+    assert creds.valid is True
+    get_settings.cache_clear()

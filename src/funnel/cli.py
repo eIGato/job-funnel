@@ -549,7 +549,8 @@ def auth_gmail() -> None:
     settings = get_settings()
     typer.echo(f"Using client secret : {settings.gmail_credentials_path}")
     typer.echo(f"Token will be saved : {settings.gmail_token_path}")
-    typer.echo("A browser window will open for consent (scope: gmail.readonly)...")
+    typer.echo("A browser window will open for consent (scope: gmail.readonly).")
+    typer.echo("If it does not, copy the URL printed below into a browser by hand.")
     try:
         get_credentials(interactive=True)
     except (FileNotFoundError, RuntimeError) as exc:
