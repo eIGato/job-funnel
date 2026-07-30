@@ -120,11 +120,11 @@ def test_themuse_reads_full_contents_and_remote_location() -> None:
 
 def test_content_hash_is_stable_and_distinct() -> None:
     jobs = RemoteOKAdapter.parse(_json("remoteok.json"))
-    hashes = [j.content_hash for j in jobs]
+    hashes = [j.content_hash_for(1) for j in jobs]
     assert len(set(hashes)) == len(hashes)  # distinct postings, distinct hashes
     # Re-parsing yields the same dedup keys (a repeat ingest is a no-op).
     again = RemoteOKAdapter.parse(_json("remoteok.json"))
-    assert [j.content_hash for j in again] == hashes
+    assert [j.content_hash_for(1) for j in again] == hashes
 
 
 @pytest.mark.parametrize(

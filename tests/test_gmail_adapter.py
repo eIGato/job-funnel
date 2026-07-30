@@ -148,7 +148,7 @@ def test_landing_jobs_decodes_the_click_redirect_and_splits_title_from_company()
 def test_content_hashes_are_distinct_within_a_message() -> None:
     for name in ("hh", "habr", "linkedin", "wellfound", "glassdoor", "indeed", "landing.jobs"):
         jobs = _jobs(name)
-        hashes = [j.content_hash for j in jobs]
+        hashes = [j.content_hash_for(1) for j in jobs]
         assert len(set(hashes)) == len(hashes)
 
 

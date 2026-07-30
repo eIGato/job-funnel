@@ -98,7 +98,8 @@ wheels on Python 3.14. Embedding inference on CPU is fast enough here.
 │   │   ├── filters.py          # hard filters (code, no LLM)
 │   │   └── embed.py            # fastembed + cosine
 │   ├── drafting/
-│   │   └── cover_letter.py     # pydantic-ai (the only place that generates)
+│   │   ├── cover_letter.py     # pydantic-ai (the only place that generates)
+│   │   └── screen.py           # soft stop-stack: one call, run before any letter
 │   ├── replies/
 │   │   └── classify.py         # pydantic-ai, structured reply_type output
 │   └── orchestration/
@@ -153,12 +154,19 @@ docker compose run --rm --build app uv run funnel run-funnel
 - **A new source is a new adapter.** Subclass `BaseAdapter`, implement `fetch()`, return
   `list[NormalizedJob]`, register it in the adapter registry. **The pipeline must not know
   about specific sources** — no `if source == "linkedin"` in shared code.
-- **Dedup at the door.** Every posting has a `content_hash` (company+title+url). A repeat
-  `ingest` creates no duplicates.
+- **Dedup at the door.** Every posting has a `content_hash`: company+title plus the board's own
+  `external_id` scoped by source, falling back to a normalized URL when the adapter has no id.
+  A repeat `ingest` creates no duplicates. **A URL is not an identity** — Adzuna mints a fresh
+  `se=` token per API call, which minted a new row (and a new cover letter) on every run until
+  2026-07-30. Adapters should always supply `external_id` when the source has one.
 - **Schema changes go through Alembic only.** Autogenerate → **read the migration with your
   own eyes** → upgrade. Never touch the database by hand.
 - **LLM boundaries.** Model calls live exclusively in `drafting/` and `replies/`, via
   pydantic-ai. Everything else is deterministic code.
+- **Two-stage rejection.** `matching/filters.py` decides "is this a job posting, and does it
+  clear geography/seniority?" in pure code. `drafting/screen.py` decides "is it the right *kind*
+  of job?" in one cheap model call before drafting. Keep them apart: a regex judging emphasis is
+  whack-a-mole, and a model re-judging geography overrules a decision the human already made.
 - **We send nothing.** There is no code path that sends an email or an application. `draft`
   writes to the database; the human sends it and then sets the status to `sent` in the admin.
 - **Multilingual embeddings.** e5, because letters are EN but RU postings must still embed

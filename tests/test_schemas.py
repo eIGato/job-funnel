@@ -9,23 +9,48 @@ from funnel.schemas import NormalizedJob
 
 
 def test_content_hash_is_stable(job: NormalizedJob) -> None:
-    assert job.content_hash == job.model_copy().content_hash
+    assert job.content_hash_for(1) == job.model_copy().content_hash_for(1)
 
 
 def test_content_hash_ignores_case_and_whitespace(job: NormalizedJob) -> None:
-    """The same offer from two sources must not become two rows in jobs."""
+    """A board that recases its own fields must not create a second row."""
     twin = job.model_copy(update={"company": "  ACME  ", "title": "data engineer"})
-    assert twin.content_hash == job.content_hash
+    assert twin.content_hash_for(1) == job.content_hash_for(1)
 
 
 def test_content_hash_tracks_company_title_url(job: NormalizedJob) -> None:
-    assert job.model_copy(update={"company": "Globex"}).content_hash != job.content_hash
-    assert job.model_copy(update={"title": "ML Engineer"}).content_hash != job.content_hash
+    assert job.model_copy(update={"company": "Globex"}).content_hash_for(1) != job.content_hash_for(
+        1
+    )
+    assert job.model_copy(update={"title": "ML Engineer"}).content_hash_for(
+        1
+    ) != job.content_hash_for(1)
 
 
 def test_content_hash_ignores_description(job: NormalizedJob) -> None:
     """The board reworded the blurb; it is still the same posting."""
-    assert job.model_copy(update={"description": "different text"}).content_hash == job.content_hash
+    twin = job.model_copy(update={"description": "different text"})
+    assert twin.content_hash_for(1) == job.content_hash_for(1)
+
+
+def test_content_hash_is_scoped_by_source(job: NormalizedJob) -> None:
+    """Two boards numbering their ids from 1 must not collide into one row."""
+    numbered = job.model_copy(update={"external_id": "1"})
+    assert numbered.content_hash_for(1) != numbered.content_hash_for(2)
+
+
+def test_external_id_beats_a_volatile_url(job: NormalizedJob) -> None:
+    """The Adzuna bug: a fresh per-request `se=` token must not mint a new posting."""
+    first = job.model_copy(update={"url": "https://b.example/ad/55?se=AAA", "external_id": "55"})
+    second = job.model_copy(update={"url": "https://b.example/ad/55?se=BBB", "external_id": "55"})
+    assert first.content_hash_for(3) == second.content_hash_for(3)
+
+
+def test_tracking_params_are_stripped_without_an_external_id(job: NormalizedJob) -> None:
+    """Same posting, no id from the board: the URL still has to normalize to one key."""
+    first = job.model_copy(update={"url": "https://b.example/ad/55?utm_source=x&se=AAA"})
+    second = job.model_copy(update={"url": "https://b.example/ad/55/"})
+    assert first.content_hash_for(3) == second.content_hash_for(3)
 
 
 def test_rejects_empty_company() -> None:

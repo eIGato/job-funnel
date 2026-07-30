@@ -103,9 +103,14 @@ def test_content_hash_has_a_single_definition() -> None:
         url="https://example.com/jobs/1",
         company="Acme",
         title="Data Engineer",
+        external_id="42",
     )
-    assert posting.content_hash == compute_content_hash(
-        "Acme", "Data Engineer", "https://example.com/jobs/1"
+    assert posting.content_hash_for(7) == compute_content_hash(
+        "Acme",
+        "Data Engineer",
+        "https://example.com/jobs/1",
+        source_id=7,
+        external_id="42",
     )
 
 
