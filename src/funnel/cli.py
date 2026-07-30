@@ -38,13 +38,18 @@ def _persist(session: Session, source: Source, fetched: list[NormalizedJob]) -> 
     """Store postings, skipping ones already known. Deduplicated on content_hash."""
     if not fetched:
         return 0
-    hashes = [j.content_hash for j in fetched]
-    known = set(session.scalars(select(Job.content_hash).where(Job.content_hash.in_(hashes))).all())
+    hashes = {item: item.content_hash_for(source.id) for item in fetched}
+    known = set(
+        session.scalars(
+            select(Job.content_hash).where(Job.content_hash.in_(list(hashes.values())))
+        ).all()
+    )
     new = 0
     for item in fetched:
-        if item.content_hash in known:
+        content_hash = hashes[item]
+        if content_hash in known:
             continue
-        known.add(item.content_hash)  # a source can repeat a posting within one batch
+        known.add(content_hash)  # a source can repeat a posting within one batch
         session.add(
             Job(
                 source_id=source.id,
@@ -60,7 +65,7 @@ def _persist(session: Session, source: Source, fetched: list[NormalizedJob]) -> 
                 # derives it from the URL. Passing it through is what lets a source that
                 # does know (Telegram) override that guess.
                 apply_channel=item.apply_channel,
-                content_hash=item.content_hash,
+                content_hash=content_hash,
             )
         )
         new += 1
@@ -150,15 +155,28 @@ def match() -> None:
 @app.command()
 def draft(
     limit: int | None = typer.Option(None, help="How many shortlisted postings to process."),
+    screen: bool | None = typer.Option(
+        None,
+        help="Run the stop-stack screen before drafting. Defaults to settings.draft_screen.",
+    ),
 ) -> None:
     """Draft cover letters for the top of the shortlist. DOES NOT SEND (invariant 2).
 
+    Each posting is screened first (`drafting/screen.py`): one cheap model call that declines a
+    role whose emphasis is PHP/Node/fullstack, or that is an outright content mismatch the
+    ranking let through. Without it the human got a finished cover letter for every such
+    posting and had to mark it DECLINED by hand — the screen is far cheaper than the letter it
+    prevents. Hard geography/seniority filters stay upstream in `matching/filters.py`.
+
     Idempotent: a posting whose Application has moved past `shortlisted` (already drafted, or
     touched by the human) is skipped, so a re-run neither regenerates nor clobbers a letter.
+    A `declined` posting is likewise never re-screened or re-drafted. Only one posting per
+    (company, title) is drafted for, however many rows a board splits that role across.
     """
     from sqlalchemy import desc
 
     from funnel.drafting.cover_letter import draft_cover_letter
+    from funnel.drafting.screen import screen_job
     from funnel.models import Application, ApplicationStatus
 
     settings = get_settings()
@@ -180,14 +198,42 @@ def draft(
             .limit(top_n)
         ).all()
 
-        drafted = 0
+        # One letter per role, not per row. A board can list the same role once per city —
+        # arbeitnow carries "Senior Platform Engineer (Remote UK Only)" under seven city slugs,
+        # each a genuinely distinct posting with its own id and location, so ingest cannot merge
+        # them. Writing seven letters for one job is waste, and it is what filled the admin with
+        # near-identical drafts. A `shortlisted` twin does not count: nothing was written for it
+        # yet, so it is not evidence the role has been handled.
+        handled_roles = {
+            (company.strip().casefold(), title.strip().casefold())
+            for company, title in session.execute(
+                select(Job.company, Job.title)
+                .join(Application, Application.job_id == Job.id)
+                .where(Application.status != ApplicationStatus.SHORTLISTED)
+            ).all()
+        }
+
+        do_screen = settings.draft_screen if screen is None else screen
+        drafted = declined = skipped = 0
         for job in jobs:
             application = job.application
             if application is not None and application.status != ApplicationStatus.SHORTLISTED:
                 continue  # already drafted or human-touched — never overwrite
 
+            role = (job.company.strip().casefold(), job.title.strip().casefold())
+            if role in handled_roles:
+                skipped += 1
+                continue
+            handled_roles.add(role)
+
             try:
-                letter = asyncio.run(draft_cover_letter(job))
+                # Screen before drafting: the verdict is cheap, the letter is not.
+                verdict = asyncio.run(screen_job(job)) if do_screen else None
+                letter = (
+                    None
+                    if verdict is not None and not verdict.worth_it
+                    else asyncio.run(draft_cover_letter(job))
+                )
             except Exception as exc:  # one bad posting must not sink the batch
                 typer.secho(f"  {job.company} — {job.title[:40]}: ERROR {exc}", fg=typer.colors.RED)
                 continue
@@ -195,6 +241,15 @@ def draft(
             if application is None:
                 application = Application(job_id=job.id)
                 session.add(application)
+
+            if letter is None:
+                assert verdict is not None
+                application.status = ApplicationStatus.DECLINED
+                application.notes = f"Screen declined: {verdict.reasoning}"
+                declined += 1
+                typer.echo(f"  declined: {job.company} — {job.title[:50]} ({verdict.reasoning})")
+                continue
+
             application.cover_letter = f"Subject: {letter.subject}\n\n{letter.body}"
             application.status = ApplicationStatus.DRAFTED
             if letter.matched_points:
@@ -202,7 +257,11 @@ def draft(
             drafted += 1
             typer.echo(f"  drafted: {job.company} — {job.title[:50]}")
 
-        typer.secho(f"draft: {drafted} letters drafted (NOT sent)", fg=typer.colors.GREEN)
+        typer.secho(
+            f"draft: {drafted} letters drafted, {declined} declined by the screen, "
+            f"{skipped} skipped as the same role (NOT sent)",
+            fg=typer.colors.GREEN,
+        )
 
 
 @app.command(name="agent-draft")
@@ -439,11 +498,12 @@ def run_funnel(ctx: typer.Context) -> None:
     """
     ctx.invoke(ingest)
     ctx.invoke(match)
-    # `limit=None` explicitly: an omitted parameter here keeps Python's declared default, which
-    # for a Typer command is the OptionInfo sentinel, not the value inside it. Typer only swaps
-    # that in when the parser runs, so leaving it out sends an OptionInfo into SQLAlchemy's
-    # .limit() and the timer run dies after match. Pass every defaulted parameter by hand.
-    ctx.invoke(draft, limit=None)
+    # `limit=None`/`screen=None` explicitly: an omitted parameter here keeps Python's declared
+    # default, which for a Typer command is the OptionInfo sentinel, not the value inside it.
+    # Typer only swaps that in when the parser runs, so leaving it out sends an OptionInfo into
+    # SQLAlchemy's .limit() and the timer run dies after match. Pass every defaulted parameter
+    # by hand. `screen=None` means "follow settings.draft_screen".
+    ctx.invoke(draft, limit=None, screen=None)
 
 
 @app.command(name="seed-sources")

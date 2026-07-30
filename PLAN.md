@@ -446,6 +446,9 @@ spends tokens only on the handful a human is about to act on). Design:
 - **decide-worth-it** carries the soft stop-stack from §7 (is PHP/Node/fullstack the *emphasis*? is
   *training* models the job?) — the whole-posting judgment the 4a regex filters deliberately skip. A
   "no" writes the new `ApplicationStatus.DECLINED` with the reason in notes, and is never re-drafted.
+  Since 2026-07-30 this node is **not** exclusive to the agent layer: it is `drafting/screen.py`,
+  which the plain `draft` path (and therefore the timer) runs too. The graph imports it, so the two
+  paths cannot drift into disagreeing about the stop-stack.
 - **research-company** does a provider-native web search (`pydantic_ai.capabilities.WebSearch`, local
   fallback) so the opener is company-specific. A nicety: on failure or `--no-research` the draft still
   happens.
@@ -587,9 +590,16 @@ trick as "chat with your PDF", except the retrieval is over CV bullets.
     An ML *platform/infra/backend* title is ordinary backend work and is kept.
   - **Soft preferences are NOT hard filters.** PHP / Node / fullstack as a *secondary* focus, or
     with extra pay, and "is training the priority here?" are judgments about a role's emphasis
-    that pure code cannot make well. They are deferred to the **decide-worth-it** node of the
-    Phase 7 agent layer, which reads the whole posting — not forced into a regex. This preserves
-    the pure-cosine `match_score` decision above.
+    that pure code cannot make well. They are deferred to a **screen** that reads the whole
+    posting — not forced into a regex. This preserves the pure-cosine `match_score` decision
+    above.
+  - **CORRECTED 2026-07-30.** That screen originally lived *only* in the Phase 7 agent layer,
+    which is a manual command and not on the timer — so `run-funnel` never ran it, and the human
+    was handed a finished cover letter for every Node/PHP/fullstack posting and marked each one
+    DECLINED by hand. The screen now lives in `drafting/screen.py` and runs on the ordinary
+    `draft` path too (one cheap call per candidate, ahead of the expensive drafting call);
+    `orchestration/agent.py` imports it rather than keeping a second copy. Toggle:
+    `DRAFT_SCREEN`; model: `SCREEN_MODEL`, falling back to `LLM_MODEL`.
 
 - **Montenegro on-site** (2026-07-24). **Not filtered.** The local IT market is a fraction of a
   percent of the input stream and the human would take a cheap local gig, so a hard filter would

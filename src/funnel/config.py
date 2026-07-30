@@ -75,6 +75,23 @@ class Settings(BaseSettings):
         ),
     )
     llm_api_key: SecretStr | None = Field(default=None)
+    draft_screen: bool = Field(
+        default=True,
+        description=(
+            "Run the soft stop-stack screen (drafting/screen.py) before drafting: one cheap "
+            "call that declines PHP/Node/fullstack-first roles and obvious content mismatches "
+            "instead of writing a letter the human then marks DECLINED by hand."
+        ),
+    )
+    screen_model: str | None = Field(
+        default=None,
+        description=(
+            "Model for that screen; falls back to llm_model. The screen is a coarse binary "
+            "judgment, not prose, so a cheaper model than the one chosen for letter quality is "
+            "the obvious setting (e.g. anthropic:claude-haiku-4-5-20251001) — left unset "
+            "because picking it is the human's call (invariant 8)."
+        ),
+    )
     cover_letter_language: Literal["en", "ru"] = Field(
         default="en",
         description="OPEN QUESTION (PLAN.md section 7): cover letter language.",

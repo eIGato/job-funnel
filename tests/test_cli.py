@@ -50,3 +50,24 @@ def test_run_funnel_hands_draft_a_real_limit(monkeypatch: Any) -> None:
     assert result.exit_code == 0, result.output
     assert seen == [None]
     assert not isinstance(seen[0], typer.models.OptionInfo)
+
+
+def test_run_funnel_hands_draft_a_real_screen_flag(monkeypatch: Any) -> None:
+    """Same OptionInfo trap as `limit`, on the flag that decides whether the screen runs.
+
+    A leaked sentinel here is truthy, so the screen would appear to work while ignoring
+    `settings.draft_screen` entirely.
+    """
+    seen: list[object] = []
+    sentinel = inspect.signature(cli.draft).parameters["screen"].default
+    assert isinstance(sentinel, typer.models.OptionInfo), "the trap this test guards is gone"
+
+    monkeypatch.setattr(cli, "ingest", lambda *_a, **_kw: None)
+    monkeypatch.setattr(cli, "match", lambda *_a, **_kw: None)
+    monkeypatch.setattr(cli, "draft", lambda screen=sentinel, **_kw: seen.append(screen))
+
+    result = runner.invoke(cli.app, ["run-funnel"])
+
+    assert result.exit_code == 0, result.output
+    assert seen == [None]
+    assert not isinstance(seen[0], typer.models.OptionInfo)
