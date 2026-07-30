@@ -43,8 +43,8 @@ class RemoteOKAdapter(BaseAdapter):
             jobs.append(
                 NormalizedJob(
                     url=url,
-                    company=row["company"],
-                    title=row["position"],
+                    company=strip_html(row["company"]),
+                    title=strip_html(row["position"]),
                     description=clip(strip_html(row.get("description"))),
                     location=row.get("location") or None,
                     is_remote=True,

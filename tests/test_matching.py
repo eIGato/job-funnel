@@ -179,3 +179,35 @@ def test_ml_platform_engineering_is_kept(job: NormalizedJob) -> None:
     # Engineering around ML is ordinary backend work, not model training.
     ok = job.model_copy(update={"title": "Machine Learning Platform Engineer"})
     assert passes_hard_filters(ok) is True
+
+
+def test_junk_titles_are_dropped(job: NormalizedJob) -> None:
+    """Scraped page furniture reaches us looking like a posting and embeds at 0.84+."""
+    for title in (
+        "Job Details",
+        "Couldn't pick up that page",
+        "Jop posting title",
+        "This is a test job",
+        "  APPLY NOW  ",
+        "Untitled",
+    ):
+        junk = job.model_copy(update={"title": title})
+        assert passes_hard_filters(junk) is False, title
+
+
+def test_junk_match_is_whole_title_not_substring(job: NormalizedJob) -> None:
+    """A real role that happens to contain a junk word must survive."""
+    for title in ("Senior Engineer - Details", "Backend Developer, Apply Now", "Hiring Manager"):
+        real = job.model_copy(update={"title": title})
+        assert passes_hard_filters(real) is True, title
+
+
+def test_html_entities_in_a_junk_title_are_decoded(job: NormalizedJob) -> None:
+    junk = job.model_copy(update={"title": "Job&nbsp;Details"})
+    assert passes_hard_filters(junk) is False
+
+
+def test_a_terse_posting_is_kept(job: NormalizedJob) -> None:
+    """No minimum-description rule: Telegram postings are short and real (see filters.py)."""
+    terse = job.model_copy(update={"description": "Python backend. Remote. Write to @hr."})
+    assert passes_hard_filters(terse) is True

@@ -22,12 +22,20 @@ Answered seniority / stop-stack (PLAN.md section 7, decided 2026-07-24):
     wanted, not stopped — this targets model-training roles, not AI-orchestration ones. The
     softer preferences (PHP / Node / fullstack as a secondary focus, extra pay) are a judgment
     about a role's *emphasis*, which pure code cannot make well; they are deferred to the
-    decide-worth-it node of the Phase 7 agent layer, not forced into a regex here.
+    screening step (`drafting/screen.py`), which every drafting path runs, not forced into a
+    regex here.
+
+Junk postings:
+  - A row whose title is scraped page furniture ("Job Details", "Couldn't pick up that page") or
+    a placeholder ("This is a test job") is not a posting and is dropped. This is only the "not
+    a job posting" judgment; deciding that a real posting is the wrong *kind* of job belongs to
+    the screening step.
 """
 
 from __future__ import annotations
 
 import re
+from html import unescape
 from typing import Protocol
 
 
@@ -106,6 +114,57 @@ _ML_ADJACENT_TITLE = re.compile(
 )
 
 
+#: Titles that are not a role at all: scraped page furniture and placeholder postings. RemoteOK
+#: hands these out with an ordinary company name and a plausible teaser body, so nothing
+#: downstream can tell them apart — "Job Details" and "Couldn't pick up that page" both embedded
+#: at 0.84+ and reached the top of the shortlist, where each cost a drafted letter.
+#:
+#: Matched against the WHOLE normalized title, never as a substring: a real posting must never
+#: be caught here, and "Details" inside "Senior Engineer - Details" is not junk. This list is
+#: only for "this is not a job posting"; judging a real posting to be the wrong *kind* of job is
+#: the screening step's business (`drafting/screen.py`), not a regex's. Extend as new artifacts
+#: show up.
+_JUNK_TITLES: frozenset[str] = frozenset(
+    {
+        "apply now",
+        "couldn't pick up that page",
+        "create your own role",
+        "details",
+        "expression of interest",
+        "hiring",
+        "job",
+        "job details",
+        "job posting title",
+        "job title",
+        "join our team",
+        "jop posting title",
+        "no title",
+        "page not found",
+        "test job",
+        "this is a test job",
+        "untitled",
+        "we are hiring",
+    }
+)
+
+#: Deliberately NOT paired with a minimum-description rule. The obvious companion filter — drop
+#: a posting whose body is too short to use — was measured against the real table and would have
+#: caught none of the junk above (those bodies run 371-1503 characters, against a 5th percentile
+#: of ~430 for postings that pass). It would only have penalized the terse Telegram postings,
+#: which are short *and* real. A filter that cannot be shown to catch the thing it is aimed at
+#: does not earn its false positives.
+
+
+def _normalized_title(title: str) -> str:
+    """Fold a title for comparison: entities decoded, whitespace collapsed, case dropped."""
+    return " ".join(unescape(title).split()).strip(" -–—:|").casefold()  # noqa: RUF001 (dashes)
+
+
+def _is_junk(job: _Filterable) -> bool:
+    """True when the row is not a real posting at all, only scraped page furniture."""
+    return _normalized_title(job.title) in _JUNK_TITLES
+
+
 def _below_middle(title: str) -> bool:
     return bool(_JUNIOR_TITLE.search(title)) and not _MIDDLE_PLUS_TITLE.search(title)
 
@@ -116,6 +175,8 @@ def _ml_training_primary(title: str) -> bool:
 
 def passes_hard_filters(job: _Filterable) -> bool:
     """True when the posting is worth embedding. Pure: no I/O, no model calls."""
+    if _is_junk(job):
+        return False
     if _RU_BY_LOCATION.search(job.location or ""):
         return False
     haystack = f"{job.title}\n{job.description}\n{job.location or ''}"
