@@ -80,6 +80,13 @@ _CONTRACTOR_OK = re.compile(
 #: multi-region net like "must be located in the Americas, Europe, or Israel" is a false positive.
 _REGION_OK = re.compile(r"europe|\beu\b|\beea\b|\bemea\b|anywhere|world-?wide", re.IGNORECASE)
 
+#: The posting names a citizenship/residency *preference* and then says it accepts everyone:
+#: "U.S. Citizens and Green Card Holders highly preferred, all valid work authorizations may
+#: apply". `_GEO_LOCKED` sees only the first half and reads a hard lock; this is the second half
+#: saying there is none. Kept tight — "all/any" must sit next to the authorization phrase, not
+#: merely somewhere in the posting, because "AWS preferred" elsewhere in a body is not consent.
+_AUTHORIZATION_OPEN = re.compile(r"\b(?:all|any)\b[\w\s,]{0,30}?work authoriz", re.IGNORECASE)
+
 #: Unconditional stops: clearances a RU citizen cannot obtain.
 STOP_PHRASES: frozenset[str] = frozenset({"security clearance"})
 
@@ -193,4 +200,5 @@ def passes_hard_filters(job: _Filterable) -> bool:
         and bool(_GEO_LOCKED.search(haystack))
         and not _CONTRACTOR_OK.search(haystack)
         and not _REGION_OK.search(haystack)
+        and not _AUTHORIZATION_OPEN.search(haystack)
     )

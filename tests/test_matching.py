@@ -211,3 +211,45 @@ def test_a_terse_posting_is_kept(job: NormalizedJob) -> None:
     """No minimum-description rule: Telegram postings are short and real (see filters.py)."""
     terse = job.model_copy(update={"description": "Python backend. Remote. Write to @hr."})
     assert passes_hard_filters(terse) is True
+
+
+def test_a_citizenship_preference_that_accepts_everyone_is_not_a_lock(job: NormalizedJob) -> None:
+    """The live false positive (job 2672): the posting says the quiet part right after.
+
+    `_GEO_LOCKED` sees "U.S. Citizens" and reads a hard lock; the very next clause says there
+    is none. Without the override, a clean remote Python role was dropped before embedding.
+    """
+    open_auth = job.model_copy(
+        update={
+            "description": (
+                "Work Authorization: U.S. Citizens and Green Card Holders highly preferred, "
+                "all valid work authorizations may apply."
+            )
+        }
+    )
+    assert passes_hard_filters(open_auth) is True
+
+
+def test_a_real_authorization_requirement_still_rejects(job: NormalizedJob) -> None:
+    """The override must not swallow the rule it qualifies."""
+    for text in (
+        "Must be authorized to work in the U.S. without current or future sponsorship.",
+        "Must reside in the United States and perform all work within the United States.",
+        "Must be a U.S. citizen and speak fluent English.",
+    ):
+        locked = job.model_copy(update={"description": text})
+        assert passes_hard_filters(locked) is False, text
+
+
+def test_preferred_elsewhere_in_the_body_is_not_consent(job: NormalizedJob) -> None:
+    """ "AWS preferred" further down a posting says nothing about work authorization."""
+    locked = job.model_copy(
+        update={
+            "description": (
+                "Applicants must be authorized to work in the country where the position is "
+                "located without employer sponsorship. Terraform and AWS preferred. We support "
+                "all levels of experience."
+            )
+        }
+    )
+    assert passes_hard_filters(locked) is False
