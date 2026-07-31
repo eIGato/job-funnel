@@ -368,7 +368,8 @@ Done 2026-07-23 — live-verified: `funnel draft --limit 3` drafted three real l
 top of the shortlist (Proxify backend/fullstack) grounded in the retrieved bullets and stored under
 `Application.cover_letter` (status `drafted`), readable in the admin. Cost is ~$0.003–0.004/letter
 on `claude-haiku-4-5` ($1/$5 per 1M). `funnel draft` walks the top of the
-shortlist (`(is_remote DESC, match_score DESC)`, capped at `match_top_k` or `--limit`), drafts a
+shortlist (`(is_remote DESC, match_score DESC)`, capped at `match_top_k` or `--limit`, and floored
+at `match_percentile_threshold` so a thin week yields fewer letters rather than weaker ones), drafts a
 letter per posting, and writes `Application.cover_letter` with status `drafted`. It never sends
 (invariant 2). Idempotent: a posting whose Application has moved past `shortlisted` is skipped, so a
 re-run neither regenerates nor clobbers a letter (or a human edit). Details:

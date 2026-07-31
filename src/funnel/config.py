@@ -115,7 +115,23 @@ class Settings(BaseSettings):
 
     # --- Matching ---
     match_top_k: int = Field(default=25, ge=1, description="Shortlist size after ranking.")
-    match_score_threshold: float = Field(default=0.0, ge=-1.0, le=1.0)
+    #: A floor, not a selector. `match_top_k` already decides how many postings get drafted for;
+    #: this decides when there are simply not that many worth drafting for, so a thin week ends
+    #: with three letters instead of twenty-five padded out with whatever ranked highest.
+    #:
+    #: Expressed as a percentile rather than a score on purpose. A centered score is only
+    #: meaningful against the corpus it was centered on, and that corpus grows with every
+    #: ingest — an absolute floor would quietly drift. A percentile means the same thing in
+    #: every run. Measured 2026-07-31 over 2061 scored rows: rank 25 sits at 97.6, rank 100 at
+    #: 91.0 ("Senior Vue Developer" — arguable but a real backend-adjacent role), rank 206 at
+    #: 81.3 ("Virtual Assistant" — not). 90 lands between the last defensible row and the first
+    #: indefensible one, and is non-binding at today's volume: it only bites when the pool is thin.
+    match_percentile_threshold: float = Field(
+        default=90.0,
+        ge=0.0,
+        le=100.0,
+        description="Minimum match percentile a posting needs before it is drafted for.",
+    )
 
     # --- Admin ---
     admin_host: str = Field(default="127.0.0.1")

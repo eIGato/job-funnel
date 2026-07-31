@@ -225,13 +225,25 @@ def draft(
 
     # The shortlist order (PLAN.md section 7): remote first, then by score.
     top_n = limit or settings.match_top_k
+    floor = settings.match_percentile_threshold
     with session_scope() as session:
         jobs = session.scalars(
             select(Job)
-            .where(Job.match_score.isnot(None), Job.hard_filter_passed.is_(True))
+            .where(
+                Job.match_score.isnot(None),
+                Job.hard_filter_passed.is_(True),
+                Job.match_percentile >= floor,
+            )
             .order_by(desc(Job.is_remote), desc(Job.match_score))
             .limit(top_n)
         ).all()
+        if not jobs:
+            typer.secho(
+                f"draft: nothing at or above the {floor:.0f}th percentile "
+                "(match_percentile_threshold). Run `funnel match` if the shortlist is stale.",
+                fg=typer.colors.YELLOW,
+            )
+            return
 
         # One letter per role, not per row. A board can list the same role once per city —
         # arbeitnow carries "Senior Platform Engineer (Remote UK Only)" under seven city slugs,
@@ -338,9 +350,15 @@ def agent_draft(
     deps = build_agent_deps(do_research=research)
 
     with session_scope() as session:
+        # Same quality floor as `draft`. This pass is four model calls and a web search per
+        # posting, so spending it below the floor is the more expensive version of the mistake.
         jobs = session.scalars(
             select(Job)
-            .where(Job.match_score.isnot(None), Job.hard_filter_passed.is_(True))
+            .where(
+                Job.match_score.isnot(None),
+                Job.hard_filter_passed.is_(True),
+                Job.match_percentile >= settings.match_percentile_threshold,
+            )
             .order_by(desc(Job.is_remote), desc(Job.match_score))
             .limit(limit)
         ).all()

@@ -50,6 +50,19 @@ class SourceAdmin(ModelView, model=Source):
     form_excluded_columns = [Source.jobs]
 
 
+def _link(model: Any, attribute: str) -> Markup:
+    """Render a URL as a clickable link, opening in a new tab.
+
+    The review loop is "read the posting, then decide", and sqladmin renders a URL as plain
+    text — so reviewing meant selecting and copying an Adzuna redirect URL by hand. `noopener`
+    because `target=_blank` otherwise hands the opened page a reference back to the admin.
+    """
+    value = getattr(model, attribute)
+    if not value:
+        return Markup("")
+    return Markup(f'<a href="{escape(value)}" target="_blank" rel="noopener">{escape(value)}</a>')
+
+
 def _percentile(model: Any, attribute: str) -> str:
     """List formatter: the match percentile as a percentage.
 
@@ -77,7 +90,7 @@ class JobAdmin(ModelView, model=Job):
         Job.posted_at,
     ]
     column_labels = {Job.match_percentile: "Match"}
-    column_formatters = {Job.match_percentile: _percentile}
+    column_formatters = {Job.match_percentile: _percentile, Job.url: _link}
     column_searchable_list = [Job.company, Job.title]
     column_sortable_list = [
         Job.match_percentile,
@@ -92,7 +105,11 @@ class JobAdmin(ModelView, model=Job):
     # Sorting on the percentile is the same order — it is monotonic in match_score.
     column_default_sort = [(Job.is_remote, True), (Job.match_percentile, True)]
     column_details_exclude_list = [Job.embedding]  # raw bytes are noise in the UI
-    column_formatters_detail = {Job.description: _multiline, Job.match_percentile: _percentile}
+    column_formatters_detail = {
+        Job.description: _multiline,
+        Job.match_percentile: _percentile,
+        Job.url: _link,
+    }
 
     # content_hash is derived on write (models._fill_content_hash) — nobody types a sha256.
     # Job.application is cascade="all, delete-orphan": leaving it off this form is what stops

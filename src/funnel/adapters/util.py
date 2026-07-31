@@ -6,6 +6,7 @@ so no BeautifulSoup/lxml is pulled in for what the adapters need here.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from html import unescape
@@ -72,6 +73,42 @@ def clip(text: str, limit: int = MAX_DESCRIPTION_CHARS) -> str:
     return cut[:sep].rstrip() if sep > 0 else cut.rstrip()
 
 
+#: "This job is remote" said outright, which outranks any later mention of office days.
+_EXPLICIT_REMOTE = re.compile(
+    r"\b(?:fully|100\s*%|entirely|completely)[\s-]*remote\b|\bremote[\s-]*(?:first|only)\b",
+    re.IGNORECASE,
+)
+#: A split arrangement. The word "remote" appears in these too — that is the whole problem.
+_HYBRID = re.compile(
+    r"\bhybrid\b|\b\d+\s*days?\s*(?:a\s*week\s*)?(?:on-?site|in\s*(?:the\s*)?office)\b",
+    re.IGNORECASE,
+)
+#: A bare mention, believed only when nothing above contradicts it.
+_REMOTE_HINT = re.compile(r"\bremote|\bwork from home\b|\bwfh\b|удал", re.IGNORECASE)
+
+
+def looks_remote(title: str, location: str | None, description: str) -> bool:
+    """Decide `is_remote` from free text, for sources that expose no structured flag.
+
+    Most adapters read a real field (arbeitnow's `remote`, RemoteOK's whole premise) and should
+    keep doing that — this is for the ones with nothing but prose. Searching that prose for
+    "remote" is what put a hybrid Chandler, AZ posting ("3 Days onsite, 2 Days work from home")
+    on the remote-first shortlist, twice: the word is there, the job is not remote.
+
+    Order is the point. An outright claim wins; failing that, a hybrid marker is decisive
+    *against*, because a posting that spells out office days has already told us what it is;
+    only then does a bare mention count. Measured over the 190 Adzuna rows in the table
+    (2026-07-31): 28 were flagged remote, 19 of them on the body alone, and 14 carried
+    hybrid/on-site wording. The middle branch is what those 14 needed.
+    """
+    text = f"{title}\n{location or ''}\n{description}"
+    if _EXPLICIT_REMOTE.search(text):
+        return True
+    if _HYBRID.search(text):
+        return False
+    return bool(_REMOTE_HINT.search(text))
+
+
 def _aware(dt: datetime) -> datetime:
     """Assume UTC for a naive datetime; boards report in UTC when they omit the zone."""
     return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
@@ -136,5 +173,6 @@ __all__ = [
     "from_rfc822",
     "get_json",
     "get_text",
+    "looks_remote",
     "strip_html",
 ]

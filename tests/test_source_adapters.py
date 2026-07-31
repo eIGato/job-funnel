@@ -19,6 +19,7 @@ from funnel.adapters.remoteok import RemoteOKAdapter
 from funnel.adapters.remotive import RemotiveAdapter
 from funnel.adapters.teletype import TeletypeAdapter
 from funnel.adapters.themuse import TheMuseAdapter
+from funnel.adapters.util import looks_remote
 from funnel.adapters.weworkremotely import WeWorkRemotelyAdapter
 from funnel.matching.filters import passes_hard_filters
 
@@ -104,6 +105,24 @@ def test_adzuna_reads_company_and_flags_remote_from_text() -> None:
     assert first.is_remote is True  # "remote" in the teaser
     assert first.external_id == "123"
     assert jobs[1].is_remote is False
+
+
+@pytest.mark.parametrize(
+    ("description", "expected"),
+    [
+        ("Remote-friendly team, work from home whenever you like.", True),
+        ("This fully remote W2 contract role offers competitive pay.", True),
+        # Row 1342/1348: the words are there, the job is not remote.
+        ("Job Location: Chandler, AZ (3 Days onsite, 2 Days work from home) hybrid role", False),
+        ("Location: Gdynia / Hybrid (2 days remote)", False),
+        ("Malvern, PA (Hybrid 3 days in office and 2 days remote)", False),
+        # An outright claim outranks a later mention of office days.
+        ("Fully remote. Optional 2 days in the office if you live nearby.", True),
+        ("Onsite in Berlin, five days a week.", False),
+    ],
+)
+def test_remote_is_read_in_order_of_specificity(description: str, expected: bool) -> None:
+    assert looks_remote("Backend Developer", "Berlin", description) is expected
 
 
 def test_themuse_reads_full_contents_and_remote_location() -> None:

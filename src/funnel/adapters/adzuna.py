@@ -15,12 +15,11 @@ from __future__ import annotations
 from typing import Any
 
 from funnel.adapters.base import BaseAdapter, register
-from funnel.adapters.util import clip, from_iso, get_json, strip_html
+from funnel.adapters.util import clip, from_iso, get_json, looks_remote, strip_html
 from funnel.config import get_settings
 from funnel.schemas import NormalizedJob
 
 _API = "https://api.adzuna.com/v1/api/jobs/{country}/search/1"
-_REMOTE_HINTS = ("remote", "work from home", "wfh", "удал")
 
 
 @register
@@ -73,7 +72,6 @@ class AdzunaAdapter(BaseAdapter):
                 continue
             location = (row.get("location") or {}).get("display_name")
             description = clip(strip_html(row.get("description")))
-            haystack = f"{title} {description} {location or ''}".casefold()
             jobs.append(
                 NormalizedJob(
                     url=url,
@@ -81,7 +79,10 @@ class AdzunaAdapter(BaseAdapter):
                     title=title,
                     description=description,
                     location=location,
-                    is_remote=any(hint in haystack for hint in _REMOTE_HINTS),
+                    # Adzuna exposes no remote flag, so this is read off the prose. The teaser
+                    # is where a hybrid arrangement gets spelled out, hence looks_remote's
+                    # ordering rather than a plain substring search.
+                    is_remote=looks_remote(title, location, description),
                     posted_at=from_iso(row.get("created")),
                     external_id=str(row["id"]) if row.get("id") else None,
                 )
