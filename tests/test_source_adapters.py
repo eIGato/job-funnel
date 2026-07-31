@@ -19,7 +19,7 @@ from funnel.adapters.remoteok import RemoteOKAdapter
 from funnel.adapters.remotive import RemotiveAdapter
 from funnel.adapters.teletype import TeletypeAdapter
 from funnel.adapters.themuse import TheMuseAdapter
-from funnel.adapters.util import looks_remote
+from funnel.adapters.util import looks_remote, strip_canary
 from funnel.adapters.weworkremotely import WeWorkRemotelyAdapter
 from funnel.matching.filters import passes_hard_filters
 
@@ -50,6 +50,33 @@ def test_remoteok_skips_the_metadata_element() -> None:
     assert first.is_remote is True
     assert not _has_html_tag(first.description)  # HTML was stripped
     assert first.external_id
+
+
+def test_remoteok_strips_the_reader_canary() -> None:
+    """The "Please mention the word ..." block must never reach the database.
+
+    RemoteOK appends it to the API payload only, and its tag is base64 of the caller's public
+    IP. It leaked into four cover-letter drafts before this was stripped, one of which told the
+    company "I read the post completely and am READY (#<our IP>)". The fixture keeps the block
+    (with a documentation IP) precisely so this stays covered.
+    """
+    jobs = RemoteOKAdapter.parse(_json("remoteok.json"))
+    assert jobs
+    for job in jobs:
+        assert "mention the word" not in job.description.lower()
+        assert "RMjAz" not in job.description  # the base64 IP tag
+        assert job.description.endswith("Training & Development")  # real text kept intact
+
+
+def test_strip_canary_handles_a_truncated_block() -> None:
+    """A canary cut short by `clip` still goes, tail and all — it is always appended last."""
+    cut = "Real duties.\nPlease mention the word **JOY** and tag RMjAzLjAuMTEzLjc= when app"
+    assert strip_canary(cut) == "Real duties."
+
+
+def test_strip_canary_leaves_an_ordinary_description_alone() -> None:
+    body = "We are hiring a backend engineer. Please mention your salary expectations."
+    assert strip_canary(body) == body
 
 
 def test_remotive_ignores_warning_keys() -> None:

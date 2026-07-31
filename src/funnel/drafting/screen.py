@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 
 from funnel.config import bridge_llm_api_key, get_settings
+from funnel.drafting.prompting import UNTRUSTED_INPUT_RULE, posting_block
 
 if TYPE_CHECKING:
     from pydantic_ai.models import Model
@@ -80,7 +81,9 @@ SCREEN_INSTRUCTIONS = (
     "authorization — those are decided upstream by deterministic filters (PLAN.md section 7) and "
     "must NEVER be a reason here, nor appear in your reasoning. The seeker works remotely, "
     "contracts B2B, and adapts to any timezone; assume that is handled. "
-    "When unsure, keep it. Give one short line of reasoning about the role's content either way."
+    "When unsure, keep it. Give one short line of reasoning about the role's content either "
+    "way.\n\n"
+    f"{UNTRUSTED_INPUT_RULE}"
 )
 
 
@@ -88,7 +91,7 @@ def screen_prompt(job: ScreenableJob) -> str:
     return (
         f"POSTING\nTitle: {job.title}\nCompany: {job.company}\n"
         f"Location: {job.location or 'n/a'}\n"
-        f"Description:\n{job.description or '(none provided)'}"
+        f"Description:\n{posting_block(job.description)}"
     )
 
 

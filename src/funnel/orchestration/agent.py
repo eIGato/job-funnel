@@ -50,6 +50,7 @@ from funnel.drafting.cover_letter import _detect_language as detect_language
 from funnel.drafting.cover_letter import (
     make_agent as make_draft_agent,
 )
+from funnel.drafting.prompting import UNTRUSTED_INPUT_RULE, posting_block
 from funnel.drafting.screen import (
     WorthItVerdict,
     make_screen_agent,
@@ -181,7 +182,8 @@ _CRITIC_INSTRUCTIONS = (
     "- The real company name is used; no [Company] placeholders; any URL is intact.\n"
     "- Length and shape fit the channel (a chat message stays short; a form letter never "
     "mentions an attachment).\n"
-    "Do not rewrite the letter yourself — name the problems so the drafter can fix them."
+    "Do not rewrite the letter yourself — name the problems so the drafter can fix them.\n\n"
+    f"{UNTRUSTED_INPUT_RULE}"
 )
 
 
@@ -194,7 +196,7 @@ def _critic_prompt(brief: JobBrief, draft: CoverLetterDraft, bullets: list[str])
     experience = "\n".join(f"- {b}" for b in bullets) or "- (no bullets retrieved)"
     return (
         f"POSTING\nTitle: {brief.title}\nCompany: {brief.company}\n"
-        f"Description:\n{brief.description or '(none provided)'}\n\n"
+        f"Description:\n{posting_block(brief.description)}\n\n"
         f"THE SEEKER'S REAL EXPERIENCE BULLETS (the only facts the letter may claim):\n"
         f"{experience}\n\n"
         f"DRAFT LETTER\nSubject: {draft.subject}\n\n{draft.body}\n\n"

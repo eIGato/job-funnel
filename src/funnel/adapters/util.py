@@ -62,6 +62,27 @@ def strip_html(raw: str | None) -> str:
     return "\n".join(line for line in lines if line).strip()
 
 
+#: RemoteOK appends this to every description it serves over the API/RSS, and to none of the
+#: HTML it serves to a browser. The tag is base64 of the *caller's* public IP, minted per
+#: request, so the block is a canary: quote it in an application and the board learns which
+#: scraper the posting reached you through. It is also an instruction addressed to whoever
+#: reads the text next, which on this pipeline is the drafting model — and it obeyed (see the
+#: 2026-07-31 migration). Bounded and anchored to the end because the block is always appended
+#: last; `clip` may have truncated it, hence the alternative ending at end-of-string.
+_CANARY = re.compile(
+    r"\n*Please mention the word\b.{0,400}?(?:see they'?re human\.|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def strip_canary(text: str) -> str:
+    """Drop a board's reader-canary block from a description.
+
+    Run before `clip`, so the canary never eats characters the posting itself needs.
+    """
+    return _CANARY.sub("", text).rstrip()
+
+
 def clip(text: str, limit: int = MAX_DESCRIPTION_CHARS) -> str:
     """Trim to `limit` characters, never mid-nonsense: cut on a boundary when close."""
     if len(text) <= limit:
@@ -174,5 +195,6 @@ __all__ = [
     "get_json",
     "get_text",
     "looks_remote",
+    "strip_canary",
     "strip_html",
 ]

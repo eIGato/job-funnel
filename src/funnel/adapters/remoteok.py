@@ -2,6 +2,9 @@
 
 The endpoint returns a JSON array whose first element is a legal/metadata notice, not a
 job. Every posting is remote by definition. The URL lives in Source.config, not here.
+
+Every description carries a "Please mention the word ..." canary that the board's own HTML
+does not (`strip_canary`, and the 2026-07-31 migration for why it matters).
 """
 
 from __future__ import annotations
@@ -9,7 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from funnel.adapters.base import BaseAdapter, register
-from funnel.adapters.util import clip, from_iso, get_json, strip_html
+from funnel.adapters.util import clip, from_iso, get_json, strip_canary, strip_html
 from funnel.schemas import NormalizedJob
 
 
@@ -45,7 +48,7 @@ class RemoteOKAdapter(BaseAdapter):
                     url=url,
                     company=strip_html(row["company"]),
                     title=strip_html(row["position"]),
-                    description=clip(strip_html(row.get("description"))),
+                    description=clip(strip_canary(strip_html(row.get("description")))),
                     location=row.get("location") or None,
                     is_remote=True,
                     posted_at=from_iso(row.get("date")),
