@@ -174,9 +174,17 @@ docker compose run --rm --build app uv run funnel run-funnel
   `intfloat/multilingual-e5-large` (same family, human-confirmed 2026-07-22). **e5 requires
   prefixes: profile text gets `query: `, posting text gets `passage: `** (handled in
   `matching/embed.py`). Omitting them degrades scores silently.
+- **Scores are centered, and `match` rescores everything.** Raw e5 cosine puts the profile and
+  every posting in a 0.72–0.86 band (sd 0.023, measured 2026-07-31): a real backend role and a
+  scraped cookie banner landed 0.00001 apart. `match_score` is therefore cosine with the mean
+  posting vector subtracted from both sides (sd 0.093), and the admin shows `match_percentile`
+  because no absolute value means anything. The centre is a property of the whole corpus, so
+  **`match` re-filters and rescores every row on every run** and only embedding is incremental.
+  That is what makes a changed filter or profile take effect by itself — the pipeline has twice
+  shipped a rule that silently applied to new postings only.
 - **One active profile (multi-profile shelved).** `data/profiles/` (gitignored) holds
-  `_experience.md` (shared) prepended to the active header, `backend.md`. `match_score` is just
-  cosine(job, that profile) — no `max`, no `matched_profile`. `backend.md` carries one truthful
+  `_experience.md` (shared) prepended to the active header, `backend.md`. Scoring is against
+  that one profile — no `max`, no `matched_profile`. `backend.md` carries one truthful
   gameplay/UE line so a hybrid posting ("Unreal dev with backend experience") still surfaces.
   `gameplay.md`/`techdesign.md` are dormant (refreshed from the CVs, consumed by nothing) so
   multi-profile can be revived if shipped game work appears. See `PLAN.md` §4.

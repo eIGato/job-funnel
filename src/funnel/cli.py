@@ -104,50 +104,85 @@ def ingest() -> None:
 def match() -> None:
     """Hard filters plus embedding ranking. No LLM, no tokens.
 
-    Incremental: only postings not yet scored (match_score IS NULL) are considered, so a
-    re-run is cheap. Rejects stay unscored (NULL) — re-running just re-applies the cheap,
-    deterministic filters to them; only survivors are embedded, and once scored they drop out.
+    Three passes. Only the expensive one is incremental:
+
+    1. **Filtering is global**, because `passes_hard_filters` is pure and cheap — no I/O, no
+       model. Re-judging every row on every run is what makes a filter change take effect by
+       itself; the alternative is a data migration per rule (`c7a5f2e91d34` was exactly that),
+       and the rule that never gets one silently applies to new postings only.
+    2. **Embedding is incremental**, because it is the only expensive step. A row keeps its
+       vector once computed, including a row the filters have since retired: re-embedding it
+       if a rule is later relaxed would be waste. Rejects are never embedded in the first place.
+    3. **Scoring is global.** Scores are centered on the mean posting vector
+       (`centered_similarity`), which is a property of the whole corpus — a score is comparable
+       only against scores computed around the same centre, so scoring a new batch on its own
+       would produce numbers that cannot be ranked against the existing ones. Rescoring
+       everything is one matmul over vectors already in the database: no model call, no
+       network, milliseconds at this size. An edited profile lands on the next run too.
     """
-    from funnel.matching.embed import cosine_similarity, embed_texts, to_bytes
+    import numpy as np
+
+    from funnel.matching.embed import (
+        centered_similarity,
+        embed_texts,
+        from_bytes,
+        percentile_ranks,
+        to_bytes,
+    )
     from funnel.matching.filters import passes_hard_filters
     from funnel.matching.profile import get_profile_vector
 
     with session_scope() as session:
-        pending = session.scalars(select(Job).where(Job.match_score.is_(None))).all()
-        if not pending:
-            typer.secho("match: nothing to score", fg=typer.colors.YELLOW)
-            return
+        every = session.scalars(select(Job)).all()
 
-        survivors: list[Job] = []
-        for job in pending:
-            job.hard_filter_passed = passes_hard_filters(job)
-            if job.hard_filter_passed:
-                survivors.append(job)
+        retired = 0
+        needs_embedding: list[Job] = []
+        for job in every:
+            passed = passes_hard_filters(job)
+            if job.hard_filter_passed and not passed:
+                retired += 1
+            job.hard_filter_passed = passed
+            if passed and job.embedding is None:
+                needs_embedding.append(job)
 
-        if not survivors:
+        # Postings are the passage side of the e5 pair; the profile is the query side.
+        for start in range(0, len(needs_embedding), _SCORE_CHUNK):
+            chunk = needs_embedding[start : start + _SCORE_CHUNK]
+            texts = [f"{j.title}\n{j.company}\n{j.description}".strip() for j in chunk]
+            for job, vector in zip(chunk, embed_texts(texts, is_query=False), strict=True):
+                job.embedding = to_bytes(vector)
+            session.commit()
+            typer.echo(f"  embedded {start + len(chunk)}/{len(needs_embedding)}")
+
+        # A rejected row must not keep a score: it is off the shortlist, and leaving it in the
+        # population would also drag the centre towards postings we decided against.
+        population = [j for j in every if j.hard_filter_passed and j.embedding is not None]
+        for job in every:
+            if job.hard_filter_passed is False:
+                job.match_score = None
+                job.match_percentile = None
+        if not population:
+            session.commit()
             typer.secho(
-                f"match: {len(pending)} scanned, 0 passed the hard filters", fg=typer.colors.YELLOW
+                f"match: {len(every)} scanned, 0 passed the hard filters", fg=typer.colors.YELLOW
             )
             return
 
-        # Postings are the passage side of the e5 pair; the profile is the query side.
-        profile = get_profile_vector()
-        top = float("-inf")
-        for start in range(0, len(survivors), _SCORE_CHUNK):
-            chunk = survivors[start : start + _SCORE_CHUNK]
-            texts = [f"{j.title}\n{j.company}\n{j.description}".strip() for j in chunk]
-            matrix = embed_texts(texts, is_query=False)
-            scores = cosine_similarity(matrix, profile)
-            for job, vector, score in zip(chunk, matrix, scores, strict=True):
-                job.embedding = to_bytes(vector)
-                job.match_score = float(score)
-            session.commit()
-            top = max(top, float(scores.max()))
-            typer.echo(f"  scored {start + len(chunk)}/{len(survivors)}")
+        # One float32 matrix of the whole shortlist: 1024 dims is ~4 KB a row, so a few thousand
+        # postings is a few MB. Chunk this only if the table grows by an order of magnitude.
+        matrix = np.vstack([from_bytes(job.embedding) for job in population if job.embedding])
+        scores = centered_similarity(matrix, get_profile_vector())
+        percentiles = percentile_ranks(scores)
+        for job, score, percentile in zip(population, scores, percentiles, strict=True):
+            job.match_score = float(score)
+            job.match_percentile = float(percentile)
+        session.commit()
 
         typer.secho(
-            f"match: {len(pending)} scanned, {len(survivors)} scored "
-            f"({len(pending) - len(survivors)} filtered out), top score {top:.3f}",
+            f"match: {len(every)} scanned, {len(needs_embedding)} newly embedded, "
+            f"{len(population)} scored ({len(every) - len(population)} filtered out"
+            + (f", {retired} newly retired" if retired else "")
+            + f"), top score {float(scores.max()):.3f}",
             fg=typer.colors.GREEN,
         )
 

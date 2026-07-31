@@ -6,7 +6,7 @@ human has sent an application themselves. It sends nothing.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from markupsafe import Markup, escape
 from sqladmin import Admin, ModelView
@@ -14,6 +14,10 @@ from starlette.applications import Starlette
 
 from funnel.db import get_engine
 from funnel.models import Application, Job, Reply, Source
+
+if TYPE_CHECKING:
+    from sqlalchemy import Select
+    from starlette.requests import Request
 
 
 def _multiline(model: Any, attribute: str) -> Markup:
@@ -46,6 +50,18 @@ class SourceAdmin(ModelView, model=Source):
     form_excluded_columns = [Source.jobs]
 
 
+def _percentile(model: Any, attribute: str) -> str:
+    """List formatter: the match percentile as a percentage.
+
+    The raw score is a centered cosine — spread enough to rank on, but ~0.23 for a strong
+    match and negative for half the table, which reads like a bug to a human skimming the
+    list. The percentile is the reviewable form: "94% of the shortlist scores below this".
+    The score itself stays visible in the detail view for anyone debugging the ranking.
+    """
+    value = getattr(model, attribute)
+    return "" if value is None else f"{value:.1f}%"
+
+
 class JobAdmin(ModelView, model=Job):
     name = "Job"
     name_plural = "Jobs"
@@ -57,11 +73,14 @@ class JobAdmin(ModelView, model=Job):
         Job.is_remote,
         Job.apply_channel,
         Job.hard_filter_passed,
-        Job.match_score,
+        Job.match_percentile,
         Job.posted_at,
     ]
+    column_labels = {Job.match_percentile: "Match"}
+    column_formatters = {Job.match_percentile: _percentile}
     column_searchable_list = [Job.company, Job.title]
     column_sortable_list = [
+        Job.match_percentile,
         Job.match_score,
         Job.is_remote,
         Job.apply_channel,
@@ -70,14 +89,27 @@ class JobAdmin(ModelView, model=Job):
     ]
     # The shortlist order the human reviews and drafting picks top-N from (PLAN.md section 7):
     # remote first, then by score. "Rank below remote" is this sort, not a score penalty.
-    column_default_sort = [(Job.is_remote, True), (Job.match_score, True)]
+    # Sorting on the percentile is the same order — it is monotonic in match_score.
+    column_default_sort = [(Job.is_remote, True), (Job.match_percentile, True)]
     column_details_exclude_list = [Job.embedding]  # raw bytes are noise in the UI
-    column_formatters_detail = {Job.description: _multiline}
+    column_formatters_detail = {Job.description: _multiline, Job.match_percentile: _percentile}
+
     # content_hash is derived on write (models._fill_content_hash) — nobody types a sha256.
     # Job.application is cascade="all, delete-orphan": leaving it off this form is what stops
     # a Job edit from deleting the application and its cover letter.
     form_excluded_columns = [Job.embedding, Job.content_hash, Job.fetched_at, Job.application]
     page_size = 50
+
+    def sort_query(self, stmt: Select[Any], request: Request) -> Select[Any]:
+        """Push unscored rows to the end, whatever the sort.
+
+        A rejected posting has no score, and Postgres orders NULLs first on DESC — so the
+        shortlist view opened on the ~180 rows the hard filters threw out, every one blank in
+        the Match column, with the actual shortlist below the fold. This clause goes in ahead
+        of sqladmin's own, and only ever separates scored from unscored: the order the human
+        picks still decides everything within each group.
+        """
+        return super().sort_query(stmt.order_by(Job.match_percentile.is_(None)), request)
 
 
 class ApplicationAdmin(ModelView, model=Application):

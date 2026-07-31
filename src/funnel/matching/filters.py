@@ -150,6 +150,7 @@ _JUNK_TITLES: frozenset[str] = frozenset(
         "test job",
         "this is a test job",
         "untitled",
+        "vacancy",
         "we are hiring",
     }
 )

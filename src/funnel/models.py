@@ -219,7 +219,12 @@ class Job(Base):
     embedding: Mapped[bytes | None] = mapped_column(LargeBinary)
 
     hard_filter_passed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Cosine against the profile with the corpus mean removed (matching/embed.centered_similarity),
+    # so this is roughly -0.2..0.3 and not the 0.72..0.86 band raw e5 cosine produces. Both are
+    # rewritten wholesale on every `match`; NULL means "not on the shortlist".
     match_score: Mapped[float | None] = mapped_column(Float)
+    #: Percentage of the shortlist scoring below this posting, 0-100. The reviewable number.
+    match_percentile: Mapped[float | None] = mapped_column(Float)
 
     source: Mapped[Source] = relationship(back_populates="jobs")
     application: Mapped[Application | None] = relationship(

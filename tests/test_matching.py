@@ -10,7 +10,13 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
-from funnel.matching.embed import cosine_similarity, from_bytes, to_bytes
+from funnel.matching.embed import (
+    centered_similarity,
+    cosine_similarity,
+    from_bytes,
+    percentile_ranks,
+    to_bytes,
+)
 from funnel.matching.filters import passes_hard_filters
 
 if TYPE_CHECKING:
@@ -132,6 +138,54 @@ def test_embedding_bytes_roundtrip() -> None:
     assert np.array_equal(from_bytes(to_bytes(vector)), vector)
 
 
+def test_centering_spreads_a_narrow_band() -> None:
+    """The point of centering: separate rows that a shared component squeezes together.
+
+    Every row here carries a large common term (10.0 in the first dimension) plus a small
+    distinguishing one, which is what job-posting prose does to e5 cosine. Raw, the three rows
+    are nearly tied; centered, they are clearly apart.
+    """
+    matrix = np.array([[10.0, 1.0], [10.0, 0.5], [10.0, 0.0]], dtype=np.float32)
+    profile = np.array([10.0, 1.0], dtype=np.float32)
+
+    raw = cosine_similarity(matrix, profile)
+    centered = centered_similarity(matrix, profile)
+
+    assert float(raw.max() - raw.min()) < 0.02
+    assert float(centered.max() - centered.min()) > 1.0
+    # Centering must preserve the ordering, only widen it.
+    assert list(np.argsort(-raw)) == list(np.argsort(-centered))
+
+
+def test_centering_is_a_noop_on_a_single_row() -> None:
+    """One posting is its own centre, so it has nothing to be distinguished from."""
+    matrix = np.array([[1.0, 2.0]], dtype=np.float32)
+    scores = centered_similarity(matrix, np.array([1.0, 2.0], dtype=np.float32))
+    assert scores.shape == (1,)
+    assert not np.isnan(scores).any()
+
+
+def test_centered_similarity_handles_an_empty_matrix() -> None:
+    scores = centered_similarity(
+        np.empty((0, 0), dtype=np.float32), np.array([1.0], dtype=np.float32)
+    )
+    assert scores.shape == (0,)
+
+
+def test_percentile_ranks_span_the_population() -> None:
+    ranks = percentile_ranks(np.array([0.1, 0.3, 0.2, 0.4], dtype=np.float32))
+    assert list(ranks) == [0.0, 50.0, 25.0, 75.0]
+
+
+def test_tied_scores_share_a_percentile() -> None:
+    ranks = percentile_ranks(np.array([0.5, 0.5, 0.1], dtype=np.float32))
+    assert ranks[0] == ranks[1] > ranks[2]
+
+
+def test_percentile_ranks_handle_an_empty_population() -> None:
+    assert percentile_ranks(np.empty((0,), dtype=np.float32)).shape == (0,)
+
+
 def test_junior_title_is_below_the_middle_floor(job: NormalizedJob) -> None:
     for title in (
         "Junior Python Developer",
@@ -193,6 +247,12 @@ def test_junk_titles_are_dropped(job: NormalizedJob) -> None:
     ):
         junk = job.model_copy(update={"title": title})
         assert passes_hard_filters(junk) is False, title
+
+
+def test_a_bare_generic_title_is_junk(job: NormalizedJob) -> None:
+    """RemoteOK row 3110: title "Vacancy", body "asdf" / skills "vim" — a placeholder."""
+    junk = job.model_copy(update={"title": "Vacancy"})
+    assert passes_hard_filters(junk) is False
 
 
 def test_junk_match_is_whole_title_not_substring(job: NormalizedJob) -> None:
