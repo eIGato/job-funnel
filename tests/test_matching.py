@@ -393,3 +393,46 @@ def test_a_truncated_teaser_is_not_judged_for_vocabulary(job: NormalizedJob) -> 
     ):
         teaser = job.model_copy(update={"title": "Backend Developer", "description": body})
         assert passes_hard_filters(teaser) is True, body
+
+
+def test_ru_by_location_knows_more_than_the_two_capitals(job: NormalizedJob) -> None:
+    """Regression (2026-08-03): the rule listed Moscow and St Petersburg and nothing else.
+
+    Boards name a bare city, so "Томск" and "Уфа" walked straight past it — one of them at the
+    99.7th percentile, into the head of the shortlist.
+    """
+    for location in (
+        "Томск",
+        "Уфа",
+        "Краснодар, Ростов-на-Дону",
+        "Новосибирск",
+        "Владивосток",
+        "Ижевск, Казань, Краснодар",
+        "Колпино",
+        "Нижний Новгород",
+        "Novosibirsk",
+        "Yekaterinburg",
+        "Rostov-on-Don",
+        "REMOTE RUSSIA",
+        "Минск (Беларусь)",
+        "Gomel",
+    ):
+        ru = job.model_copy(update={"location": location})
+        assert passes_hard_filters(ru) is False, location
+
+
+def test_the_location_rule_does_not_fire_on_an_ambiguity(job: NormalizedJob) -> None:
+    """Ambiguous Latin names are left out on purpose: their Cyrillic stems carry the real case."""
+    for location in (
+        "Perm Street, London",
+        "Brest, France",
+        "Vladimir Business Park, Texas",
+        "Tulare, California",
+        "Tbilisi",
+        "Belgrade",
+        "Podgorica",
+        "Berlin",
+        "Anywhere in the World",
+    ):
+        elsewhere = job.model_copy(update={"location": location})
+        assert passes_hard_filters(elsewhere) is True, location

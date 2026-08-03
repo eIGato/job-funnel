@@ -51,11 +51,46 @@ class _Filterable(Protocol):
     is_remote: bool
 
 
+#: Cities, because that is what a location field actually holds. The boards we read name a city
+#: and nothing else — "Томск", "Уфа", "Краснодар, Ростов-на-Дону" — so a rule that knows only the
+#: country and its two capitals catches almost nothing. It knew exactly Moscow and St Petersburg
+#: until 2026-08-03, and "Старший разработчик C++ / ИнфоТеКС / Томск" passed it at the 99.7th
+#: percentile, straight into the head of the shortlist.
+#:
+#: Latin spellings are the ones a foreign board uses; the Cyrillic ones are stems, so declined
+#: forms ("в Москве") match too. Deliberately absent from the Latin half: `Vladimir` (a given
+#: name), `Brest` (also in France), `Orel`, `Perm` ("Perm Street, London") and `Tula` (also in
+#: Mexico). A location filter must not fire on an ambiguity, and the Cyrillic stems carry those
+#: cities anyway — a Russian posting writes them in Russian.
+_RU_BY_LATIN = (
+    "russia|russian federation|belarus|belarusian",
+    "moscow|saint[- ]petersburg|st\\.? petersburg|petersburg|novosibirsk|"
+    "y?ekaterinburg|kazan|nizhny novgorod|chelyabinsk|samara|omsk|rostov[- ]on[- ]don|"
+    "ufa|krasnoyarsk|voronezh|volgograd|krasnodar|saratov|tyumen|tolyatti|izhevsk|"
+    "barnaul|ulyanovsk|irkutsk|khabarovsk|yaroslavl|vladivostok|makhachkala|tomsk|orenburg|"
+    "kemerovo|novokuznetsk|ryazan|astrakhan|naberezhnye chelny|penza|lipetsk|kirov|"
+    "cheboksary|kaliningrad|kursk|ulan[- ]ude|stavropol|sochi|tver|magnitogorsk|"
+    "ivanovo|bryansk|belgorod|surgut|kaluga|smolensk|volzhsky|cherepovets|vologda|saransk|"
+    "yakutsk|innopolis|podolsk|kolpino|balashikha|khimki|mytishchi|korolev|lyubertsy",
+    "minsk|gomel|homel|mogilev|mahilyow|vitebsk|vitsebsk|grodno|hrodna|bobruisk|babruysk",
+)
+_RU_BY_CYRILLIC = (
+    "росси|беларус|рф\\b",
+    "москв|санкт-петербург|петербург|новосибирск|екатеринбург|казан|"
+    "нижн(?:ий|ем) новгород|челябинск|самар|омск|ростов|уфа|уфе|красноярск|воронеж|перм|"
+    "волгоград|краснодар|саратов|тюмен|тольятти|ижевск|барнаул|ульяновск|иркутск|"
+    "хабаровск|ярославл|владивосток|махачкал|томск|оренбург|кемеров|новокузнецк|рязан|"
+    "астрахан|набережные челны|пенз|липецк|киров|чебоксар|тула|туле|калининград|курск|"
+    "улан-удэ|ставропол|сочи|твер|магнитогорск|иванов|брянск|белгород|сургут|калуг|"
+    "смоленск|волжский|череповец|вологд|саранск|якутск|иннополис|подольск|колпино|"
+    "балаших|химки|мытищ|королёв|королев|люберц",
+    "минск|гомел|могил[её]в|витебск|гродн|бобруйск|брест",
+)
+
 #: RU/BY work locations are a hard stop. Keyed on the *location* only: a remote foreign job that
 #: merely names Russia in its description is the main stream, not a reject.
 _RU_BY_LOCATION = re.compile(
-    r"\b(?:russia|russian federation|moscow|saint[- ]petersburg|st\.? petersburg|belarus|minsk)\b"
-    r"|росси|москв|санкт-петербург|петербург|беларус|минск|\bрф\b",  # noqa: RUF001 (Cyrillic is the point)
+    r"\b(?:" + "|".join(_RU_BY_LATIN) + r")\b|\b(?:" + "|".join(_RU_BY_CYRILLIC) + r")",
     re.IGNORECASE,
 )
 
