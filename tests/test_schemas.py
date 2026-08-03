@@ -76,3 +76,46 @@ def test_long_location_and_external_id_are_truncated_to_the_column() -> None:
     assert job.location is not None and len(job.location) <= 255
     assert job.external_id is not None and len(job.external_id) <= 255
     assert job.location.startswith("Anywhere in the World")
+
+
+def test_mojibake_is_repaired_on_construction(job: NormalizedJob) -> None:
+    """Several feeds serve UTF-8 that was decoded as cp1252 upstream, sometimes twice over."""
+    mangled = job.model_copy(
+        update={
+            "company": "MÃ¼nchen GmbH",
+            "title": "Backend Developer â€” Remote",
+            "description": "Bolsa de IniciaÃ§Ã£o CientÃ­fica",
+        }
+    )
+    fixed = NormalizedJob(**mangled.model_dump())
+    assert fixed.company == "München GmbH"
+    assert fixed.title == "Backend Developer — Remote"
+    assert fixed.description == "Bolsa de Iniciação Científica"
+
+
+def test_repairing_text_does_not_mint_a_second_row(job: NormalizedJob) -> None:
+    """The reason the repair lives in the schema: company and title are part of the dedup key.
+
+    Repaired anywhere later, the same posting would hash two ways and the shortlist would carry
+    a mangled twin beside a clean one, each with its own cover letter.
+    """
+    mangled = NormalizedJob(
+        url="https://example.com/jobs/9",
+        company="MÃ¼nchen GmbH",
+        title="Backend Developer",
+        external_id="abc-123",
+    )
+    clean = NormalizedJob(
+        url="https://example.com/jobs/9",
+        company="München GmbH",
+        title="Backend Developer",
+        external_id="abc-123",
+    )
+    assert mangled.content_hash_for(1) == clean.content_hash_for(1)
+
+
+def test_legitimate_accented_text_is_left_alone(job: NormalizedJob) -> None:
+    """Only the encoding round-trip is undone — a posting's own words are not ours to edit."""
+    for company in ("Château Ltd", "Ação S.A.", "München GmbH", "Ünal Öz", "Росгосстрах"):
+        kept = NormalizedJob(**{**job.model_dump(), "company": company})
+        assert kept.company == company

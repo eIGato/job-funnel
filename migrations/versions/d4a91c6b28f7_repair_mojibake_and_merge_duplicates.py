@@ -8,9 +8,9 @@ Data migration, no schema change.
 
 Several feeds serve UTF-8 that was decoded as cp1252 somewhere upstream, sometimes twice over:
 `…` arrives as `â€¦` or `Ã¢Â€Â¦`, `München` as `MÃ¼nchen`, a Russian location as `Ð Ð°Ð·Ð²Ñ`.
-513 of 2853 rows carried it — RemoteOK 286, arbeitnow 221, and a handful elsewhere. It was not
-cosmetic: the mangled text went into the embedding as noise, and 96 rows carried it in the
-company or title, which are part of the dedup key.
+298 of 2853 rows carried it, concentrated in RemoteOK and arbeitnow. It was not cosmetic: the
+mangled text went into the embedding as noise, and 47 rows carried it in the company or title,
+which are part of the dedup key.
 
 `schemas.NormalizedJob` now repairs the four text columns before anything downstream sees them,
 which is also before `content_hash_for` reads company and title. **That is what makes this

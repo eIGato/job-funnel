@@ -14,8 +14,8 @@ def repair_mojibake(text: str) -> str:
     """Undo UTF-8 that a feed decoded as cp1252 before serving it back as UTF-8.
 
     RemoteOK and arbeitnow both do this, sometimes twice over: `…` leaves as `â€¦` and arrives
-    as `Ã¢Â€Â¦`, `München` as `MÃ¼nchen`, a Russian location as `Ð Ð°Ð·Ð²Ñ`. It reached 513 of
-    2853 rows (measured 2026-08-03) — 96 of them in the company or title, which are part of the
+    as `Ã¢Â€Â¦`, `München` as `MÃ¼nchen`, a Russian location as `Ð Ð°Ð·Ð²Ñ`. It reached 298 of
+    2853 rows (measured 2026-08-03) — 47 of them in the company or title, which are part of the
     dedup key, so the damage was not cosmetic: it decided identity, and the rest went into the
     embedding as noise.
 
