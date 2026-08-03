@@ -7,6 +7,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
 from funnel.models import ApplyChannel, SourceKind, compute_content_hash
+from funnel.text import repair_mojibake
 
 #: The String(255) columns behind location/external_id (models.py). Boards occasionally send
 #: much longer values (WeWorkRemotely packs a country list into `region`), so the contract
@@ -35,6 +36,20 @@ class NormalizedJob(BaseModel):
     #: does, a job board does not. Left None, `Job` derives it from the URL on insert, which
     #: cannot tell "apply on this page" from "DM the poster".
     apply_channel: ApplyChannel | None = None
+
+    @field_validator("company", "title", "description", "location", mode="before")
+    @classmethod
+    def _repair_mojibake(cls, value: str | None) -> str | None:
+        """Undo a feed's broken encoding before anything downstream reads the text.
+
+        Here rather than in each adapter for the usual reason: a new source must not have to
+        remember. It is also the earliest point that still precedes `content_hash_for`, which
+        matters — company and title are part of the dedup key, so repairing them later would
+        mint a second row for a posting we already have. Runs before the length validators, so
+        a repaired string (mojibake is longer than what it encodes) is measured at its true
+        width.
+        """
+        return repair_mojibake(value) if isinstance(value, str) else value
 
     @field_validator("location", "external_id")
     @classmethod
