@@ -29,7 +29,14 @@ DEFAULT_SOURCES: list[SourceConfig] = [
     SourceConfig(
         name="arbeitnow",
         kind=SourceKind.API,
-        config={"base_url": "https://www.arbeitnow.com/api/job-board-api"},
+        # Three pages of the plain feed plus three of the visa-sponsorship slice. Germany is the
+        # one relocation destination open to the human, and this feed is where it lives; one
+        # page of a fast-rotating board was too thin a sample to reach the shortlist at all.
+        config={
+            "base_url": "https://www.arbeitnow.com/api/job-board-api",
+            "pages": 3,
+            "variants": [{}, {"visa_sponsorship": "true"}],
+        },
     ),
     SourceConfig(
         name="weworkremotely",

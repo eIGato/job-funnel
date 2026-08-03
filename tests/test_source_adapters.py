@@ -7,6 +7,7 @@ break in one of these means a fixture needs refreshing, not that the test is wro
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -189,3 +190,78 @@ def test_adapters_are_registered_under_their_name(adapter: type) -> None:
     from funnel import adapters
 
     assert adapters.registry()[adapter.name] is adapter
+
+
+def test_arbeitnow_walks_pages_and_variants(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The feed rotates fast, so one page is a thin sample and one slice is not the whole board.
+
+    Germany is the relocation destination actually open to the human and this is the feed that
+    carries it, so the adapter is configured to see more of it: `pages` deep, once per entry in
+    `variants`. Overlap between variants is fine — `_persist` dedups on content_hash.
+    """
+    import funnel.adapters.arbeitnow as mod
+
+    seen: list[dict[str, object]] = []
+
+    async def fake_get_json(url: str, params: dict[str, object] | None = None) -> object:
+        seen.append(dict(params or {}))
+        return _json("arbeitnow.json")
+
+    monkeypatch.setattr(mod, "get_json", fake_get_json)
+    monkeypatch.setattr(mod, "_PAGE_DELAY", 0)  # the delay is politeness, not behaviour
+
+    jobs = asyncio.run(
+        ArbeitnowAdapter(
+            {
+                "base_url": "https://www.arbeitnow.com/api/job-board-api",
+                "pages": 3,
+                "variants": [{}, {"visa_sponsorship": "true"}],
+            }
+        ).fetch()
+    )
+
+    assert seen == [
+        {"page": 1},
+        {"page": 2},
+        {"page": 3},
+        {"visa_sponsorship": "true", "page": 1},
+        {"visa_sponsorship": "true", "page": 2},
+        {"visa_sponsorship": "true", "page": 3},
+    ]
+    assert len(jobs) == 12  # two postings per fixture response, six responses
+
+
+def test_arbeitnow_defaults_to_one_plain_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A source seeded before the knobs existed must keep behaving exactly as it did."""
+    import funnel.adapters.arbeitnow as mod
+
+    seen: list[dict[str, object]] = []
+
+    async def fake_get_json(url: str, params: dict[str, object] | None = None) -> object:
+        seen.append(dict(params or {}))
+        return _json("arbeitnow.json")
+
+    monkeypatch.setattr(mod, "get_json", fake_get_json)
+    base = {"base_url": "https://www.arbeitnow.com/api/job-board-api"}
+
+    assert len(asyncio.run(ArbeitnowAdapter(base).fetch())) == 2
+    assert seen == [{"page": 1}]
+
+
+def test_arbeitnow_stops_at_the_end_of_a_variant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty page means the variant is exhausted — do not keep asking for more."""
+    import funnel.adapters.arbeitnow as mod
+
+    calls = 0
+
+    async def fake_get_json(url: str, params: dict[str, object] | None = None) -> object:
+        nonlocal calls
+        calls += 1
+        return _json("arbeitnow.json") if calls == 1 else {"data": []}
+
+    monkeypatch.setattr(mod, "get_json", fake_get_json)
+    monkeypatch.setattr(mod, "_PAGE_DELAY", 0)
+    config = {"base_url": "https://www.arbeitnow.com/api/job-board-api", "pages": 5}
+
+    assert len(asyncio.run(ArbeitnowAdapter(config).fetch())) == 2
+    assert calls == 2, "must stop after the first empty page, not walk all five"
