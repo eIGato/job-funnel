@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import typer
 from sqlalchemy import case, func, select
@@ -43,6 +43,17 @@ def _role_key(column: InstrumentedAttribute[str]) -> ColumnElement[str]:
     return func.lower(func.trim(column))
 
 
+def _company_rank(candidates: Any) -> ColumnElement[int]:
+    """Where a role stands among its own employer's roles, best first."""
+    from sqlalchemy import desc
+
+    return (
+        func.row_number()
+        .over(partition_by=candidates.c.company, order_by=desc(candidates.c.rank_score))
+        .label("company_rank")
+    )
+
+
 def shortlist_rank(remote_bonus: float) -> ColumnElement[float | None]:
     """What the shortlist sorts on: the match score, with remote work preferred.
 
@@ -57,7 +68,9 @@ def shortlist_rank(remote_bonus: float) -> ColumnElement[float | None]:
     return Job.match_score + case((Job.is_remote, remote_bonus), else_=0.0)
 
 
-def shortlist_select(*, top_n: int, floor: float, remote_bonus: float) -> Select[tuple[Job]]:
+def shortlist_select(
+    *, top_n: int, floor: float, remote_bonus: float, per_company: int = 3
+) -> Select[tuple[Job]]:
     """The `top_n` highest-ranked postings nobody has decided on yet.
 
     Kept a pure query builder so it can be read (and tested) without a database.
@@ -73,6 +86,11 @@ def shortlist_select(*, top_n: int, floor: float, remote_bonus: float) -> Select
     carries "Senior Platform Engineer (Remote UK Only)" under seven city slugs, each with its
     own id and location, so ingest cannot merge them. A `shortlisted` twin does not count;
     nothing was written for it yet, so it is not evidence the role has been handled.
+
+    **One employer may hold at most `per_company` slots.** An ATS board arrives as a whole
+    careers page, not as a posting: the first board registered put 14 of 25 slots in Reddit's
+    hands, a frontend role and an engineering manager among them. A company's twelfth-best
+    opening outranking another company's best is not what the ranking is for.
 
     **Twins are collapsed before the LIMIT too**, for the same reason. Deduplicating after the
     fact still lets five rows of one role hold five of the 25 slots and simply draft less: the
@@ -116,11 +134,17 @@ def shortlist_select(*, top_n: int, floor: float, remote_bonus: float) -> Select
         )
         .subquery()
     )
-    best_of_role = aliased(Job, candidates)
+    # One role per row first, then at most `per_company` roles per employer. The cap has to come
+    # second and in its own pass: ranking companies before twins are collapsed would let five
+    # copies of one posting spend a company's whole allowance.
+    roles = (
+        select(candidates, _company_rank(candidates)).where(candidates.c.twin_rank == 1).subquery()
+    )
+    best_of_role = aliased(Job, roles)
     return (
         select(best_of_role)
-        .where(candidates.c.twin_rank == 1)
-        .order_by(desc(candidates.c.rank_score))
+        .where(roles.c.company_rank <= per_company)
+        .order_by(desc(roles.c.rank_score))
         .limit(top_n)
     )
 
@@ -354,7 +378,12 @@ def draft(
     floor = settings.match_percentile_threshold
     with session_scope() as session:
         jobs = session.scalars(
-            shortlist_select(top_n=top_n, floor=floor, remote_bonus=settings.remote_bonus)
+            shortlist_select(
+                top_n=top_n,
+                floor=floor,
+                remote_bonus=settings.remote_bonus,
+                per_company=settings.shortlist_per_company,
+            )
         ).all()
         if not jobs:
             typer.secho(

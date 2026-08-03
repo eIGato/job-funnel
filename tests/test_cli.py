@@ -154,11 +154,18 @@ def test_shortlist_collapses_twins_before_the_limit() -> None:
     assert "row_number" not in after
 
 
+def _window(sql: str, label: str) -> str:
+    """The OVER (...) clause of the window function labelled `label`."""
+    before = sql.partition(f") AS {label}")[0]
+    return before.rpartition("row_number() OVER (")[2]
+
+
 def test_shortlist_keeps_the_best_scoring_row_of_a_role() -> None:
     """Which twin represents the role matters: it also picks the best per-city variant."""
-    window = _compiled_shortlist().partition("row_number() OVER (")[2].partition(") AS")[0]
-    assert window.endswith("DESC"), f"twins must be ranked best-first, got {window!r}"
+    window = _window(_compiled_shortlist(), "twin_rank")
+    assert "PARTITION BY lower(trim(" in window
     assert "match_score" in window.partition("ORDER BY")[2]
+    assert window.rstrip().endswith("DESC"), f"twins must be ranked best-first, got {window!r}"
 
 
 def test_run_funnel_hands_draft_a_real_job_id(monkeypatch: Any) -> None:
@@ -194,3 +201,38 @@ def test_draft_by_job_id_never_touches_the_shortlist(monkeypatch: Any) -> None:
     # No such row in an empty test database, so the command reports that and exits non-zero —
     # what matters is that it got there without building the shortlist query.
     assert "999999" in result.output or result.exit_code != 0
+
+
+def test_shortlist_caps_how_many_slots_one_company_holds() -> None:
+    """Regression (2026-08-03): the first ATS board took 14 of 25 slots.
+
+    An ATS board arrives as a whole careers page, not as a posting, so one employer's twelfth
+    role was outranking every other company's best — frontend, engineering manager and data
+    scientist roles among them, each costing a screening call.
+    """
+    sql = _compiled_shortlist()
+    before_limit, _, after = sql.partition("LIMIT")
+    window = _window(sql, "company_rank")
+    assert "PARTITION BY" in window and ".company" in window
+    assert "rank_score DESC" in window, "a company's own roles rank by score"
+    assert "company_rank <= 3" in before_limit
+    assert "company_rank" not in after
+
+
+def test_the_company_cap_is_applied_after_twins_collapse() -> None:
+    """Order matters: five rows of one role would otherwise spend the whole allowance."""
+    sql = _compiled_shortlist()
+    twin_at = sql.index("twin_rank = 1")
+    cap_at = sql.index("company_rank <= 3")
+    assert twin_at < cap_at, "twins must collapse before the per-company cap counts roles"
+
+
+def test_the_company_cap_is_configurable() -> None:
+    from sqlalchemy.dialects import postgresql
+
+    sql = str(
+        cli.shortlist_select(top_n=25, floor=90.0, remote_bonus=0.02, per_company=1).compile(
+            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+        )
+    )
+    assert "company_rank <= 1" in sql

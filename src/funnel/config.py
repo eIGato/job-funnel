@@ -149,6 +149,15 @@ class Settings(BaseSettings):
         ge=0.0,
         description="Score bonus for a remote posting when ordering the shortlist.",
     )
+    #: How many roles at one company may hold shortlist slots at once. An ATS board is a whole
+    #: employer at once, not a posting: the first one registered put 14 of 25 slots in Reddit's
+    #: hands (2026-08-03), including a frontend role, an engineering manager and a data
+    #: scientist — a company's twelfth-best opening beating another company's best is not what
+    #: the ranking is for. Three is enough to cover a genuine multi-team opening without the
+    #: shortlist becoming one employer's careers page.
+    shortlist_per_company: int = Field(
+        default=3, ge=1, description="Maximum shortlist slots one company may hold."
+    )
 
     # --- Admin ---
     admin_host: str = Field(default="127.0.0.1")
