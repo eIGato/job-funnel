@@ -72,13 +72,26 @@ def test_instructions_forbid_a_stated_geography_requirement_too() -> None:
     assert "even when the posting states such a requirement outright" in SCREEN_INSTRUCTIONS
 
 
-def test_instructions_close_the_stop_stack_to_other_backend_languages() -> None:
-    """Regression (2026-08-03): "Software Engineer GO" was declined for not being Python.
+def test_instructions_require_python_and_name_the_stop_stack() -> None:
+    """The stop-stack as the human settled it on 2026-08-03, after reading the first batch.
 
-    The stop-stack is PHP, Node and fullstack. Go, Java, C#, Rust and the rest are the work the
-    seeker does; "not Python" is not a reason, and treating it as one throws away real hits.
+    It went PHP/Node/fullstack, then briefly "any server-side language is fine" — which let
+    plain Java and a pure Go role through — and landed here: Python must be primary, a second
+    language beside it is a plus, PHP and Java are out on their own and so is pure Go.
     """
-    assert "THAT LIST IS THE WHOLE STOP-STACK" in SCREEN_INSTRUCTIONS
-    assert "'Not Python' is NEVER a reason on its own" in SCREEN_INSTRUCTIONS
-    for language in ("Go", "Java", "C#", "Rust"):
+    assert "THE SEEKER IS A PYTHON BACKEND ENGINEER" in SCREEN_INSTRUCTIONS
+    assert "Python must be one of the role's PRIMARY" in SCREEN_INSTRUCTIONS
+    assert "PRIMARY focus is PHP, Java, or Node/JavaScript" in SCREEN_INSTRUCTIONS
+    assert "decline a pure Go, pure C# or pure Rust role" in SCREEN_INSTRUCTIONS
+
+
+def test_a_second_language_beside_python_is_a_plus_not_a_reason() -> None:
+    """Python/Go is the ideal fit, so the instructions must not read as "Python only"."""
+    assert "Python/Go Backend Engineer' is an ideal fit" in SCREEN_INSTRUCTIONS
+    for language in ("Go", "C#", "Rust", "C++", "Kotlin"):
         assert language in SCREEN_INSTRUCTIONS, language
+
+
+def test_language_never_decides_whether_a_role_is_fullstack() -> None:
+    """Regression (2026-08-03): a language allowance let "Java Full Stack Developer" back in."""
+    assert "Language never decides whether a role is fullstack" in SCREEN_INSTRUCTIONS

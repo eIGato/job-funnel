@@ -21,9 +21,11 @@ boundary leaked once and the instructions now name each case (verdicts read 2026
     which is the forbidden reason stated outright. Saying "do not consider geography" was not
     enough when the posting *demands* a geography; the model has to be told that a stated
     requirement is still not its call.
-  - "Software Engineer GO" was declined for being Go rather than Python. The stop-stack names
-    PHP, Node and fullstack and nothing else — every other server-side language is ordinary
-    backend work, and "not Python" was never a reason.
+  - "Software Engineer GO" was declined for being Go rather than Python, when at the time the
+    stop-stack named only PHP, Node and fullstack. Opening it to every other server-side
+    language then over-corrected: "Java Full Stack Developer" came back through, and so did
+    plain Java. The human settled it on 2026-08-03 — Python must be one of a role's primary
+    languages, a second language beside it is a plus, and PHP and Java are out on their own.
 """
 
 from __future__ import annotations
@@ -80,14 +82,16 @@ SCREEN_INSTRUCTIONS = (
     "building and training neural networks, e.g. a Deep Learning / ML Research role) -> False. "
     "But WORKING WITH AI/LLMs — orchestration, RAG, agents, wiring models into a backend — is "
     "wanted: keep those.\n"
-    "- A role whose PRIMARY focus is PHP, Node/JavaScript, or general fullstack/frontend work. "
-    "If backend (Python) is the main thing and those are secondary, or the posting offers extra "
-    "pay for them, keep it (worth_it=True).\n"
-    "- THAT LIST IS THE WHOLE STOP-STACK. A SERVER-SIDE role in any other language — Go, Java, "
-    "C#, Rust, Kotlin, C++ — is ordinary backend work the seeker does and wants: keep it. 'Not "
-    "Python' is NEVER a reason on its own. This does not soften the rule above it: the language "
-    "is irrelevant to whether a role is fullstack or frontend, so a 'Java Full Stack Developer' "
-    "or a 'Go + React' role is still a fullstack role and still declined.\n"
+    "- A role whose PRIMARY focus is PHP, Java, or Node/JavaScript, or any general "
+    "fullstack/frontend role. If Python backend is the main thing and one of those is "
+    "secondary, or the posting offers extra pay for it, keep it (worth_it=True).\n"
+    "- THE SEEKER IS A PYTHON BACKEND ENGINEER, so Python must be one of the role's PRIMARY "
+    "languages. A second server-side language beside it is a plus, not a problem — Go, C#, "
+    "Rust, C++, Kotlin — and 'Python/Go Backend Engineer' is an ideal fit. A role built on one "
+    "of those WITHOUT Python is not: decline a pure Go, pure C# or pure Rust role however good "
+    "the engineering, the same as a pure Java one.\n"
+    "- Language never decides whether a role is fullstack. 'Java Full Stack Developer' and "
+    "'Python + React fullstack' are both declined as fullstack, not for their language.\n"
     "- An obvious content mismatch that slipped through the ranking (pure frontend, pure "
     "DevOps/SRE with no backend, sales/management, or a role from another field entirely) "
     "-> False.\n"
