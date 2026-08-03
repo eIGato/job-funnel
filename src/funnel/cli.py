@@ -73,6 +73,12 @@ def shortlist_select(*, top_n: int, floor: float, remote_bonus: float) -> Select
     carries "Senior Platform Engineer (Remote UK Only)" under seven city slugs, each with its
     own id and location, so ingest cannot merge them. A `shortlisted` twin does not count;
     nothing was written for it yet, so it is not evidence the role has been handled.
+
+    **Twins are collapsed before the LIMIT too**, for the same reason. Deduplicating after the
+    fact still lets five rows of one role hold five of the 25 slots and simply draft less: the
+    2026-08-03 shortlist opened with EuroCert five times, Rose International four and STAFIDE
+    twice, twelve slots for six roles. The highest-scoring row of a role represents it, which
+    also picks the best of a board's per-city variants.
     """
     from sqlalchemy import desc
     from sqlalchemy.orm import aliased
@@ -91,15 +97,30 @@ def shortlist_select(*, top_n: int, floor: float, remote_bonus: float) -> Select
         )
         .exists()
     )
-    return (
-        select(Job)
+    rank = shortlist_rank(remote_bonus).label("rank_score")
+    twin = (
+        func.row_number()
+        .over(
+            partition_by=(_role_key(Job.company), _role_key(Job.title)),
+            order_by=desc(rank),
+        )
+        .label("twin_rank")
+    )
+    candidates = (
+        select(Job, rank, twin)
         .where(
             Job.match_score.isnot(None),
             Job.hard_filter_passed.is_(True),
             Job.match_percentile >= floor,
             ~role_is_handled,
         )
-        .order_by(desc(shortlist_rank(remote_bonus)))
+        .subquery()
+    )
+    best_of_role = aliased(Job, candidates)
+    return (
+        select(best_of_role)
+        .where(candidates.c.twin_rank == 1)
+        .order_by(desc(candidates.c.rank_score))
         .limit(top_n)
     )
 
@@ -278,12 +299,11 @@ def draft(
     A `declined` posting is likewise never re-screened or re-drafted. Only one posting per
     (company, title) is drafted for, however many rows a board splits that role across.
 
-    That exclusion happens in SQL, **before** the LIMIT, and it has to. Taking the top `top_n`
-    first and skipping the handled ones afterwards does not advance a window, it empties one:
-    every handled row still occupies its rank, so the command draws the same `top_n` rows on
-    every run and does less each time. Measured 2026-08-03: all 25 slots held a decided row,
-    `draft` had been a no-op for days, and 2853 ingested postings had produced 49 shortlist
-    entries. Deciding a posting must free its slot for the next one.
+    Both of those happen in `shortlist_select`, in SQL, **before** the LIMIT. Applied afterwards
+    they do not advance the window, they empty it: a decided posting or a twin keeps its rank
+    and its slot, so the command draws the same `top_n` rows every run and does less each time.
+    Measured 2026-08-03 — all 25 slots held a decided row and `draft` had been a silent no-op
+    for days, with 2853 ingested postings behind 49 shortlist entries.
     """
     from funnel.drafting.cover_letter import draft_cover_letter
     from funnel.drafting.screen import screen_job
@@ -313,21 +333,12 @@ def draft(
             )
             return
 
-        # Only the twins *within this batch*: the persisted ones are already gone from `jobs`.
-        handled_roles: set[tuple[str, str]] = set()
-
         do_screen = settings.draft_screen if screen is None else screen
-        drafted = declined = skipped = 0
+        drafted = declined = 0
         for job in jobs:
-            # A decided posting never reaches here: the query excluded its whole role. Anything
-            # left is either untouched or still `shortlisted`, so nothing can be overwritten.
+            # Every row here is one undecided role: the query excluded decided ones and kept a
+            # single row per (company, title), so nothing can be overwritten or written twice.
             application = job.application
-            role = (job.company.strip().casefold(), job.title.strip().casefold())
-            if role in handled_roles:
-                skipped += 1
-                continue
-            handled_roles.add(role)
-
             try:
                 # Screen before drafting: the verdict is cheap, the letter is not.
                 verdict = asyncio.run(screen_job(job)) if do_screen else None
@@ -361,7 +372,7 @@ def draft(
 
         typer.secho(
             f"draft: {drafted} letters drafted, {declined} declined by the screen, "
-            f"{skipped} skipped as the same role (NOT sent)",
+            f"over {len(jobs)} undecided roles (NOT sent)",
             fg=typer.colors.GREEN,
         )
 

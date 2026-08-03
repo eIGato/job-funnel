@@ -125,16 +125,36 @@ def test_shortlist_orders_on_score_not_on_a_remote_partition() -> None:
     25. Remote is a bonus on the score now, so the two pools interleave on merit.
     """
     sql = _compiled_shortlist()
-    order_by = sql.partition("ORDER BY")[2]
-    assert "is_remote DESC" not in order_by, "remote must not be a sort key of its own"
-    assert "match_score" in order_by and "CASE WHEN" in order_by
+    assert "is_remote DESC" not in sql, "remote must not be a sort key of its own"
+    assert "match_score + CASE WHEN jobs.is_remote THEN 0.02 ELSE 0.0 END" in sql
 
 
 def test_remote_bonus_reaches_the_ordering() -> None:
-    assert "0.05" in _compiled_shortlist(remote_bonus=0.05).partition("ORDER BY")[2]
+    assert "THEN 0.05 ELSE" in _compiled_shortlist(remote_bonus=0.05)
 
 
 def test_a_zero_remote_bonus_sorts_on_merit_alone() -> None:
     """The escape hatch: 0 means the shortlist ignores remoteness entirely."""
-    order_by = _compiled_shortlist(remote_bonus=0.0).partition("ORDER BY")[2]
-    assert "is_remote" not in order_by or "0.0" in order_by
+    assert "THEN 0.0 ELSE 0.0" in _compiled_shortlist(remote_bonus=0.0)
+
+
+def test_shortlist_collapses_twins_before_the_limit() -> None:
+    """Regression (2026-08-03): duplicate rows of one role ate the shortlist.
+
+    The shortlist opened with EuroCert five times, Rose International four and STAFIDE twice —
+    twelve of 25 slots for six roles. Each row is a genuine posting with its own id (a board
+    lists one role once per city), so ingest cannot merge them; the shortlist has to.
+    """
+    sql = _compiled_shortlist()
+    before_limit, _, after = sql.partition("LIMIT")
+    assert "row_number() OVER" in before_limit
+    assert "PARTITION BY lower(trim(" in before_limit
+    assert "twin_rank = 1" in before_limit
+    assert "row_number" not in after
+
+
+def test_shortlist_keeps_the_best_scoring_row_of_a_role() -> None:
+    """Which twin represents the role matters: it also picks the best per-city variant."""
+    window = _compiled_shortlist().partition("row_number() OVER (")[2].partition(") AS")[0]
+    assert window.endswith("DESC"), f"twins must be ranked best-first, got {window!r}"
+    assert "match_score" in window.partition("ORDER BY")[2]
