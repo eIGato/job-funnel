@@ -26,6 +26,13 @@ boundary leaked once and the instructions now name each case (verdicts read 2026
     language then over-corrected: "Java Full Stack Developer" came back through, and so did
     plain Java. The human settled it on 2026-08-03 — Python must be one of a role's primary
     languages, a second language beside it is a plus, and PHP and Java are out on their own.
+  - four game-development postings were declined as "another field entirely", two of them
+    engineering roles ("3D Unity Programmer", "UI Unreal Engine Developer"). The human wants
+    those: `backend.md` carries a truthful gameplay-backend/UE line for exactly this reason,
+    and it works — they ranked at the 96th-97th percentile and reached the shortlist under
+    their own steam. Only the screen stood between them and a letter, so the fix is here and
+    not in the profile machinery (multi-profile stays shelved, PLAN.md section 4). Engine work
+    is also the one place the Python-primary rule does not apply: Unreal is C++, Unity is C#.
 """
 
 from __future__ import annotations
@@ -90,6 +97,13 @@ SCREEN_INSTRUCTIONS = (
     "Rust, C++, Kotlin — and 'Python/Go Backend Engineer' is an ideal fit. A role built on one "
     "of those WITHOUT Python is not: decline a pure Go, pure C# or pure Rust role however good "
     "the engineering, the same as a pure Java one.\n"
+    "- GAME DEVELOPMENT IS IN SCOPE WHEN THE ROLE IS ENGINEERING, and this is the one "
+    "exception to the Python rule above. The seeker shipped gameplay-backend work (LimeCity) "
+    "and writes Unreal/C++. So keep gameplay programming, engine work (Unreal/C++, Unity/C#), "
+    "game servers, game backend and live-ops systems — an engine role is C++ or C# by nature "
+    "and the absence of Python is expected there, not a reason to decline. Art, animation, "
+    "level and game design, producing, QA and game analytics are not engineering: those are "
+    "still False.\n"
     "- Language never decides whether a role is fullstack. 'Java Full Stack Developer' and "
     "'Python + React fullstack' are both declined as fullstack, not for their language.\n"
     "- An obvious content mismatch that slipped through the ranking (pure frontend, pure "

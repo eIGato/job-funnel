@@ -436,3 +436,44 @@ def test_the_location_rule_does_not_fire_on_an_ambiguity(job: NormalizedJob) -> 
     ):
         elsewhere = job.model_copy(update={"location": location})
         assert passes_hard_filters(elsewhere) is True, location
+
+
+def test_a_heading_states_the_office_when_the_location_field_is_empty(job: NormalizedJob) -> None:
+    """Regression (2026-08-03): a Minsk posting reached the drafting step.
+
+    Telegram/teletype postings routinely carry no location at all and name the office in the
+    first line of the body instead. The hard stop reads only the location field, so an empty
+    one waved the posting straight past a rule the human settled long ago.
+    """
+    minsk = job.model_copy(
+        update={
+            "location": None,
+            "description": "OFFICE MINSK | ЛЕСТА ИГРЫ\nWe build games. Responsibilities: ...",
+        }
+    )
+    assert passes_hard_filters(minsk) is False
+
+
+def test_the_heading_rule_reads_a_header_not_prose(job: NormalizedJob) -> None:
+    """A sentence that happens to open with the word is not a location statement.
+
+    The module's standing rule is that a passing mention of Russia in a body is the main
+    stream, not a reject — so the fallback only looks at a first line short enough to be a
+    header, and only when the board gave no location at all.
+    """
+    prose = job.model_copy(
+        update={
+            "location": None,
+            "description": (
+                "We are a Russian-founded company building payments infrastructure for "
+                "customers across Europe, and we hire remotely. Requirements: Python."
+            ),
+        }
+    )
+    assert passes_hard_filters(prose) is True
+
+    # A filled-in location wins outright: the fallback exists only for the empty case.
+    labelled = job.model_copy(
+        update={"location": "Berlin", "description": "Москва\nWe hire in Berlin. Experience: ..."}
+    )
+    assert passes_hard_filters(labelled) is True

@@ -3,7 +3,9 @@
 Cheaply discards obvious misses *before* embedding, so only survivors get embedded.
 
 Answered geography rules (PLAN.md section 7):
-  - RU / BY work locations: a hard stop.
+  - RU / BY work locations: a hard stop. Read from the location field, and — only when a board
+    left that field empty — from the first line of the body, which is where a Telegram posting
+    puts its office ("OFFICE MINSK | ЛЕСТА ИГРЫ").
   - A *remote* posting locked to a geography we cannot satisfy ("US only", "must be authorized
     to work in the UK"): reject — unless it explicitly welcomes a contractor / B2B arrangement,
     which the human can serve through a Georgian entity.
@@ -87,8 +89,10 @@ _RU_BY_CYRILLIC = (
     "минск|гомел|могил[её]в|витебск|гродн|бобруйск|брест",
 )
 
-#: RU/BY work locations are a hard stop. Keyed on the *location* only: a remote foreign job that
-#: merely names Russia in its description is the main stream, not a reject.
+#: RU/BY work locations are a hard stop. Keyed on where the posting says the *work* is — the
+#: location field, or the body's heading when the board left that field empty (see
+#: `_heading_location`). Never the body at large: a remote foreign job that merely names Russia
+#: somewhere in its text is the main stream, not a reject.
 _RU_BY_LOCATION = re.compile(
     r"\b(?:" + "|".join(_RU_BY_LATIN) + r")\b|\b(?:" + "|".join(_RU_BY_CYRILLIC) + r")",
     re.IGNORECASE,
@@ -247,6 +251,28 @@ _PROSE = re.compile(r"[.!?]")
 _MIN_JUDGEABLE_BODY = 100
 
 
+#: A location field a board never filled in. Telegram/teletype postings routinely have none and
+#: put the office in the first line of the body instead ("OFFICE MINSK | ЛЕСТА ИГРЫ"), which is
+#: how a Minsk posting reached the drafting step on 2026-08-03 — past a hard stop the human
+#: settled long ago, because the only field the rule reads was empty.
+#:
+#: Read as a *heading*, not as prose: the first line only, and only when it is short enough to be
+#: a header rather than a sentence. "We are a Russian-founded company…" opening a real remote
+#: posting must not trip this, and the module's standing rule is that a passing mention of Russia
+#: in a body is the main stream, not a reject. Measured over the table: catches the one posting
+#: it is aimed at, and none of the 15 rows that merely name Russia somewhere in the text.
+_HEADING_MAX_CHARS = 80
+
+
+def _heading_location(job: _Filterable) -> str:
+    """The first line of the body, when the board left the location field empty."""
+    if (job.location or "").strip():
+        return ""
+    lines = job.description.strip().splitlines()
+    first = lines[0].strip() if lines else ""
+    return first if len(first) <= _HEADING_MAX_CHARS else ""
+
+
 def _normalized_title(title: str) -> str:
     """Fold a title for comparison: entities decoded, whitespace collapsed, case dropped."""
     return " ".join(unescape(title).split()).strip(" -–—:|").casefold()  # noqa: RUF001 (dashes)
@@ -284,7 +310,7 @@ def passes_hard_filters(job: _Filterable) -> bool:
     """True when the posting is worth embedding. Pure: no I/O, no model calls."""
     if _is_junk(job):
         return False
-    if _RU_BY_LOCATION.search(job.location or ""):
+    if _RU_BY_LOCATION.search(job.location or "") or _RU_BY_LOCATION.search(_heading_location(job)):
         return False
     haystack = f"{job.title}\n{job.description}\n{job.location or ''}"
     folded = haystack.casefold()
