@@ -101,3 +101,19 @@ def test_ungrounded_points_accepts_paraphrase_of_real_bullets() -> None:
     bullets = ["Python backend developer with FastAPI, PostgreSQL and Kafka"]
     genuine = ["Python backend developer, FastAPI and PostgreSQL"]
     assert cover_letter.ungrounded_points(bullets, genuine) == []
+
+
+def test_instructions_keep_the_posting_url_out_of_the_letter() -> None:
+    """The reader is the company, and they know which role they advertised.
+
+    Found 2026-08-03 in 14 of 83 drafted letters: the model wove the listing URL into a
+    sentence as a markdown link — "I see you are building a [payments API](https://remoteok...)".
+    Every one was a `form` letter, where a link back to the aggregator is pure noise and quietly
+    tells the employer which scraper found them.
+    """
+    from funnel.drafting.cover_letter import _INSTRUCTIONS
+
+    assert "THE POSTING'S OWN URL IS CONTEXT, NEVER CONTENT" in _INSTRUCTIONS
+    assert "markdown" in _INSTRUCTIONS
+    # ...without banning the links that belong there.
+    assert "portfolio, a repository" in _INSTRUCTIONS

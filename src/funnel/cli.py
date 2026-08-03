@@ -279,45 +279,14 @@ def match() -> None:
 
 
 def _screen_and_draft(session: Session, job: Job, *, do_screen: bool) -> str:
-    """Screen one posting and write the letter it earns. Returns what happened.
+    """`drafting.run.screen_and_draft` at a CLI boundary: run the loop, report the line."""
+    from funnel.drafting.run import screen_and_draft
 
-    The whole of what `draft` does to a single row, so the batch path and the single-posting
-    path (`--job`) cannot drift into judging the same posting differently.
-    """
-    from funnel.drafting.cover_letter import draft_cover_letter
-    from funnel.drafting.screen import screen_job
-    from funnel.models import Application, ApplicationStatus
-
-    try:
-        # Screen before drafting: the verdict is cheap, the letter is not.
-        verdict = asyncio.run(screen_job(job)) if do_screen else None
-        letter = (
-            None
-            if verdict is not None and not verdict.worth_it
-            else asyncio.run(draft_cover_letter(job))
-        )
-    except Exception as exc:  # one bad posting must not sink the batch
-        typer.secho(f"  {job.company} — {job.title[:40]}: ERROR {exc}", fg=typer.colors.RED)
-        return "error"
-
-    application = job.application
-    if application is None:
-        application = Application(job_id=job.id)
-        session.add(application)
-
-    if letter is None:
-        assert verdict is not None
-        application.status = ApplicationStatus.DECLINED
-        application.notes = f"Screen declined: {verdict.reasoning}"
-        typer.echo(f"  declined: {job.company} — {job.title[:50]} ({verdict.reasoning})")
-        return "declined"
-
-    application.cover_letter = f"Subject: {letter.subject}\n\n{letter.body}"
-    application.status = ApplicationStatus.DRAFTED
-    if letter.matched_points:
-        application.notes = "Leans on: " + "; ".join(letter.matched_points)
-    typer.echo(f"  drafted: {job.company} — {job.title[:50]}")
-    return "drafted"
+    outcome = asyncio.run(screen_and_draft(session, job, do_screen=do_screen))
+    colour = typer.colors.RED if outcome.verdict == "error" else None
+    label = f"  {outcome.verdict}: {job.company} — {job.title[:50]}"
+    typer.secho(f"{label} ({outcome.detail})" if outcome.verdict != "drafted" else label, fg=colour)
+    return outcome.verdict
 
 
 @app.command()
