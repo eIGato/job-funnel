@@ -106,11 +106,26 @@ class SourceKind(enum.StrEnum):
 
 
 class AtsProvider(enum.StrEnum):
-    """Applicant tracking systems with a public, no-auth board API (PLAN.md Phase 3.5 D)."""
+    """Applicant tracking systems with a public, no-auth board API (PLAN.md Phase 3.5 D).
+
+    The last two were added 2026-08-03 with name-based board discovery: the point of guessing a
+    slug from a company name is to reach the *employer's* own posting, and European employers
+    are spread across more vendors than the original three. Measured over 26 real employers in
+    the table, greenhouse/lever/ashby covered 14 of 16 boards found — the tail is real but thin,
+    which is why these are additions and not replacements.
+
+    Workable is deliberately absent. Its public widget API still names a company but returns an
+    empty `jobs` array for every board (checked against veriff, bolt, wolt, glovo, adeva on
+    2026-08-03), and there is no other listing endpoint that does not need a per-posting
+    shortcode. An adapter for it would spend a request per board per run to return nothing,
+    then disable itself on `_MAX_EMPTY_RUNS`.
+    """
 
     GREENHOUSE = "greenhouse"
     LEVER = "lever"
     ASHBY = "ashby"
+    RECRUITEE = "recruitee"
+    SMARTRECRUITERS = "smartrecruiters"
 
 
 class ApplyChannel(enum.StrEnum):

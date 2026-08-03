@@ -70,5 +70,29 @@ def test_discovery_scans_free_text_not_just_urls() -> None:
 
 def test_ats_adapters_are_registered() -> None:
     known = registry()
-    for name in ("greenhouse", "lever", "ashby"):
+    for name in ("greenhouse", "lever", "ashby", "recruitee", "smartrecruiters"):
         assert name in known, f"{name} adapter did not register"
+
+
+def test_every_provider_has_a_url_pattern() -> None:
+    """`discover_slugs` indexes `_PATTERNS` by provider — a missing entry is a KeyError.
+
+    Adding a vendor to the enum without a pattern breaks URL-based discovery for every
+    provider at once, because the callers loop over the whole enum.
+    """
+    from funnel.adapters.ats import _PATTERNS
+
+    for provider in AtsProvider:
+        assert provider in _PATTERNS, f"{provider} has no discovery pattern"
+        assert discover_slugs(provider, "") == set()
+
+
+@pytest.mark.parametrize(
+    ("provider", "text", "expected"),
+    [
+        (AtsProvider.RECRUITEE, "https://amperecloud.recruitee.com/o/backend", {"amperecloud"}),
+        (AtsProvider.SMARTRECRUITERS, "https://jobs.smartrecruiters.com/Visa/744", {"visa"}),
+    ],
+)
+def test_discover_the_newer_vendors(provider: AtsProvider, text: str, expected: set[str]) -> None:
+    assert discover_slugs(provider, text) == expected

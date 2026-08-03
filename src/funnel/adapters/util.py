@@ -175,10 +175,20 @@ def from_rfc822(value: str | None) -> datetime | None:
     return _aware(parsed) if parsed else None
 
 
-async def get_json(base_url: str, params: dict[str, Any] | None = None) -> Any:
-    """GET and decode JSON, with the shared UA and timeout."""
+async def get_json(
+    base_url: str, params: dict[str, Any] | None = None, *, follow_redirects: bool = True
+) -> Any:
+    """GET and decode JSON, with the shared UA and timeout.
+
+    `follow_redirects=False` is for a board addressed by a guessed identifier — a Recruitee
+    subdomain, say. A redirect there does not mean "same thing, new address": an unregistered
+    `justplay.recruitee.com` 302s to `goodrec.recruitee.com`, a different company, and following
+    it turns a miss into a confident wrong answer (measured 2026-08-03).
+    """
     async with httpx.AsyncClient(
-        headers={"User-Agent": USER_AGENT}, timeout=_REQUEST_TIMEOUT, follow_redirects=True
+        headers={"User-Agent": USER_AGENT},
+        timeout=_REQUEST_TIMEOUT,
+        follow_redirects=follow_redirects,
     ) as client:
         response = await client.get(base_url, params=params)
         response.raise_for_status()

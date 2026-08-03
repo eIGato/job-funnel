@@ -1,4 +1,6 @@
-"""Adapters: self-growing ATS boards (Phase 3.5 D) — Greenhouse, Lever, Ashby.
+"""Adapters: self-growing ATS boards (Phase 3.5 D).
+
+Five vendors: Greenhouse, Lever, Ashby, Recruitee, SmartRecruiters.
 
 No hand-kept slug list. Each run first **scans postings already ingested** for links to its own
 ATS, records the company slugs it finds, and then polls those boards through their public,
@@ -53,6 +55,11 @@ _PATTERNS: dict[AtsProvider, tuple[re.Pattern[str], ...]] = {
     ),
     AtsProvider.LEVER: (re.compile(rf"jobs\.(?:eu\.)?lever\.co/{_SLUG}", re.I),),
     AtsProvider.ASHBY: (re.compile(rf"jobs\.ashbyhq\.com/{_SLUG}", re.I),),
+    AtsProvider.RECRUITEE: (re.compile(rf"https?://{_SLUG}\.recruitee\.com", re.I),),
+    AtsProvider.SMARTRECRUITERS: (
+        re.compile(rf"jobs\.smartrecruiters\.com/{_SLUG}", re.I),
+        re.compile(rf"careers\.smartrecruiters\.com/{_SLUG}", re.I),
+    ),
 }
 
 #: Path segments that are never a company. Without this, "boards.greenhouse.io/embed/job_board"
@@ -220,6 +227,86 @@ class AshbyAdapter(_AtsAdapter):
             is_remote=bool(raw.get("isRemote")),
             posted_at=from_iso(raw.get("publishedAt")),
             external_id=str(raw.get("id")) if raw.get("id") else None,
+        )
+
+
+@register
+class RecruiteeAdapter(_AtsAdapter):
+    """Recruitee boards, served from a per-company subdomain.
+
+    `follow_redirects` is off for a reason that cost a false positive during the 2026-08-03
+    feasibility probe: `justplay.recruitee.com` 302s to `goodrec.recruitee.com`, a different
+    company entirely. Followed, an unregistered subdomain resolves to whoever inherited it and
+    reports a confident wrong answer; unfollowed it is the miss it actually is.
+    """
+
+    name = "recruitee"
+    provider = AtsProvider.RECRUITEE
+
+    async def fetch_board(self, slug: str) -> list[NormalizedJob]:
+        payload = await get_json(
+            f"https://{slug}.recruitee.com/api/offers/", follow_redirects=False
+        )
+        return [j for j in (self._one(slug, raw) for raw in payload.get("offers", [])) if j]
+
+    @staticmethod
+    def _one(slug: str, raw: dict[str, Any]) -> NormalizedJob | None:
+        url = raw.get("careers_apply_url") or raw.get("careers_url")
+        title = raw.get("title")
+        if not url or not title:
+            return None
+        location = raw.get("location") or raw.get("city")
+        return NormalizedJob(
+            url=url,
+            company=raw.get("company_name") or slug,
+            title=title,
+            description=clip(strip_html(raw.get("description") or raw.get("requirements"))),
+            location=location,
+            is_remote=str(raw.get("remote")).lower() == "true",
+            posted_at=from_iso((raw.get("published_at") or "").replace(" UTC", "+00:00")),
+            external_id=str(raw.get("id")) if raw.get("id") else None,
+        )
+
+
+@register
+class SmartRecruitersAdapter(_AtsAdapter):
+    """SmartRecruiters postings.
+
+    The list endpoint carries no description — SmartRecruiters serves that from a per-posting
+    resource, which would be one extra request per row. We take the list only and let the
+    posting stand on its title, location and company: `matching/filters.py` never had a
+    minimum-description rule, and `drafting/screen.py` declines what it cannot judge. A thin
+    row that ranks is still a pointer to a real employer's own apply page, which is the whole
+    reason this vendor is here.
+    """
+
+    name = "smartrecruiters"
+    provider = AtsProvider.SMARTRECRUITERS
+
+    async def fetch_board(self, slug: str) -> list[NormalizedJob]:
+        payload = await get_json(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings")
+        return [j for j in (self._one(slug, raw) for raw in payload.get("content", [])) if j]
+
+    @staticmethod
+    def _one(slug: str, raw: dict[str, Any]) -> NormalizedJob | None:
+        title, posting_id = raw.get("name"), raw.get("id")
+        if not title or not posting_id:
+            return None
+        company = (raw.get("company") or {}).get("identifier") or slug
+        location = raw.get("location") or {}
+        return NormalizedJob(
+            url=f"https://jobs.smartrecruiters.com/{company}/{posting_id}",
+            company=(raw.get("company") or {}).get("name") or slug,
+            title=title,
+            description=clip(
+                strip_html(
+                    raw.get("jobAd", {}).get("sections", {}).get("jobDescription", {}).get("text")
+                )
+            ),
+            location=location.get("fullLocation") or location.get("city"),
+            is_remote=bool(location.get("remote")),
+            posted_at=from_iso(raw.get("releasedDate")),
+            external_id=str(posting_id),
         )
 
 
