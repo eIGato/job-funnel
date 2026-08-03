@@ -71,3 +71,47 @@ def test_run_funnel_hands_draft_a_real_screen_flag(monkeypatch: Any) -> None:
     assert result.exit_code == 0, result.output
     assert seen == [None]
     assert not isinstance(seen[0], typer.models.OptionInfo)
+
+
+def _compiled_shortlist(top_n: int = 25, floor: float = 90.0) -> str:
+    """The shortlist query as PostgreSQL sees it — no database needed to read it."""
+    from sqlalchemy.dialects import postgresql
+
+    return str(
+        cli.shortlist_select(top_n=top_n, floor=floor).compile(
+            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+        )
+    )
+
+
+def test_shortlist_excludes_decided_roles_before_the_limit() -> None:
+    """Regression (2026-08-03): `draft` had gone permanently silent.
+
+    The exclusion used to run in Python over an already-limited result set, so a decided
+    posting kept its rank and its slot forever. Once all 25 slots held a decided row the
+    command drafted nothing, on every run, for good — 2853 postings had produced 49 shortlist
+    entries. The NOT EXISTS must sit in the WHERE, ahead of the LIMIT, so deciding a posting
+    frees its slot for the next one.
+    """
+    sql = _compiled_shortlist()
+    where, _, after = sql.partition("LIMIT")
+    assert "NOT (EXISTS" in where, "decided roles must be excluded in the WHERE clause"
+    assert "applications" in where, "the exclusion must consult the applications table"
+    assert "EXISTS" not in after, "the exclusion must not trail the LIMIT"
+
+
+def test_shortlist_keeps_a_role_whose_only_application_is_shortlisted() -> None:
+    """`shortlisted` means nothing was written yet — the role is still owed a letter."""
+    assert "status != 'SHORTLISTED'" in _compiled_shortlist()
+
+
+def test_shortlist_matches_a_role_case_and_whitespace_insensitively() -> None:
+    """One role, however many rows carry it: ' Acme ' and 'acme' are the same company."""
+    sql = _compiled_shortlist()
+    assert sql.count("lower(trim(") >= 4, "company and title fold on both sides of the join"
+
+
+def test_shortlist_honours_the_percentile_floor_and_size() -> None:
+    sql = _compiled_shortlist(top_n=7, floor=95.0)
+    assert "match_percentile >= 95.0" in sql
+    assert "LIMIT 7" in sql

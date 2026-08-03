@@ -6,7 +6,7 @@ import asyncio
 from typing import TYPE_CHECKING
 
 import typer
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from funnel import adapters
 from funnel.config import get_settings
@@ -16,7 +16,8 @@ from funnel.models import Job, Source
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from sqlalchemy.orm import Session
+    from sqlalchemy import ColumnElement, Select
+    from sqlalchemy.orm import InstrumentedAttribute, Session
 
     from funnel.schemas import NormalizedJob
 
@@ -32,6 +33,61 @@ app = typer.Typer(
 #: throwing away the whole pass. Independent of the ONNX batch size (config), which is about
 #: peak memory rather than durability.
 _SCORE_CHUNK = 100
+
+
+def _role_key(column: InstrumentedAttribute[str]) -> ColumnElement[str]:
+    """The (company, title) identity a cover letter is written for, folded for comparison.
+
+    The SQL twin of `value.strip().casefold()`: one role, however many rows carry it.
+    """
+    return func.lower(func.trim(column))
+
+
+def shortlist_select(*, top_n: int, floor: float) -> Select[tuple[Job]]:
+    """The `top_n` highest-ranked postings nobody has decided on yet.
+
+    Kept a pure query builder so it can be read (and tested) without a database.
+
+    **The exclusion has to happen before the LIMIT.** Taking the top `top_n` and skipping the
+    handled rows afterwards does not advance a window, it empties one: a decided posting keeps
+    its rank forever, so each run draws the same rows and drafts less than the last. Measured
+    2026-08-03 — all 25 slots held a decided row, `draft` had been a silent no-op for days, and
+    2853 ingested postings had yielded 49 shortlist entries.
+
+    Handled means "some row of this (company, title) has an Application past `shortlisted`".
+    One letter per role, not per row: a board can list one role once per city — arbeitnow
+    carries "Senior Platform Engineer (Remote UK Only)" under seven city slugs, each with its
+    own id and location, so ingest cannot merge them. A `shortlisted` twin does not count;
+    nothing was written for it yet, so it is not evidence the role has been handled.
+    """
+    from sqlalchemy import desc
+    from sqlalchemy.orm import aliased
+
+    from funnel.models import Application, ApplicationStatus
+
+    decided = aliased(Job)
+    role_is_handled = (
+        select(1)
+        .select_from(decided)
+        .join(Application, Application.job_id == decided.id)
+        .where(
+            Application.status != ApplicationStatus.SHORTLISTED,
+            _role_key(decided.company) == _role_key(Job.company),
+            _role_key(decided.title) == _role_key(Job.title),
+        )
+        .exists()
+    )
+    return (
+        select(Job)
+        .where(
+            Job.match_score.isnot(None),
+            Job.hard_filter_passed.is_(True),
+            Job.match_percentile >= floor,
+            ~role_is_handled,
+        )
+        .order_by(desc(Job.is_remote), desc(Job.match_score))
+        .limit(top_n)
+    )
 
 
 def _persist(session: Session, source: Source, fetched: list[NormalizedJob]) -> int:
@@ -207,9 +263,14 @@ def draft(
     touched by the human) is skipped, so a re-run neither regenerates nor clobbers a letter.
     A `declined` posting is likewise never re-screened or re-drafted. Only one posting per
     (company, title) is drafted for, however many rows a board splits that role across.
-    """
-    from sqlalchemy import desc
 
+    That exclusion happens in SQL, **before** the LIMIT, and it has to. Taking the top `top_n`
+    first and skipping the handled ones afterwards does not advance a window, it empties one:
+    every handled row still occupies its rank, so the command draws the same `top_n` rows on
+    every run and does less each time. Measured 2026-08-03: all 25 slots held a decided row,
+    `draft` had been a no-op for days, and 2853 ingested postings had produced 49 shortlist
+    entries. Deciding a posting must free its slot for the next one.
+    """
     from funnel.drafting.cover_letter import draft_cover_letter
     from funnel.drafting.screen import screen_job
     from funnel.models import Application, ApplicationStatus
@@ -227,46 +288,24 @@ def draft(
     top_n = limit or settings.match_top_k
     floor = settings.match_percentile_threshold
     with session_scope() as session:
-        jobs = session.scalars(
-            select(Job)
-            .where(
-                Job.match_score.isnot(None),
-                Job.hard_filter_passed.is_(True),
-                Job.match_percentile >= floor,
-            )
-            .order_by(desc(Job.is_remote), desc(Job.match_score))
-            .limit(top_n)
-        ).all()
+        jobs = session.scalars(shortlist_select(top_n=top_n, floor=floor)).all()
         if not jobs:
             typer.secho(
-                f"draft: nothing at or above the {floor:.0f}th percentile "
+                f"draft: nothing undecided at or above the {floor:.0f}th percentile "
                 "(match_percentile_threshold). Run `funnel match` if the shortlist is stale.",
                 fg=typer.colors.YELLOW,
             )
             return
 
-        # One letter per role, not per row. A board can list the same role once per city —
-        # arbeitnow carries "Senior Platform Engineer (Remote UK Only)" under seven city slugs,
-        # each a genuinely distinct posting with its own id and location, so ingest cannot merge
-        # them. Writing seven letters for one job is waste, and it is what filled the admin with
-        # near-identical drafts. A `shortlisted` twin does not count: nothing was written for it
-        # yet, so it is not evidence the role has been handled.
-        handled_roles = {
-            (company.strip().casefold(), title.strip().casefold())
-            for company, title in session.execute(
-                select(Job.company, Job.title)
-                .join(Application, Application.job_id == Job.id)
-                .where(Application.status != ApplicationStatus.SHORTLISTED)
-            ).all()
-        }
+        # Only the twins *within this batch*: the persisted ones are already gone from `jobs`.
+        handled_roles: set[tuple[str, str]] = set()
 
         do_screen = settings.draft_screen if screen is None else screen
         drafted = declined = skipped = 0
         for job in jobs:
+            # A decided posting never reaches here: the query excluded its whole role. Anything
+            # left is either untouched or still `shortlisted`, so nothing can be overwritten.
             application = job.application
-            if application is not None and application.status != ApplicationStatus.SHORTLISTED:
-                continue  # already drafted or human-touched — never overwrite
-
             role = (job.company.strip().casefold(), job.title.strip().casefold())
             if role in handled_roles:
                 skipped += 1
