@@ -59,3 +59,26 @@ def test_agent_layer_shares_this_prompt_and_verdict() -> None:
 
     assert orch.WorthItVerdict is WorthItVerdict
     assert orch.make_worth_it_agent is make_screen_agent
+
+
+def test_instructions_forbid_a_stated_geography_requirement_too() -> None:
+    """Regression (2026-08-03): a posting that *demands* a geography got one declined for it.
+
+    "Requires Russian or Belarusian citizenship and UTC+3 timezone residency" is the forbidden
+    reason written out in full. A blanket "do not consider geography" did not cover the case
+    where the posting states the requirement itself.
+    """
+    assert "citizenship" in SCREEN_INSTRUCTIONS
+    assert "even when the posting states such a requirement outright" in SCREEN_INSTRUCTIONS
+
+
+def test_instructions_close_the_stop_stack_to_other_backend_languages() -> None:
+    """Regression (2026-08-03): "Software Engineer GO" was declined for not being Python.
+
+    The stop-stack is PHP, Node and fullstack. Go, Java, C#, Rust and the rest are the work the
+    seeker does; "not Python" is not a reason, and treating it as one throws away real hits.
+    """
+    assert "THAT LIST IS THE WHOLE STOP-STACK" in SCREEN_INSTRUCTIONS
+    assert "'Not Python' is NEVER a reason on its own" in SCREEN_INSTRUCTIONS
+    for language in ("Go", "Java", "C#", "Rust"):
+        assert language in SCREEN_INSTRUCTIONS, language

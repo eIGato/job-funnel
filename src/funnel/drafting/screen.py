@@ -14,7 +14,16 @@ imports these definitions rather than keeping a second copy, exactly as it reuse
 
 What it deliberately does NOT judge is geography, seniority and the hard stop-stack — those are
 deterministic code in `matching/filters.py` (invariant: no LLM in matching), and re-deciding
-them here would let a model overrule a filter the human already settled.
+them here would let a model overrule a filter the human already settled. Both halves of that
+boundary leaked once and the instructions now name each case (verdicts read 2026-08-03):
+
+  - a Web3 posting was declined "requires Russian or Belarusian citizenship and UTC+3 timezone",
+    which is the forbidden reason stated outright. Saying "do not consider geography" was not
+    enough when the posting *demands* a geography; the model has to be told that a stated
+    requirement is still not its call.
+  - "Software Engineer GO" was declined for being Go rather than Python. The stop-stack names
+    PHP, Node and fullstack and nothing else — every other server-side language is ordinary
+    backend work, and "not Python" was never a reason.
 """
 
 from __future__ import annotations
@@ -74,13 +83,20 @@ SCREEN_INSTRUCTIONS = (
     "- A role whose PRIMARY focus is PHP, Node/JavaScript, or general fullstack/frontend work. "
     "If backend (Python) is the main thing and those are secondary, or the posting offers extra "
     "pay for them, keep it (worth_it=True).\n"
+    "- THAT LIST IS THE WHOLE STOP-STACK. Any other server-side language — Go, Java, C#, Rust, "
+    "Kotlin, C++ — is ordinary backend work the seeker does and wants: keep it. 'Not Python' is "
+    "NEVER a reason on its own, and a backend role in one of those languages is a hit, not a "
+    "miss.\n"
     "- An obvious content mismatch that slipped through the ranking (pure frontend, pure "
     "DevOps/SRE with no backend, sales/management, or a role from another field entirely) "
     "-> False.\n"
-    "DO NOT consider geography, location, timezone, relocation, on-site vs remote, or work "
-    "authorization — those are decided upstream by deterministic filters (PLAN.md section 7) and "
-    "must NEVER be a reason here, nor appear in your reasoning. The seeker works remotely, "
-    "contracts B2B, and adapts to any timezone; assume that is handled. "
+    "DO NOT consider geography, location, timezone, relocation, on-site vs remote, citizenship, "
+    "residency, or work authorization — those are decided upstream by deterministic filters "
+    "(PLAN.md section 7) and must NEVER be a reason here, nor appear in your reasoning. The "
+    "seeker works remotely, contracts B2B, and adapts to any timezone; assume that is handled. "
+    "This holds even when the posting states such a requirement outright: if a role demands a "
+    "particular citizenship or timezone, that is not your call — judge the work it describes, "
+    "and if the work fits, return worth_it=True. "
     "When unsure, keep it. Give one short line of reasoning about the role's content either "
     "way.\n\n"
     f"{UNTRUSTED_INPUT_RULE}"
