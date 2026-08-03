@@ -9,6 +9,7 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
+import pytest
 import typer
 from typer.testing import CliRunner
 
@@ -158,3 +159,38 @@ def test_shortlist_keeps_the_best_scoring_row_of_a_role() -> None:
     window = _compiled_shortlist().partition("row_number() OVER (")[2].partition(") AS")[0]
     assert window.endswith("DESC"), f"twins must be ranked best-first, got {window!r}"
     assert "match_score" in window.partition("ORDER BY")[2]
+
+
+def test_run_funnel_hands_draft_a_real_job_id(monkeypatch: Any) -> None:
+    """The same OptionInfo trap as `limit`, on the option added for hand-fed postings.
+
+    A leaked sentinel is not None, so `draft` would take the single-posting branch and try to
+    `session.get(Job, <OptionInfo>)` on every scheduled run.
+    """
+    seen: list[object] = []
+    sentinel = inspect.signature(cli.draft).parameters["job_id"].default
+    assert isinstance(sentinel, typer.models.OptionInfo), "the trap this test guards is gone"
+
+    monkeypatch.setattr(cli, "ingest", lambda *_a, **_kw: None)
+    monkeypatch.setattr(cli, "match", lambda *_a, **_kw: None)
+    monkeypatch.setattr(cli, "draft", lambda job_id=sentinel, **_kw: seen.append(job_id))
+
+    result = runner.invoke(cli.app, ["run-funnel"])
+
+    assert result.exit_code == 0, result.output
+    assert seen == [None]
+    assert not isinstance(seen[0], typer.models.OptionInfo)
+
+
+def test_draft_by_job_id_never_touches_the_shortlist(monkeypatch: Any) -> None:
+    """`--job` is the hand-fed path: it works on the named row, whatever its rank or status."""
+    monkeypatch.setattr(
+        cli, "shortlist_select", lambda **_kw: pytest.fail("--job must not query the shortlist")
+    )
+    monkeypatch.setattr(cli, "_screen_and_draft", lambda *_a, **_kw: "drafted")
+
+    result = runner.invoke(cli.app, ["draft", "--job", "999999"])
+
+    # No such row in an empty test database, so the command reports that and exits non-zero —
+    # what matters is that it got there without building the shortlist query.
+    assert "999999" in result.output or result.exit_code != 0

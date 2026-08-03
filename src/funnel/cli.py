@@ -278,12 +278,60 @@ def match() -> None:
         )
 
 
+def _screen_and_draft(session: Session, job: Job, *, do_screen: bool) -> str:
+    """Screen one posting and write the letter it earns. Returns what happened.
+
+    The whole of what `draft` does to a single row, so the batch path and the single-posting
+    path (`--job`) cannot drift into judging the same posting differently.
+    """
+    from funnel.drafting.cover_letter import draft_cover_letter
+    from funnel.drafting.screen import screen_job
+    from funnel.models import Application, ApplicationStatus
+
+    try:
+        # Screen before drafting: the verdict is cheap, the letter is not.
+        verdict = asyncio.run(screen_job(job)) if do_screen else None
+        letter = (
+            None
+            if verdict is not None and not verdict.worth_it
+            else asyncio.run(draft_cover_letter(job))
+        )
+    except Exception as exc:  # one bad posting must not sink the batch
+        typer.secho(f"  {job.company} — {job.title[:40]}: ERROR {exc}", fg=typer.colors.RED)
+        return "error"
+
+    application = job.application
+    if application is None:
+        application = Application(job_id=job.id)
+        session.add(application)
+
+    if letter is None:
+        assert verdict is not None
+        application.status = ApplicationStatus.DECLINED
+        application.notes = f"Screen declined: {verdict.reasoning}"
+        typer.echo(f"  declined: {job.company} — {job.title[:50]} ({verdict.reasoning})")
+        return "declined"
+
+    application.cover_letter = f"Subject: {letter.subject}\n\n{letter.body}"
+    application.status = ApplicationStatus.DRAFTED
+    if letter.matched_points:
+        application.notes = "Leans on: " + "; ".join(letter.matched_points)
+    typer.echo(f"  drafted: {job.company} — {job.title[:50]}")
+    return "drafted"
+
+
 @app.command()
 def draft(
     limit: int | None = typer.Option(None, help="How many shortlisted postings to process."),
     screen: bool | None = typer.Option(
         None,
         help="Run the stop-stack screen before drafting. Defaults to settings.draft_screen.",
+    ),
+    job_id: int | None = typer.Option(
+        None,
+        "--job",
+        help="Screen and draft this one posting, whatever its rank or status. Use after "
+        "pasting a full description into a posting the board only served a teaser for.",
     ),
 ) -> None:
     """Draft cover letters for the top of the shortlist. DOES NOT SEND (invariant 2).
@@ -304,11 +352,14 @@ def draft(
     and its slot, so the command draws the same `top_n` rows every run and does less each time.
     Measured 2026-08-03 — all 25 slots held a decided row and `draft` had been a silent no-op
     for days, with 2853 ingested postings behind 49 shortlist entries.
-    """
-    from funnel.drafting.cover_letter import draft_cover_letter
-    from funnel.drafting.screen import screen_job
-    from funnel.models import Application, ApplicationStatus
 
+    `--job <id>` is the deliberate exception, and the only way to redo a decided posting. Some
+    boards serve a teaser rather than a posting — RemoteOK republishes LinkedIn snippets that
+    break off at "Job Summary: In this…", 121 characters with nothing in them to write a letter
+    from. Paste the real description into the row in the admin, then name the row here: it is
+    re-screened and re-drafted from the text as it now stands, rank and existing status
+    ignored. Nothing is sent, here as everywhere (invariant 2).
+    """
     settings = get_settings()
     if not (settings.llm_api_key and settings.llm_api_key.get_secret_value()):
         typer.secho(
@@ -317,6 +368,17 @@ def draft(
             fg=typer.colors.RED,
         )
         raise typer.Exit(1)
+
+    do_screen = settings.draft_screen if screen is None else screen
+    if job_id is not None:
+        with session_scope() as session:
+            job = session.get(Job, job_id)
+            if job is None:
+                typer.secho(f"draft: no posting with id {job_id}.", fg=typer.colors.RED)
+                raise typer.Exit(1)
+            typer.echo(f"draft: {job.company} — {job.title} (id {job_id}, by hand)")
+            _screen_and_draft(session, job, do_screen=do_screen)
+        return
 
     # The shortlist order (PLAN.md section 7): by score, with remote preferred.
     top_n = limit or settings.match_top_k
@@ -333,42 +395,13 @@ def draft(
             )
             return
 
-        do_screen = settings.draft_screen if screen is None else screen
         drafted = declined = 0
         for job in jobs:
             # Every row here is one undecided role: the query excluded decided ones and kept a
             # single row per (company, title), so nothing can be overwritten or written twice.
-            application = job.application
-            try:
-                # Screen before drafting: the verdict is cheap, the letter is not.
-                verdict = asyncio.run(screen_job(job)) if do_screen else None
-                letter = (
-                    None
-                    if verdict is not None and not verdict.worth_it
-                    else asyncio.run(draft_cover_letter(job))
-                )
-            except Exception as exc:  # one bad posting must not sink the batch
-                typer.secho(f"  {job.company} — {job.title[:40]}: ERROR {exc}", fg=typer.colors.RED)
-                continue
-
-            if application is None:
-                application = Application(job_id=job.id)
-                session.add(application)
-
-            if letter is None:
-                assert verdict is not None
-                application.status = ApplicationStatus.DECLINED
-                application.notes = f"Screen declined: {verdict.reasoning}"
-                declined += 1
-                typer.echo(f"  declined: {job.company} — {job.title[:50]} ({verdict.reasoning})")
-                continue
-
-            application.cover_letter = f"Subject: {letter.subject}\n\n{letter.body}"
-            application.status = ApplicationStatus.DRAFTED
-            if letter.matched_points:
-                application.notes = "Leans on: " + "; ".join(letter.matched_points)
-            drafted += 1
-            typer.echo(f"  drafted: {job.company} — {job.title[:50]}")
+            outcome = _screen_and_draft(session, job, do_screen=do_screen)
+            drafted += outcome == "drafted"
+            declined += outcome == "declined"
 
         typer.secho(
             f"draft: {drafted} letters drafted, {declined} declined by the screen, "
@@ -622,7 +655,7 @@ def run_funnel(ctx: typer.Context) -> None:
     # Typer only swaps that in when the parser runs, so leaving it out sends an OptionInfo into
     # SQLAlchemy's .limit() and the timer run dies after match. Pass every defaulted parameter
     # by hand. `screen=None` means "follow settings.draft_screen".
-    ctx.invoke(draft, limit=None, screen=None)
+    ctx.invoke(draft, limit=None, screen=None, job_id=None)
 
 
 @app.command(name="seed-sources")
