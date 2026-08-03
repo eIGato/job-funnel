@@ -27,9 +27,12 @@ Answered seniority / stop-stack (PLAN.md section 7, decided 2026-07-24):
 
 Junk postings:
   - A row whose title is scraped page furniture ("Job Details", "Couldn't pick up that page") or
-    a placeholder ("This is a test job") is not a posting and is dropped. This is only the "not
-    a job posting" judgment; deciding that a real posting is the wrong *kind* of job belongs to
-    the screening step.
+    a placeholder ("This is a test job") is not a posting and is dropped.
+  - So is a row whose *body* is prose that never mentions hiring at all — a nav menu, a cookie
+    notice, a blog post. RemoteOK republishes whatever its crawler found, under a real company
+    name and a title no list can anticipate ("UNC", "Danny", "The Ledbury").
+  Both are only the "not a job posting" judgment; deciding that a real posting is the wrong
+  *kind* of job belongs to the screening step.
 """
 
 from __future__ import annotations
@@ -162,15 +165,76 @@ _JUNK_TITLES: frozenset[str] = frozenset(
 #: which are short *and* real. A filter that cannot be shown to catch the thing it is aimed at
 #: does not earn its false positives.
 
+#: Words any real posting says somewhere, in the languages we ingest. A body that is prose and
+#: still never reaches one of these is not a posting: it is a scraped page. RemoteOK republishes
+#: whatever its crawler found on a company site, so 138 of its 467 rows (measured 2026-08-03) are
+#: nav menus ("Home Who Are We? How Do We Work? Contact"), cookie notices, blog posts, lorem
+#: ipsum, and one row of keyboard mash — each with a real id, a real company name and a title
+#: like "UNC" or "Danny". They are unreachable by `_JUNK_TITLES`, which needs the exact title,
+#: and five of them held slots in the top 25 and cost a screening call apiece.
+_HIRING_VOCABULARY = re.compile(
+    r"experience|responsibilit|requirement|qualification|we are looking|you will|your profile"
+    r"|skills|salary|apply|benefits|\bteam\b|\brole\b|position|hiring|join us|candidate"
+    r"|erfahrung|aufgaben|kenntnisse|bewerb|mitarbeit|stelle"  # de
+    r"|stanowisko|wymagania|obowi|poszukujemy|oferujemy|umiej|praca"  # pl
+    r"|empleo|puesto|experiencia"  # es
+    r"|опыт|обязанност|требован|вакансия|зарплат|команд|разработчик|инженер",  # ru
+    re.IGNORECASE,
+)
+
+#: The vocabulary test is only fair on a *complete* body. Adzuna serves a teaser cut off
+#: mid-sentence — 500 characters of company preamble that often has not reached the
+#: requirements yet — and dropping those would cost 39 real postings, several of them the
+#: best-scoring rows in the table. The board marks the cut with an ellipsis; the mojibake
+#: spellings are there because some feeds are double-encoded UTF-8 (see `Â…`, `â€¦`).
+#:
+#: Matched anywhere, not just at the end: RemoteOK carries LinkedIn teasers that break off
+#: mid-sentence and then append "See this and similar jobs on LinkedIn", so the marker sits in
+#: the middle. An ellipsis used rhetorically in a real posting costs nothing — the vocabulary
+#: test still has to fail as well, and a real posting's body talks about the job somewhere.
+#:
+#: `¦` catches the mojibake spellings without enumerating them. U+2026 is `e2 80 a6`, and every
+#: round of latin-1-misread-as-UTF-8 keeps that trailing `a6` as a literal `¦`: `â€¦`, then
+#: `Ã¢Â€Â¦`. The broken bar is not a character real prose uses — all 67 rows carrying one are
+#: mangled ellipses.
+_TRUNCATED = re.compile(r"…|\.\.\.|¦")
+
+#: ...and only on prose. A gmail alert's body is a technology tag list ("Python, Golang"), which
+#: names no duties by construction and would fail a vocabulary test while being perfectly real.
+#: A sentence terminator is what separates the two: 116 of 119 gmail rows have none.
+_PROSE = re.compile(r"[.!?]")
+
+#: ...and only on a body long enough to expect a hiring word in it. "Python backend. Remote.
+#: Write to @hr." is a whole Telegram posting and says none of the words above; the funnel keeps
+#: terse postings on purpose (see the note on the absent minimum-description rule). Measured
+#: over the table, this floor gives up 3 of 101 catches — a cheap price for not having to argue
+#: about the short ones.
+_MIN_JUDGEABLE_BODY = 100
+
 
 def _normalized_title(title: str) -> str:
     """Fold a title for comparison: entities decoded, whitespace collapsed, case dropped."""
     return " ".join(unescape(title).split()).strip(" -–—:|").casefold()  # noqa: RUF001 (dashes)
 
 
+def _unwritten_body(job: _Filterable) -> bool:
+    """True when the body is prose that never once talks about hiring — a scraped page.
+
+    Four conditions, and every one is load-bearing. Judge only a body that is long enough to
+    expect a hiring word in it, that is complete (an Adzuna teaser is cut off before the
+    requirements), and that is prose (a gmail alert is a technology tag list). Measured over
+    the whole table: 98 rows caught, every one of them RemoteOK page furniture, none with a
+    role-like title, and nothing at all from the other seven sources.
+    """
+    body = job.description
+    if len(body) < _MIN_JUDGEABLE_BODY or not _PROSE.search(body) or _TRUNCATED.search(body):
+        return False
+    return not _HIRING_VOCABULARY.search(f"{job.title}\n{body}")
+
+
 def _is_junk(job: _Filterable) -> bool:
     """True when the row is not a real posting at all, only scraped page furniture."""
-    return _normalized_title(job.title) in _JUNK_TITLES
+    return _normalized_title(job.title) in _JUNK_TITLES or _unwritten_body(job)
 
 
 def _below_middle(title: str) -> bool:

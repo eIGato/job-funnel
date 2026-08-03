@@ -313,3 +313,83 @@ def test_preferred_elsewhere_in_the_body_is_not_consent(job: NormalizedJob) -> N
         }
     )
     assert passes_hard_filters(locked) is False
+
+
+def test_a_scraped_page_body_is_junk(job: NormalizedJob) -> None:
+    """RemoteOK republishes whatever its crawler found, under a title no list can anticipate.
+
+    Real ids, real company names, titles like "UNC" and "Danny" — 98 of 467 RemoteOK rows
+    (measured 2026-08-03), and five of them held slots in the top 25.
+    """
+    for title, body in (
+        (
+            "UNC",
+            "Vip section is displayed first, it is only after site navigations such as menus "
+            "and core links. Interested in advertising? Feel free to email Vip at us.",
+        ),
+        ("Danny", "sfvjfoiwupwuwipfuwfpwu. " * 12),
+        (
+            "The Atlas Project",
+            "It all begins with an idea. Maybe you want to launch a business. Maybe you want "
+            "to turn a hobby into something more.",
+        ),
+        (
+            "Joe Armstrong",
+            "Coded at night under caffeine. No ads, no tracking, open source. Our GitHub. Our "
+            "Twitter. Subscribe to the RSS feed. We use cookies to improve UX.",
+        ),
+        ("test", "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod. " * 3),
+    ):
+        junk = job.model_copy(update={"title": title, "description": body})
+        assert passes_hard_filters(junk) is False, title
+
+
+def test_a_short_body_is_never_judged_for_vocabulary(job: NormalizedJob) -> None:
+    """A whole Telegram posting fits in two sentences and names none of the hiring words.
+
+    The floor is what keeps the vocabulary rule from re-introducing the minimum-description
+    filter this module deliberately does not have.
+    """
+    terse = job.model_copy(
+        update={"title": "Backend Developer", "description": "Build ETL pipelines. Remote, CET."}
+    )
+    assert passes_hard_filters(terse) is True
+
+
+def test_a_real_posting_body_survives_the_vocabulary_test(job: NormalizedJob) -> None:
+    """One hiring word anywhere in title or body is enough — the bar is deliberately low."""
+    for body in (
+        "We are looking for someone to own our ingestion pipeline.",
+        "Wir sind Bertrandt. Deine Aufgaben umfassen die Entwicklung von Backend-Diensten.",
+        "Miejsce pracy: Warszawa. Wymagania: Python, PostgreSQL.",
+        "Обязанности: разработка сервисов на Python. Требования: опыт от трёх лет.",
+    ):
+        real = job.model_copy(update={"title": "Backend Developer", "description": body})
+        assert passes_hard_filters(real) is True, body
+
+
+def test_a_tag_list_body_is_not_judged_for_vocabulary(job: NormalizedJob) -> None:
+    """A gmail alert's body is a technology list: it names no duties, and it is still real.
+
+    116 of 119 gmail rows carry no hiring word at all. A sentence terminator is what tells
+    prose from a tag list, and a tag list has none.
+    """
+    alert = job.model_copy(
+        update={"title": "Tech Lead Python", "description": "KVM, SQL, Python, FastAPI, Linux"}
+    )
+    assert passes_hard_filters(alert) is True
+
+
+def test_a_truncated_teaser_is_not_judged_for_vocabulary(job: NormalizedJob) -> None:
+    """Adzuna cuts its body off before the requirements; so does a republished LinkedIn teaser.
+
+    Dropping these would have cost 39 real postings, several of them the best-scoring rows in
+    the table. The mojibake spellings are double-encoded UTF-8 and all end in a broken bar.
+    """
+    for body in (
+        "At JetBrains, code is our passion. Ever since we started back in 2000 we have…",
+        "Wir sind Bertrandt. Ein internationaler Engineering Dienstleister mit langer...",
+        "Devoted Studios is a remote game development companyÃ¢Â€Â¦See this on LinkedIn.",
+    ):
+        teaser = job.model_copy(update={"title": "Backend Developer", "description": body})
+        assert passes_hard_filters(teaser) is True, body
