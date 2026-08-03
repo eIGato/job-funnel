@@ -132,6 +132,23 @@ class Settings(BaseSettings):
         le=100.0,
         description="Minimum match percentile a posting needs before it is drafted for.",
     )
+    #: Added to a remote posting's score when the shortlist is ordered. A preference, not a
+    #: filter — `matching/filters.py` deliberately keeps on-site postings ("it merely ranks
+    #: below remote, and ranking is a sort, not this predicate"), and sorting by `is_remote`
+    #: first turned that sort into a partition: 893 remote rows stood ahead of 1718 on-site
+    #: ones, so the best-matching posting in the database sat at rank 894 while a 3D artist
+    #: made the top 25 (measured 2026-08-03).
+    #:
+    #: 0.02 is about a quarter of the score spread (sd 0.09 centered, and the two pools score
+    #: alike: remote mean 0.025, on-site -0.016). At that size remote wins a tie and a small
+    #: deficit, and a clearly better on-site role still outranks a mediocre remote one — the
+    #: top 25 came out 13 remote / 12 on-site. Raise it to lean harder on remote; 0 sorts on
+    #: merit alone.
+    remote_bonus: float = Field(
+        default=0.02,
+        ge=0.0,
+        description="Score bonus for a remote posting when ordering the shortlist.",
+    )
 
     # --- Admin ---
     admin_host: str = Field(default="127.0.0.1")

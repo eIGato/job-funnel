@@ -73,12 +73,12 @@ def test_run_funnel_hands_draft_a_real_screen_flag(monkeypatch: Any) -> None:
     assert not isinstance(seen[0], typer.models.OptionInfo)
 
 
-def _compiled_shortlist(top_n: int = 25, floor: float = 90.0) -> str:
+def _compiled_shortlist(top_n: int = 25, floor: float = 90.0, remote_bonus: float = 0.02) -> str:
     """The shortlist query as PostgreSQL sees it — no database needed to read it."""
     from sqlalchemy.dialects import postgresql
 
     return str(
-        cli.shortlist_select(top_n=top_n, floor=floor).compile(
+        cli.shortlist_select(top_n=top_n, floor=floor, remote_bonus=remote_bonus).compile(
             dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
         )
     )
@@ -115,3 +115,26 @@ def test_shortlist_honours_the_percentile_floor_and_size() -> None:
     sql = _compiled_shortlist(top_n=7, floor=95.0)
     assert "match_percentile >= 95.0" in sql
     assert "LIMIT 7" in sql
+
+
+def test_shortlist_orders_on_score_not_on_a_remote_partition() -> None:
+    """Regression (2026-08-03): `ORDER BY is_remote DESC` was a partition, not a preference.
+
+    Every remote row outranked every on-site one whatever the scores, and with 893 remote rows
+    the best-matching posting in the database sat at rank 894 while a 3D artist made the top
+    25. Remote is a bonus on the score now, so the two pools interleave on merit.
+    """
+    sql = _compiled_shortlist()
+    order_by = sql.partition("ORDER BY")[2]
+    assert "is_remote DESC" not in order_by, "remote must not be a sort key of its own"
+    assert "match_score" in order_by and "CASE WHEN" in order_by
+
+
+def test_remote_bonus_reaches_the_ordering() -> None:
+    assert "0.05" in _compiled_shortlist(remote_bonus=0.05).partition("ORDER BY")[2]
+
+
+def test_a_zero_remote_bonus_sorts_on_merit_alone() -> None:
+    """The escape hatch: 0 means the shortlist ignores remoteness entirely."""
+    order_by = _compiled_shortlist(remote_bonus=0.0).partition("ORDER BY")[2]
+    assert "is_remote" not in order_by or "0.0" in order_by

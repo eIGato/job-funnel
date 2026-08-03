@@ -6,7 +6,7 @@ import asyncio
 from typing import TYPE_CHECKING
 
 import typer
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 
 from funnel import adapters
 from funnel.config import get_settings
@@ -43,7 +43,21 @@ def _role_key(column: InstrumentedAttribute[str]) -> ColumnElement[str]:
     return func.lower(func.trim(column))
 
 
-def shortlist_select(*, top_n: int, floor: float) -> Select[tuple[Job]]:
+def shortlist_rank(remote_bonus: float) -> ColumnElement[float | None]:
+    """What the shortlist sorts on: the match score, with remote work preferred.
+
+    A preference, expressed as a bonus rather than a sort key. `matching/filters.py` keeps
+    on-site postings on purpose — "it merely ranks below remote, and ranking is a sort, not
+    this predicate" — but `ORDER BY is_remote DESC, match_score DESC` is not a sort, it is a
+    partition: every remote row outranks every on-site one no matter the scores. With 893
+    remote rows ahead of 1718 on-site ones that put the single best-matching posting in the
+    database at rank 894, while "3D Environment Artist" made the top 25 (measured 2026-08-03).
+    Adding `remote_bonus` instead lets the two pools interleave on merit.
+    """
+    return Job.match_score + case((Job.is_remote, remote_bonus), else_=0.0)
+
+
+def shortlist_select(*, top_n: int, floor: float, remote_bonus: float) -> Select[tuple[Job]]:
     """The `top_n` highest-ranked postings nobody has decided on yet.
 
     Kept a pure query builder so it can be read (and tested) without a database.
@@ -85,7 +99,7 @@ def shortlist_select(*, top_n: int, floor: float) -> Select[tuple[Job]]:
             Job.match_percentile >= floor,
             ~role_is_handled,
         )
-        .order_by(desc(Job.is_remote), desc(Job.match_score))
+        .order_by(desc(shortlist_rank(remote_bonus)))
         .limit(top_n)
     )
 
@@ -284,11 +298,13 @@ def draft(
         )
         raise typer.Exit(1)
 
-    # The shortlist order (PLAN.md section 7): remote first, then by score.
+    # The shortlist order (PLAN.md section 7): by score, with remote preferred.
     top_n = limit or settings.match_top_k
     floor = settings.match_percentile_threshold
     with session_scope() as session:
-        jobs = session.scalars(shortlist_select(top_n=top_n, floor=floor)).all()
+        jobs = session.scalars(
+            shortlist_select(top_n=top_n, floor=floor, remote_bonus=settings.remote_bonus)
+        ).all()
         if not jobs:
             typer.secho(
                 f"draft: nothing undecided at or above the {floor:.0f}th percentile "
