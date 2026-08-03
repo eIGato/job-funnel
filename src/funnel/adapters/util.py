@@ -53,11 +53,20 @@ class _TextExtractor(HTMLParser):
 
 
 def strip_html(raw: str | None) -> str:
-    """Turn an HTML fragment into readable plain text, collapsing runs of whitespace."""
+    """Turn an HTML fragment into readable plain text, collapsing runs of whitespace.
+
+    `close()` is not optional. HTMLParser buffers a trailing fragment it cannot yet resolve —
+    an unterminated character reference is the usual one — and only flushes it when the feed is
+    declared finished. Without it, `"Patti&amp;More!"` unescapes to `"Patti&More!"`, the parser
+    holds `"&More!"` back as a possible entity, and the whole string comes out empty. RemoteOK
+    served exactly that as a company name on 2026-08-03 and took the ingest batch down with it,
+    because an empty company fails `NormalizedJob`'s min_length.
+    """
     if not raw:
         return ""
     parser = _TextExtractor()
     parser.feed(unescape(raw))
+    parser.close()
     lines = [" ".join(line.split()) for line in parser.text().splitlines()]
     return "\n".join(line for line in lines if line).strip()
 
