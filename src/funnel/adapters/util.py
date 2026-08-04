@@ -6,6 +6,7 @@ so no BeautifulSoup/lxml is pulled in for what the adapters need here.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from html import unescape
@@ -52,13 +53,43 @@ class _TextExtractor(HTMLParser):
 
 
 def strip_html(raw: str | None) -> str:
-    """Turn an HTML fragment into readable plain text, collapsing runs of whitespace."""
+    """Turn an HTML fragment into readable plain text, collapsing runs of whitespace.
+
+    `close()` is not optional. HTMLParser buffers a trailing fragment it cannot yet resolve —
+    an unterminated character reference is the usual one — and only flushes it when the feed is
+    declared finished. Without it, `"Patti&amp;More!"` unescapes to `"Patti&More!"`, the parser
+    holds `"&More!"` back as a possible entity, and the whole string comes out empty. RemoteOK
+    served exactly that as a company name on 2026-08-03 and took the ingest batch down with it,
+    because an empty company fails `NormalizedJob`'s min_length.
+    """
     if not raw:
         return ""
     parser = _TextExtractor()
     parser.feed(unescape(raw))
+    parser.close()
     lines = [" ".join(line.split()) for line in parser.text().splitlines()]
     return "\n".join(line for line in lines if line).strip()
+
+
+#: RemoteOK appends this to every description it serves over the API/RSS, and to none of the
+#: HTML it serves to a browser. The tag is base64 of the *caller's* public IP, minted per
+#: request, so the block is a canary: quote it in an application and the board learns which
+#: scraper the posting reached you through. It is also an instruction addressed to whoever
+#: reads the text next, which on this pipeline is the drafting model — and it obeyed (see the
+#: 2026-07-31 migration). Bounded and anchored to the end because the block is always appended
+#: last; `clip` may have truncated it, hence the alternative ending at end-of-string.
+_CANARY = re.compile(
+    r"\n*Please mention the word\b.{0,400}?(?:see they'?re human\.|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def strip_canary(text: str) -> str:
+    """Drop a board's reader-canary block from a description.
+
+    Run before `clip`, so the canary never eats characters the posting itself needs.
+    """
+    return _CANARY.sub("", text).rstrip()
 
 
 def clip(text: str, limit: int = MAX_DESCRIPTION_CHARS) -> str:
@@ -70,6 +101,42 @@ def clip(text: str, limit: int = MAX_DESCRIPTION_CHARS) -> str:
     if sep < limit - 200:  # only honor a newline that is reasonably near the end
         sep = cut.rfind(" ")
     return cut[:sep].rstrip() if sep > 0 else cut.rstrip()
+
+
+#: "This job is remote" said outright, which outranks any later mention of office days.
+_EXPLICIT_REMOTE = re.compile(
+    r"\b(?:fully|100\s*%|entirely|completely)[\s-]*remote\b|\bremote[\s-]*(?:first|only)\b",
+    re.IGNORECASE,
+)
+#: A split arrangement. The word "remote" appears in these too — that is the whole problem.
+_HYBRID = re.compile(
+    r"\bhybrid\b|\b\d+\s*days?\s*(?:a\s*week\s*)?(?:on-?site|in\s*(?:the\s*)?office)\b",
+    re.IGNORECASE,
+)
+#: A bare mention, believed only when nothing above contradicts it.
+_REMOTE_HINT = re.compile(r"\bremote|\bwork from home\b|\bwfh\b|удал", re.IGNORECASE)
+
+
+def looks_remote(title: str, location: str | None, description: str) -> bool:
+    """Decide `is_remote` from free text, for sources that expose no structured flag.
+
+    Most adapters read a real field (arbeitnow's `remote`, RemoteOK's whole premise) and should
+    keep doing that — this is for the ones with nothing but prose. Searching that prose for
+    "remote" is what put a hybrid Chandler, AZ posting ("3 Days onsite, 2 Days work from home")
+    on the remote-first shortlist, twice: the word is there, the job is not remote.
+
+    Order is the point. An outright claim wins; failing that, a hybrid marker is decisive
+    *against*, because a posting that spells out office days has already told us what it is;
+    only then does a bare mention count. Measured over the 190 Adzuna rows in the table
+    (2026-07-31): 28 were flagged remote, 19 of them on the body alone, and 14 carried
+    hybrid/on-site wording. The middle branch is what those 14 needed.
+    """
+    text = f"{title}\n{location or ''}\n{description}"
+    if _EXPLICIT_REMOTE.search(text):
+        return True
+    if _HYBRID.search(text):
+        return False
+    return bool(_REMOTE_HINT.search(text))
 
 
 def _aware(dt: datetime) -> datetime:
@@ -108,10 +175,20 @@ def from_rfc822(value: str | None) -> datetime | None:
     return _aware(parsed) if parsed else None
 
 
-async def get_json(base_url: str, params: dict[str, Any] | None = None) -> Any:
-    """GET and decode JSON, with the shared UA and timeout."""
+async def get_json(
+    base_url: str, params: dict[str, Any] | None = None, *, follow_redirects: bool = True
+) -> Any:
+    """GET and decode JSON, with the shared UA and timeout.
+
+    `follow_redirects=False` is for a board addressed by a guessed identifier — a Recruitee
+    subdomain, say. A redirect there does not mean "same thing, new address": an unregistered
+    `justplay.recruitee.com` 302s to `goodrec.recruitee.com`, a different company, and following
+    it turns a miss into a confident wrong answer (measured 2026-08-03).
+    """
     async with httpx.AsyncClient(
-        headers={"User-Agent": USER_AGENT}, timeout=_REQUEST_TIMEOUT, follow_redirects=True
+        headers={"User-Agent": USER_AGENT},
+        timeout=_REQUEST_TIMEOUT,
+        follow_redirects=follow_redirects,
     ) as client:
         response = await client.get(base_url, params=params)
         response.raise_for_status()
@@ -136,5 +213,7 @@ __all__ = [
     "from_rfc822",
     "get_json",
     "get_text",
+    "looks_remote",
+    "strip_canary",
     "strip_html",
 ]

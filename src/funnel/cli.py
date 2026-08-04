@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import typer
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 
 from funnel import adapters
 from funnel.config import get_settings
@@ -16,7 +16,8 @@ from funnel.models import Job, Source
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from sqlalchemy.orm import Session
+    from sqlalchemy import ColumnElement, Select
+    from sqlalchemy.orm import InstrumentedAttribute, Session
 
     from funnel.schemas import NormalizedJob
 
@@ -34,17 +35,136 @@ app = typer.Typer(
 _SCORE_CHUNK = 100
 
 
+def _role_key(column: InstrumentedAttribute[str]) -> ColumnElement[str]:
+    """The (company, title) identity a cover letter is written for, folded for comparison.
+
+    The SQL twin of `value.strip().casefold()`: one role, however many rows carry it.
+    """
+    return func.lower(func.trim(column))
+
+
+def _company_rank(candidates: Any) -> ColumnElement[int]:
+    """Where a role stands among its own employer's roles, best first."""
+    from sqlalchemy import desc
+
+    return (
+        func.row_number()
+        .over(partition_by=candidates.c.company, order_by=desc(candidates.c.rank_score))
+        .label("company_rank")
+    )
+
+
+def shortlist_rank(remote_bonus: float) -> ColumnElement[float | None]:
+    """What the shortlist sorts on: the match score, with remote work preferred.
+
+    A preference, expressed as a bonus rather than a sort key. `matching/filters.py` keeps
+    on-site postings on purpose — "it merely ranks below remote, and ranking is a sort, not
+    this predicate" — but `ORDER BY is_remote DESC, match_score DESC` is not a sort, it is a
+    partition: every remote row outranks every on-site one no matter the scores. With 893
+    remote rows ahead of 1718 on-site ones that put the single best-matching posting in the
+    database at rank 894, while "3D Environment Artist" made the top 25 (measured 2026-08-03).
+    Adding `remote_bonus` instead lets the two pools interleave on merit.
+    """
+    return Job.match_score + case((Job.is_remote, remote_bonus), else_=0.0)
+
+
+def shortlist_select(
+    *, top_n: int, floor: float, remote_bonus: float, per_company: int = 3
+) -> Select[tuple[Job]]:
+    """The `top_n` highest-ranked postings nobody has decided on yet.
+
+    Kept a pure query builder so it can be read (and tested) without a database.
+
+    **The exclusion has to happen before the LIMIT.** Taking the top `top_n` and skipping the
+    handled rows afterwards does not advance a window, it empties one: a decided posting keeps
+    its rank forever, so each run draws the same rows and drafts less than the last. Measured
+    2026-08-03 — all 25 slots held a decided row, `draft` had been a silent no-op for days, and
+    2853 ingested postings had yielded 49 shortlist entries.
+
+    Handled means "some row of this (company, title) has an Application past `shortlisted`".
+    One letter per role, not per row: a board can list one role once per city — arbeitnow
+    carries "Senior Platform Engineer (Remote UK Only)" under seven city slugs, each with its
+    own id and location, so ingest cannot merge them. A `shortlisted` twin does not count;
+    nothing was written for it yet, so it is not evidence the role has been handled.
+
+    **One employer may hold at most `per_company` slots.** An ATS board arrives as a whole
+    careers page, not as a posting: the first board registered put 14 of 25 slots in Reddit's
+    hands, a frontend role and an engineering manager among them. A company's twelfth-best
+    opening outranking another company's best is not what the ranking is for.
+
+    **Twins are collapsed before the LIMIT too**, for the same reason. Deduplicating after the
+    fact still lets five rows of one role hold five of the 25 slots and simply draft less: the
+    2026-08-03 shortlist opened with EuroCert five times, Rose International four and STAFIDE
+    twice, twelve slots for six roles. The highest-scoring row of a role represents it, which
+    also picks the best of a board's per-city variants.
+    """
+    from sqlalchemy import desc
+    from sqlalchemy.orm import aliased
+
+    from funnel.models import Application, ApplicationStatus
+
+    decided = aliased(Job)
+    role_is_handled = (
+        select(1)
+        .select_from(decided)
+        .join(Application, Application.job_id == decided.id)
+        .where(
+            Application.status != ApplicationStatus.SHORTLISTED,
+            _role_key(decided.company) == _role_key(Job.company),
+            _role_key(decided.title) == _role_key(Job.title),
+        )
+        .exists()
+    )
+    rank = shortlist_rank(remote_bonus).label("rank_score")
+    twin = (
+        func.row_number()
+        .over(
+            partition_by=(_role_key(Job.company), _role_key(Job.title)),
+            order_by=desc(rank),
+        )
+        .label("twin_rank")
+    )
+    candidates = (
+        select(Job, rank, twin)
+        .where(
+            Job.match_score.isnot(None),
+            Job.hard_filter_passed.is_(True),
+            Job.match_percentile >= floor,
+            ~role_is_handled,
+        )
+        .subquery()
+    )
+    # One role per row first, then at most `per_company` roles per employer. The cap has to come
+    # second and in its own pass: ranking companies before twins are collapsed would let five
+    # copies of one posting spend a company's whole allowance.
+    roles = (
+        select(candidates, _company_rank(candidates)).where(candidates.c.twin_rank == 1).subquery()
+    )
+    best_of_role = aliased(Job, roles)
+    return (
+        select(best_of_role)
+        .where(roles.c.company_rank <= per_company)
+        .order_by(desc(roles.c.rank_score))
+        .limit(top_n)
+    )
+
+
 def _persist(session: Session, source: Source, fetched: list[NormalizedJob]) -> int:
     """Store postings, skipping ones already known. Deduplicated on content_hash."""
     if not fetched:
         return 0
-    hashes = [j.content_hash for j in fetched]
-    known = set(session.scalars(select(Job.content_hash).where(Job.content_hash.in_(hashes))).all())
+    hashes = {item: item.content_hash_for(source.id) for item in fetched}
+    known = set(
+        session.scalars(
+            select(Job.content_hash).where(Job.content_hash.in_(list(hashes.values())))
+        ).all()
+    )
     new = 0
     for item in fetched:
-        if item.content_hash in known:
+        content_hash = hashes[item]
+        if content_hash in known:
             continue
-        known.add(item.content_hash)  # a source can repeat a posting within one batch
+        known.add(content_hash)  # a source can repeat a posting within one batch
         session.add(
             Job(
                 source_id=source.id,
@@ -60,7 +180,7 @@ def _persist(session: Session, source: Source, fetched: list[NormalizedJob]) -> 
                 # derives it from the URL. Passing it through is what lets a source that
                 # does know (Telegram) override that guess.
                 apply_channel=item.apply_channel,
-                content_hash=item.content_hash,
+                content_hash=content_hash,
             )
         )
         new += 1
@@ -99,68 +219,140 @@ def ingest() -> None:
 def match() -> None:
     """Hard filters plus embedding ranking. No LLM, no tokens.
 
-    Incremental: only postings not yet scored (match_score IS NULL) are considered, so a
-    re-run is cheap. Rejects stay unscored (NULL) — re-running just re-applies the cheap,
-    deterministic filters to them; only survivors are embedded, and once scored they drop out.
+    Three passes. Only the expensive one is incremental:
+
+    1. **Filtering is global**, because `passes_hard_filters` is pure and cheap — no I/O, no
+       model. Re-judging every row on every run is what makes a filter change take effect by
+       itself; the alternative is a data migration per rule (`c7a5f2e91d34` was exactly that),
+       and the rule that never gets one silently applies to new postings only.
+    2. **Embedding is incremental**, because it is the only expensive step. A row keeps its
+       vector once computed, including a row the filters have since retired: re-embedding it
+       if a rule is later relaxed would be waste. Rejects are never embedded in the first place.
+    3. **Scoring is global.** Scores are centered on the mean posting vector
+       (`centered_similarity`), which is a property of the whole corpus — a score is comparable
+       only against scores computed around the same centre, so scoring a new batch on its own
+       would produce numbers that cannot be ranked against the existing ones. Rescoring
+       everything is one matmul over vectors already in the database: no model call, no
+       network, milliseconds at this size. An edited profile lands on the next run too.
     """
-    from funnel.matching.embed import cosine_similarity, embed_texts, to_bytes
+    import numpy as np
+
+    from funnel.matching.embed import (
+        centered_similarity,
+        embed_texts,
+        from_bytes,
+        percentile_ranks,
+        to_bytes,
+    )
     from funnel.matching.filters import passes_hard_filters
     from funnel.matching.profile import get_profile_vector
 
     with session_scope() as session:
-        pending = session.scalars(select(Job).where(Job.match_score.is_(None))).all()
-        if not pending:
-            typer.secho("match: nothing to score", fg=typer.colors.YELLOW)
-            return
+        every = session.scalars(select(Job)).all()
 
-        survivors: list[Job] = []
-        for job in pending:
-            job.hard_filter_passed = passes_hard_filters(job)
-            if job.hard_filter_passed:
-                survivors.append(job)
+        retired = 0
+        needs_embedding: list[Job] = []
+        for job in every:
+            passed = passes_hard_filters(job)
+            if job.hard_filter_passed and not passed:
+                retired += 1
+            job.hard_filter_passed = passed
+            if passed and job.embedding is None:
+                needs_embedding.append(job)
 
-        if not survivors:
+        # Postings are the passage side of the e5 pair; the profile is the query side.
+        for start in range(0, len(needs_embedding), _SCORE_CHUNK):
+            chunk = needs_embedding[start : start + _SCORE_CHUNK]
+            texts = [f"{j.title}\n{j.company}\n{j.description}".strip() for j in chunk]
+            for job, vector in zip(chunk, embed_texts(texts, is_query=False), strict=True):
+                job.embedding = to_bytes(vector)
+            session.commit()
+            typer.echo(f"  embedded {start + len(chunk)}/{len(needs_embedding)}")
+
+        # A rejected row must not keep a score: it is off the shortlist, and leaving it in the
+        # population would also drag the centre towards postings we decided against.
+        population = [j for j in every if j.hard_filter_passed and j.embedding is not None]
+        for job in every:
+            if job.hard_filter_passed is False:
+                job.match_score = None
+                job.match_percentile = None
+        if not population:
+            session.commit()
             typer.secho(
-                f"match: {len(pending)} scanned, 0 passed the hard filters", fg=typer.colors.YELLOW
+                f"match: {len(every)} scanned, 0 passed the hard filters", fg=typer.colors.YELLOW
             )
             return
 
-        # Postings are the passage side of the e5 pair; the profile is the query side.
-        profile = get_profile_vector()
-        top = float("-inf")
-        for start in range(0, len(survivors), _SCORE_CHUNK):
-            chunk = survivors[start : start + _SCORE_CHUNK]
-            texts = [f"{j.title}\n{j.company}\n{j.description}".strip() for j in chunk]
-            matrix = embed_texts(texts, is_query=False)
-            scores = cosine_similarity(matrix, profile)
-            for job, vector, score in zip(chunk, matrix, scores, strict=True):
-                job.embedding = to_bytes(vector)
-                job.match_score = float(score)
-            session.commit()
-            top = max(top, float(scores.max()))
-            typer.echo(f"  scored {start + len(chunk)}/{len(survivors)}")
+        # One float32 matrix of the whole shortlist: 1024 dims is ~4 KB a row, so a few thousand
+        # postings is a few MB. Chunk this only if the table grows by an order of magnitude.
+        matrix = np.vstack([from_bytes(job.embedding) for job in population if job.embedding])
+        scores = centered_similarity(matrix, get_profile_vector())
+        percentiles = percentile_ranks(scores)
+        for job, score, percentile in zip(population, scores, percentiles, strict=True):
+            job.match_score = float(score)
+            job.match_percentile = float(percentile)
+        session.commit()
 
         typer.secho(
-            f"match: {len(pending)} scanned, {len(survivors)} scored "
-            f"({len(pending) - len(survivors)} filtered out), top score {top:.3f}",
+            f"match: {len(every)} scanned, {len(needs_embedding)} newly embedded, "
+            f"{len(population)} scored ({len(every) - len(population)} filtered out"
+            + (f", {retired} newly retired" if retired else "")
+            + f"), top score {float(scores.max()):.3f}",
             fg=typer.colors.GREEN,
         )
+
+
+def _screen_and_draft(session: Session, job: Job, *, do_screen: bool) -> str:
+    """`drafting.run.screen_and_draft` at a CLI boundary: run the loop, report the line."""
+    from funnel.drafting.run import screen_and_draft
+
+    outcome = asyncio.run(screen_and_draft(session, job, do_screen=do_screen))
+    colour = typer.colors.RED if outcome.verdict == "error" else None
+    label = f"  {outcome.verdict}: {job.company} — {job.title[:50]}"
+    typer.secho(f"{label} ({outcome.detail})" if outcome.verdict != "drafted" else label, fg=colour)
+    return outcome.verdict
 
 
 @app.command()
 def draft(
     limit: int | None = typer.Option(None, help="How many shortlisted postings to process."),
+    screen: bool | None = typer.Option(
+        None,
+        help="Run the stop-stack screen before drafting. Defaults to settings.draft_screen.",
+    ),
+    job_id: int | None = typer.Option(
+        None,
+        "--job",
+        help="Screen and draft this one posting, whatever its rank or status. Use after "
+        "pasting a full description into a posting the board only served a teaser for.",
+    ),
 ) -> None:
     """Draft cover letters for the top of the shortlist. DOES NOT SEND (invariant 2).
 
+    Each posting is screened first (`drafting/screen.py`): one cheap model call that declines a
+    role whose emphasis is PHP/Node/fullstack, or that is an outright content mismatch the
+    ranking let through. Without it the human got a finished cover letter for every such
+    posting and had to mark it DECLINED by hand — the screen is far cheaper than the letter it
+    prevents. Hard geography/seniority filters stay upstream in `matching/filters.py`.
+
     Idempotent: a posting whose Application has moved past `shortlisted` (already drafted, or
     touched by the human) is skipped, so a re-run neither regenerates nor clobbers a letter.
+    A `declined` posting is likewise never re-screened or re-drafted. Only one posting per
+    (company, title) is drafted for, however many rows a board splits that role across.
+
+    Both of those happen in `shortlist_select`, in SQL, **before** the LIMIT. Applied afterwards
+    they do not advance the window, they empty it: a decided posting or a twin keeps its rank
+    and its slot, so the command draws the same `top_n` rows every run and does less each time.
+    Measured 2026-08-03 — all 25 slots held a decided row and `draft` had been a silent no-op
+    for days, with 2853 ingested postings behind 49 shortlist entries.
+
+    `--job <id>` is the deliberate exception, and the only way to redo a decided posting. Some
+    boards serve a teaser rather than a posting — RemoteOK republishes LinkedIn snippets that
+    break off at "Job Summary: In this…", 121 characters with nothing in them to write a letter
+    from. Paste the real description into the row in the admin, then name the row here: it is
+    re-screened and re-drafted from the text as it now stands, rank and existing status
+    ignored. Nothing is sent, here as everywhere (invariant 2).
     """
-    from sqlalchemy import desc
-
-    from funnel.drafting.cover_letter import draft_cover_letter
-    from funnel.models import Application, ApplicationStatus
-
     settings = get_settings()
     if not (settings.llm_api_key and settings.llm_api_key.get_secret_value()):
         typer.secho(
@@ -170,39 +362,50 @@ def draft(
         )
         raise typer.Exit(1)
 
-    # The shortlist order (PLAN.md section 7): remote first, then by score.
+    do_screen = settings.draft_screen if screen is None else screen
+    if job_id is not None:
+        with session_scope() as session:
+            job = session.get(Job, job_id)
+            if job is None:
+                typer.secho(f"draft: no posting with id {job_id}.", fg=typer.colors.RED)
+                raise typer.Exit(1)
+            typer.echo(f"draft: {job.company} — {job.title} (id {job_id}, by hand)")
+            _screen_and_draft(session, job, do_screen=do_screen)
+        return
+
+    # The shortlist order (PLAN.md section 7): by score, with remote preferred.
     top_n = limit or settings.match_top_k
+    floor = settings.match_percentile_threshold
     with session_scope() as session:
         jobs = session.scalars(
-            select(Job)
-            .where(Job.match_score.isnot(None), Job.hard_filter_passed.is_(True))
-            .order_by(desc(Job.is_remote), desc(Job.match_score))
-            .limit(top_n)
+            shortlist_select(
+                top_n=top_n,
+                floor=floor,
+                remote_bonus=settings.remote_bonus,
+                per_company=settings.shortlist_per_company,
+            )
         ).all()
+        if not jobs:
+            typer.secho(
+                f"draft: nothing undecided at or above the {floor:.0f}th percentile "
+                "(match_percentile_threshold). Run `funnel match` if the shortlist is stale.",
+                fg=typer.colors.YELLOW,
+            )
+            return
 
-        drafted = 0
+        drafted = declined = 0
         for job in jobs:
-            application = job.application
-            if application is not None and application.status != ApplicationStatus.SHORTLISTED:
-                continue  # already drafted or human-touched — never overwrite
+            # Every row here is one undecided role: the query excluded decided ones and kept a
+            # single row per (company, title), so nothing can be overwritten or written twice.
+            outcome = _screen_and_draft(session, job, do_screen=do_screen)
+            drafted += outcome == "drafted"
+            declined += outcome == "declined"
 
-            try:
-                letter = asyncio.run(draft_cover_letter(job))
-            except Exception as exc:  # one bad posting must not sink the batch
-                typer.secho(f"  {job.company} — {job.title[:40]}: ERROR {exc}", fg=typer.colors.RED)
-                continue
-
-            if application is None:
-                application = Application(job_id=job.id)
-                session.add(application)
-            application.cover_letter = f"Subject: {letter.subject}\n\n{letter.body}"
-            application.status = ApplicationStatus.DRAFTED
-            if letter.matched_points:
-                application.notes = "Leans on: " + "; ".join(letter.matched_points)
-            drafted += 1
-            typer.echo(f"  drafted: {job.company} — {job.title[:50]}")
-
-        typer.secho(f"draft: {drafted} letters drafted (NOT sent)", fg=typer.colors.GREEN)
+        typer.secho(
+            f"draft: {drafted} letters drafted, {declined} declined by the screen, "
+            f"over {len(jobs)} undecided roles (NOT sent)",
+            fg=typer.colors.GREEN,
+        )
 
 
 @app.command(name="agent-draft")
@@ -244,9 +447,15 @@ def agent_draft(
     deps = build_agent_deps(do_research=research)
 
     with session_scope() as session:
+        # Same quality floor as `draft`. This pass is four model calls and a web search per
+        # posting, so spending it below the floor is the more expensive version of the mistake.
         jobs = session.scalars(
             select(Job)
-            .where(Job.match_score.isnot(None), Job.hard_filter_passed.is_(True))
+            .where(
+                Job.match_score.isnot(None),
+                Job.hard_filter_passed.is_(True),
+                Job.match_percentile >= settings.match_percentile_threshold,
+            )
             .order_by(desc(Job.is_remote), desc(Job.match_score))
             .limit(limit)
         ).all()
@@ -439,11 +648,12 @@ def run_funnel(ctx: typer.Context) -> None:
     """
     ctx.invoke(ingest)
     ctx.invoke(match)
-    # `limit=None` explicitly: an omitted parameter here keeps Python's declared default, which
-    # for a Typer command is the OptionInfo sentinel, not the value inside it. Typer only swaps
-    # that in when the parser runs, so leaving it out sends an OptionInfo into SQLAlchemy's
-    # .limit() and the timer run dies after match. Pass every defaulted parameter by hand.
-    ctx.invoke(draft, limit=None)
+    # `limit=None`/`screen=None` explicitly: an omitted parameter here keeps Python's declared
+    # default, which for a Typer command is the OptionInfo sentinel, not the value inside it.
+    # Typer only swaps that in when the parser runs, so leaving it out sends an OptionInfo into
+    # SQLAlchemy's .limit() and the timer run dies after match. Pass every defaulted parameter
+    # by hand. `screen=None` means "follow settings.draft_screen".
+    ctx.invoke(draft, limit=None, screen=None, job_id=None)
 
 
 @app.command(name="seed-sources")
@@ -489,7 +699,8 @@ def auth_gmail() -> None:
     settings = get_settings()
     typer.echo(f"Using client secret : {settings.gmail_credentials_path}")
     typer.echo(f"Token will be saved : {settings.gmail_token_path}")
-    typer.echo("A browser window will open for consent (scope: gmail.readonly)...")
+    typer.echo("A browser window will open for consent (scope: gmail.readonly).")
+    typer.echo("If it does not, copy the URL printed below into a browser by hand.")
     try:
         get_credentials(interactive=True)
     except (FileNotFoundError, RuntimeError) as exc:

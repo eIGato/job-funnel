@@ -3,7 +3,9 @@
 Cheaply discards obvious misses *before* embedding, so only survivors get embedded.
 
 Answered geography rules (PLAN.md section 7):
-  - RU / BY work locations: a hard stop.
+  - RU / BY work locations: a hard stop. Read from the location field, and — only when a board
+    left that field empty — from the first line of the body, which is where a Telegram posting
+    puts its office ("OFFICE MINSK | ЛЕСТА ИГРЫ").
   - A *remote* posting locked to a geography we cannot satisfy ("US only", "must be authorized
     to work in the UK"): reject — unless it explicitly welcomes a contractor / B2B arrangement,
     which the human can serve through a Georgian entity.
@@ -22,12 +24,23 @@ Answered seniority / stop-stack (PLAN.md section 7, decided 2026-07-24):
     wanted, not stopped — this targets model-training roles, not AI-orchestration ones. The
     softer preferences (PHP / Node / fullstack as a secondary focus, extra pay) are a judgment
     about a role's *emphasis*, which pure code cannot make well; they are deferred to the
-    decide-worth-it node of the Phase 7 agent layer, not forced into a regex here.
+    screening step (`drafting/screen.py`), which every drafting path runs, not forced into a
+    regex here.
+
+Junk postings:
+  - A row whose title is scraped page furniture ("Job Details", "Couldn't pick up that page") or
+    a placeholder ("This is a test job") is not a posting and is dropped.
+  - So is a row whose *body* is prose that never mentions hiring at all — a nav menu, a cookie
+    notice, a blog post. RemoteOK republishes whatever its crawler found, under a real company
+    name and a title no list can anticipate ("UNC", "Danny", "The Ledbury").
+  Both are only the "not a job posting" judgment; deciding that a real posting is the wrong
+  *kind* of job belongs to the screening step.
 """
 
 from __future__ import annotations
 
 import re
+from html import unescape
 from typing import Protocol
 
 
@@ -40,11 +53,48 @@ class _Filterable(Protocol):
     is_remote: bool
 
 
-#: RU/BY work locations are a hard stop. Keyed on the *location* only: a remote foreign job that
-#: merely names Russia in its description is the main stream, not a reject.
+#: Cities, because that is what a location field actually holds. The boards we read name a city
+#: and nothing else — "Томск", "Уфа", "Краснодар, Ростов-на-Дону" — so a rule that knows only the
+#: country and its two capitals catches almost nothing. It knew exactly Moscow and St Petersburg
+#: until 2026-08-03, and "Старший разработчик C++ / ИнфоТеКС / Томск" passed it at the 99.7th
+#: percentile, straight into the head of the shortlist.
+#:
+#: Latin spellings are the ones a foreign board uses; the Cyrillic ones are stems, so declined
+#: forms ("в Москве") match too. Deliberately absent from the Latin half: `Vladimir` (a given
+#: name), `Brest` (also in France), `Orel`, `Perm` ("Perm Street, London") and `Tula` (also in
+#: Mexico). A location filter must not fire on an ambiguity, and the Cyrillic stems carry those
+#: cities anyway — a Russian posting writes them in Russian.
+_RU_BY_LATIN = (
+    "russia|russian federation|belarus|belarusian",
+    "moscow|saint[- ]petersburg|st\\.? petersburg|petersburg|novosibirsk|"
+    "y?ekaterinburg|kazan|nizhny novgorod|chelyabinsk|samara|omsk|rostov[- ]on[- ]don|"
+    "ufa|krasnoyarsk|voronezh|volgograd|krasnodar|saratov|tyumen|tolyatti|izhevsk|"
+    "barnaul|ulyanovsk|irkutsk|khabarovsk|yaroslavl|vladivostok|makhachkala|tomsk|orenburg|"
+    "kemerovo|novokuznetsk|ryazan|astrakhan|naberezhnye chelny|penza|lipetsk|kirov|"
+    "cheboksary|kaliningrad|kursk|ulan[- ]ude|stavropol|sochi|tver|magnitogorsk|"
+    "ivanovo|bryansk|belgorod|surgut|kaluga|smolensk|volzhsky|cherepovets|vologda|saransk|"
+    "yakutsk|innopolis|podolsk|kolpino|balashikha|khimki|mytishchi|korolev|lyubertsy",
+    "minsk|gomel|homel|mogilev|mahilyow|vitebsk|vitsebsk|grodno|hrodna|bobruisk|babruysk",
+)
+_RU_BY_CYRILLIC = (
+    "росси|беларус|рф\\b",
+    "москв|санкт-петербург|петербург|новосибирск|екатеринбург|казан|"
+    "нижн(?:ий|ем) новгород|челябинск|самар|омск|ростов|уфа|уфе|красноярск|воронеж|перм|"
+    "волгоград|краснодар|саратов|тюмен|тольятти|ижевск|барнаул|ульяновск|иркутск|"
+    "хабаровск|ярославл|владивосток|махачкал|томск|оренбург|кемеров|новокузнецк|рязан|"
+    "астрахан|набережные челны|пенз|липецк|киров|чебоксар|тула|туле|калининград|курск|"
+    "улан-удэ|ставропол|сочи|твер|магнитогорск|иванов|брянск|белгород|сургут|калуг|"
+    "смоленск|волжский|череповец|вологд|саранск|якутск|иннополис|подольск|колпино|"
+    "балаших|химки|мытищ|королёв|королев|люберц",
+    "минск|гомел|могил[её]в|витебск|гродн|бобруйск|брест",
+)
+
+#: RU/BY work locations are a hard stop. Keyed on where the posting says the *work* is — the
+#: location field, or the body's heading when the board left that field empty (see
+#: `_heading_location`). Never the body at large: a remote foreign job that merely names Russia
+#: somewhere in its text is the main stream, not a reject.
 _RU_BY_LOCATION = re.compile(
-    r"\b(?:russia|russian federation|moscow|saint[- ]petersburg|st\.? petersburg|belarus|minsk)\b"
-    r"|росси|москв|санкт-петербург|петербург|беларус|минск|\bрф\b",  # noqa: RUF001 (Cyrillic is the point)
+    r"\b(?:" + "|".join(_RU_BY_LATIN) + r")\b|\b(?:" + "|".join(_RU_BY_CYRILLIC) + r")",
     re.IGNORECASE,
 )
 
@@ -71,6 +121,13 @@ _CONTRACTOR_OK = re.compile(
 #: open is not a reject: it names a region the human *can* satisfy. Without this, a permissive
 #: multi-region net like "must be located in the Americas, Europe, or Israel" is a false positive.
 _REGION_OK = re.compile(r"europe|\beu\b|\beea\b|\bemea\b|anywhere|world-?wide", re.IGNORECASE)
+
+#: The posting names a citizenship/residency *preference* and then says it accepts everyone:
+#: "U.S. Citizens and Green Card Holders highly preferred, all valid work authorizations may
+#: apply". `_GEO_LOCKED` sees only the first half and reads a hard lock; this is the second half
+#: saying there is none. Kept tight — "all/any" must sit next to the authorization phrase, not
+#: merely somewhere in the posting, because "AWS preferred" elsewhere in a body is not consent.
+_AUTHORIZATION_OPEN = re.compile(r"\b(?:all|any)\b[\w\s,]{0,30}?work authoriz", re.IGNORECASE)
 
 #: Unconditional stops: clearances a RU citizen cannot obtain.
 STOP_PHRASES: frozenset[str] = frozenset({"security clearance"})
@@ -106,6 +163,141 @@ _ML_ADJACENT_TITLE = re.compile(
 )
 
 
+#: Titles that are not a role at all: scraped page furniture and placeholder postings. RemoteOK
+#: hands these out with an ordinary company name and a plausible teaser body, so nothing
+#: downstream can tell them apart — "Job Details" and "Couldn't pick up that page" both embedded
+#: at 0.84+ and reached the top of the shortlist, where each cost a drafted letter.
+#:
+#: Matched against the WHOLE normalized title, never as a substring: a real posting must never
+#: be caught here, and "Details" inside "Senior Engineer - Details" is not junk. This list is
+#: only for "this is not a job posting"; judging a real posting to be the wrong *kind* of job is
+#: the screening step's business (`drafting/screen.py`), not a regex's. Extend as new artifacts
+#: show up.
+_JUNK_TITLES: frozenset[str] = frozenset(
+    {
+        "apply now",
+        "couldn't pick up that page",
+        "create your own role",
+        "details",
+        "expression of interest",
+        "hiring",
+        "job",
+        "job details",
+        "job posting title",
+        "job title",
+        "join our team",
+        "jop posting title",
+        "no title",
+        "page not found",
+        "test job",
+        "this is a test job",
+        "untitled",
+        "vacancy",
+        "we are hiring",
+    }
+)
+
+#: Deliberately NOT paired with a minimum-description rule. The obvious companion filter — drop
+#: a posting whose body is too short to use — was measured against the real table and would have
+#: caught none of the junk above (those bodies run 371-1503 characters, against a 5th percentile
+#: of ~430 for postings that pass). It would only have penalized the terse Telegram postings,
+#: which are short *and* real. A filter that cannot be shown to catch the thing it is aimed at
+#: does not earn its false positives.
+
+#: Words any real posting says somewhere, in the languages we ingest. A body that is prose and
+#: still never reaches one of these is not a posting: it is a scraped page. RemoteOK republishes
+#: whatever its crawler found on a company site, so 138 of its 467 rows (measured 2026-08-03) are
+#: nav menus ("Home Who Are We? How Do We Work? Contact"), cookie notices, blog posts, lorem
+#: ipsum, and one row of keyboard mash — each with a real id, a real company name and a title
+#: like "UNC" or "Danny". They are unreachable by `_JUNK_TITLES`, which needs the exact title,
+#: and five of them held slots in the top 25 and cost a screening call apiece.
+_HIRING_VOCABULARY = re.compile(
+    r"experience|responsibilit|requirement|qualification|we are looking|you will|your profile"
+    r"|skills|salary|apply|benefits|\bteam\b|\brole\b|position|hiring|join us|candidate"
+    r"|erfahrung|aufgaben|kenntnisse|bewerb|mitarbeit|stelle"  # de
+    r"|stanowisko|wymagania|obowi|poszukujemy|oferujemy|umiej|praca"  # pl
+    r"|empleo|puesto|experiencia"  # es
+    r"|опыт|обязанност|требован|вакансия|зарплат|команд|разработчик|инженер",  # ru
+    re.IGNORECASE,
+)
+
+#: The vocabulary test is only fair on a *complete* body. Adzuna serves a teaser cut off
+#: mid-sentence — 500 characters of company preamble that often has not reached the
+#: requirements yet — and dropping those would cost 39 real postings, several of them the
+#: best-scoring rows in the table. The board marks the cut with an ellipsis; the mojibake
+#: spellings are there because some feeds are double-encoded UTF-8 (see `Â…`, `â€¦`).
+#:
+#: Matched anywhere, not just at the end: RemoteOK carries LinkedIn teasers that break off
+#: mid-sentence and then append "See this and similar jobs on LinkedIn", so the marker sits in
+#: the middle. An ellipsis used rhetorically in a real posting costs nothing — the vocabulary
+#: test still has to fail as well, and a real posting's body talks about the job somewhere.
+#:
+#: `¦` catches the mojibake spellings without enumerating them. U+2026 is `e2 80 a6`, and every
+#: round of latin-1-misread-as-UTF-8 keeps that trailing `a6` as a literal `¦`: `â€¦`, then
+#: `Ã¢Â€Â¦`. The broken bar is not a character real prose uses — all 67 rows carrying one are
+#: mangled ellipses.
+_TRUNCATED = re.compile(r"…|\.\.\.|¦")
+
+#: ...and only on prose. A gmail alert's body is a technology tag list ("Python, Golang"), which
+#: names no duties by construction and would fail a vocabulary test while being perfectly real.
+#: A sentence terminator is what separates the two: 116 of 119 gmail rows have none.
+_PROSE = re.compile(r"[.!?]")
+
+#: ...and only on a body long enough to expect a hiring word in it. "Python backend. Remote.
+#: Write to @hr." is a whole Telegram posting and says none of the words above; the funnel keeps
+#: terse postings on purpose (see the note on the absent minimum-description rule). Measured
+#: over the table, this floor gives up 3 of 101 catches — a cheap price for not having to argue
+#: about the short ones.
+_MIN_JUDGEABLE_BODY = 100
+
+
+#: A location field a board never filled in. Telegram/teletype postings routinely have none and
+#: put the office in the first line of the body instead ("OFFICE MINSK | ЛЕСТА ИГРЫ"), which is
+#: how a Minsk posting reached the drafting step on 2026-08-03 — past a hard stop the human
+#: settled long ago, because the only field the rule reads was empty.
+#:
+#: Read as a *heading*, not as prose: the first line only, and only when it is short enough to be
+#: a header rather than a sentence. "We are a Russian-founded company…" opening a real remote
+#: posting must not trip this, and the module's standing rule is that a passing mention of Russia
+#: in a body is the main stream, not a reject. Measured over the table: catches the one posting
+#: it is aimed at, and none of the 15 rows that merely name Russia somewhere in the text.
+_HEADING_MAX_CHARS = 80
+
+
+def _heading_location(job: _Filterable) -> str:
+    """The first line of the body, when the board left the location field empty."""
+    if (job.location or "").strip():
+        return ""
+    lines = job.description.strip().splitlines()
+    first = lines[0].strip() if lines else ""
+    return first if len(first) <= _HEADING_MAX_CHARS else ""
+
+
+def _normalized_title(title: str) -> str:
+    """Fold a title for comparison: entities decoded, whitespace collapsed, case dropped."""
+    return " ".join(unescape(title).split()).strip(" -–—:|").casefold()  # noqa: RUF001 (dashes)
+
+
+def _unwritten_body(job: _Filterable) -> bool:
+    """True when the body is prose that never once talks about hiring — a scraped page.
+
+    Four conditions, and every one is load-bearing. Judge only a body that is long enough to
+    expect a hiring word in it, that is complete (an Adzuna teaser is cut off before the
+    requirements), and that is prose (a gmail alert is a technology tag list). Measured over
+    the whole table: 98 rows caught, every one of them RemoteOK page furniture, none with a
+    role-like title, and nothing at all from the other seven sources.
+    """
+    body = job.description
+    if len(body) < _MIN_JUDGEABLE_BODY or not _PROSE.search(body) or _TRUNCATED.search(body):
+        return False
+    return not _HIRING_VOCABULARY.search(f"{job.title}\n{body}")
+
+
+def _is_junk(job: _Filterable) -> bool:
+    """True when the row is not a real posting at all, only scraped page furniture."""
+    return _normalized_title(job.title) in _JUNK_TITLES or _unwritten_body(job)
+
+
 def _below_middle(title: str) -> bool:
     return bool(_JUNIOR_TITLE.search(title)) and not _MIDDLE_PLUS_TITLE.search(title)
 
@@ -116,7 +308,9 @@ def _ml_training_primary(title: str) -> bool:
 
 def passes_hard_filters(job: _Filterable) -> bool:
     """True when the posting is worth embedding. Pure: no I/O, no model calls."""
-    if _RU_BY_LOCATION.search(job.location or ""):
+    if _is_junk(job):
+        return False
+    if _RU_BY_LOCATION.search(job.location or "") or _RU_BY_LOCATION.search(_heading_location(job)):
         return False
     haystack = f"{job.title}\n{job.description}\n{job.location or ''}"
     folded = haystack.casefold()
@@ -132,4 +326,5 @@ def passes_hard_filters(job: _Filterable) -> bool:
         and bool(_GEO_LOCKED.search(haystack))
         and not _CONTRACTOR_OK.search(haystack)
         and not _REGION_OK.search(haystack)
+        and not _AUTHORIZATION_OPEN.search(haystack)
     )

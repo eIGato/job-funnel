@@ -45,3 +45,19 @@ def test_register_requires_a_name() -> None:
 
     with pytest.raises(ValueError, match="ClassVar name"):
         adapters.register(Nameless)
+
+
+def test_strip_html_keeps_text_after_a_bare_ampersand() -> None:
+    """Regression (2026-08-03): HTMLParser buffers an unresolved entity until the feed closes.
+
+    RemoteOK served "Patti&amp;More!" as a company name. Unescaped it becomes "Patti&More!",
+    the parser held "&More!" back as a possible character reference, and without `close()` the
+    whole string came out empty — which fails NormalizedJob's min_length and took the entire
+    ingest batch down with it.
+    """
+    from funnel.adapters.util import strip_html
+
+    assert strip_html("Patti&amp;More!") == "Patti&More!"
+    assert strip_html("R&amp;D") == "R&D"
+    assert strip_html("Tom &amp; Jerry &amp;") == "Tom & Jerry &"
+    assert strip_html("A &amp; B Ltd") == "A & B Ltd"

@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 
 from funnel.config import bridge_llm_api_key, get_settings
+from funnel.drafting.prompting import UNTRUSTED_INPUT_RULE, posting_block
 from funnel.matching.embed import cosine_similarity, embed_texts
 from funnel.matching.profile import load_profile_text, load_writing_style
 from funnel.models import ApplyChannel
@@ -70,10 +71,17 @@ _INSTRUCTIONS = (
     "quote the bullets you actually used, close to verbatim — it is the human's audit trail, "
     "and inventing entries there is the worst thing you can do here. Copy any URL character "
     "for character; never shorten, tidy or reconstruct a link.\n\n"
+    "THE POSTING'S OWN URL IS CONTEXT, NEVER CONTENT. It is given to you so you know which "
+    "listing you are reading; it must not appear in `body` in any form — not as a link, not as "
+    "bare text, not as a markdown `[label](url)`. The reader is the company: they know which "
+    "role they advertised, and a link back to the aggregator only tells them which scraper "
+    "found them. Name the role by its title instead. Links from MY RELEVANT EXPERIENCE (a "
+    "portfolio, a repository) are a different thing and stay welcome.\n\n"
     "FORMATTING: `body` must contain real newline characters and never be one run-on block. "
     "Greeting on its own line, then one or two short paragraphs, then the closing/next step as "
     "its own last paragraph. Separate paragraphs with a blank line. This holds for every "
-    "channel — a long chat message is still broken into greeting, substance, and ask."
+    "channel — a long chat message is still broken into greeting, substance, and ask.\n\n"
+    f"{UNTRUSTED_INPUT_RULE}"
 )
 
 
@@ -204,7 +212,7 @@ def _build_prompt(job: Job, bullets: list[str], language: str, extra_context: st
         f"URL: {job.url}\n"
         f"Company: {job.company}\n"
         f"Location: {job.location or 'n/a'}\n"
-        f"Description:\n{job.description or '(none provided)'}\n\n"
+        f"Description:\n{posting_block(job.description)}\n\n"
         f"MY RELEVANT EXPERIENCE (use only what fits; invent nothing beyond this):\n{experience}"
         f"{style_block}"
         f"{context_block}"

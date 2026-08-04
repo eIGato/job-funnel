@@ -8,10 +8,12 @@ shortlist a human is about to act on — to do the two things a single generatio
         (soft            (web search)          (RAG)       (second
          stop-stack)                                        LLM pass)
 
-  - **decide-worth-it** is where the soft stop-stack lives (PLAN.md section 7): reading the
-    *whole* posting to judge whether PHP/Node/fullstack is the emphasis or a side note, and
-    whether training models is the actual job — judgments the Phase 4a regex filters
-    deliberately do not attempt. A "no" records `ApplicationStatus.DECLINED` and never drafts.
+  - **decide-worth-it** is the soft stop-stack (PLAN.md section 7): reading the *whole* posting
+    to judge whether PHP/Node/fullstack is the emphasis or a side note, and whether training
+    models is the actual job — judgments the Phase 4a regex filters deliberately do not attempt.
+    A "no" records `ApplicationStatus.DECLINED` and never drafts. It is **not** exclusive to this
+    layer any more: the same call is `drafting.screen.screen_job`, which the plain `draft` path
+    runs too, so a stop-stack posting is declined whether or not the agent layer is used.
   - **research-company** does a short web search so the opener can be specific to the company,
     not generic. It is a nicety: if it fails or finds nothing, the draft still happens.
   - **draft** reuses the exact Phase 5 machinery (`drafting.cover_letter.generate_letter`),
@@ -48,6 +50,12 @@ from funnel.drafting.cover_letter import _detect_language as detect_language
 from funnel.drafting.cover_letter import (
     make_agent as make_draft_agent,
 )
+from funnel.drafting.prompting import UNTRUSTED_INPUT_RULE, posting_block
+from funnel.drafting.screen import (
+    WorthItVerdict,
+    make_screen_agent,
+    screen_prompt,
+)
 
 if TYPE_CHECKING:
     from pydantic_ai.models import Model
@@ -58,15 +66,6 @@ if TYPE_CHECKING:
 # --------------------------------------------------------------------------------------------
 # Structured model outputs
 # --------------------------------------------------------------------------------------------
-
-
-class WorthItVerdict(BaseModel):
-    """decide-worth-it: is this role worth spending a real application on?"""
-
-    worth_it: bool = Field(
-        description="True unless the role's emphasis is clearly one the seeker does not want."
-    )
-    reasoning: str = Field(description="One line, for the human: what tipped the decision.")
 
 
 class Critique(BaseModel):
@@ -159,28 +158,6 @@ class AgentResult:
 # Prompts
 # --------------------------------------------------------------------------------------------
 
-_WORTH_IT_INSTRUCTIONS = (
-    "You screen a job posting for a backend / data-engineering / AI-orchestration specialist "
-    "before a cover letter is written. The posting already ranked highly against the seeker's "
-    "profile, so DEFAULT TO worth_it=True. Judge ONLY the ROLE'S CONTENT AND EMPHASIS — the "
-    "technical shape of the work. Only return False when the role's primary emphasis is clearly "
-    "something the seeker does not want. Concretely:\n"
-    "- Training or researching ML models as the core job (title/'responsibilities' centre on "
-    "building and training neural networks, e.g. a Deep Learning / ML Research role) -> False. "
-    "But WORKING WITH AI/LLMs — orchestration, RAG, agents, wiring models into a backend — is "
-    "wanted: keep those.\n"
-    "- A role whose PRIMARY focus is PHP, Node/JavaScript, or general fullstack/frontend work. "
-    "If backend (Python) is the main thing and those are secondary, or the posting offers extra "
-    "pay for them, keep it (worth_it=True).\n"
-    "- An obvious content mismatch that slipped through the ranking (pure frontend, pure "
-    "DevOps/SRE with no backend, sales/management) -> False.\n"
-    "DO NOT consider geography, location, timezone, relocation, on-site vs remote, or work "
-    "authorization — those are decided upstream by deterministic filters (PLAN.md section 7) and "
-    "must NEVER be a reason here, nor appear in your reasoning. The seeker works remotely, "
-    "contracts B2B, and adapts to any timezone; assume that is handled. "
-    "When unsure, keep it. Give one short line of reasoning about the role's content either way."
-)
-
 _RESEARCH_INSTRUCTIONS = (
     "You research a company so a job seeker's cover letter can open with something specific and "
     "true rather than generic. Search the web for the company named. Return 2-4 short factual "
@@ -205,16 +182,9 @@ _CRITIC_INSTRUCTIONS = (
     "- The real company name is used; no [Company] placeholders; any URL is intact.\n"
     "- Length and shape fit the channel (a chat message stays short; a form letter never "
     "mentions an attachment).\n"
-    "Do not rewrite the letter yourself — name the problems so the drafter can fix them."
+    "Do not rewrite the letter yourself — name the problems so the drafter can fix them.\n\n"
+    f"{UNTRUSTED_INPUT_RULE}"
 )
-
-
-def _worth_it_prompt(brief: JobBrief) -> str:
-    return (
-        f"POSTING\nTitle: {brief.title}\nCompany: {brief.company}\n"
-        f"Location: {brief.location or 'n/a'}\n"
-        f"Description:\n{brief.description or '(none provided)'}"
-    )
 
 
 def _research_prompt(brief: JobBrief) -> str:
@@ -226,7 +196,7 @@ def _critic_prompt(brief: JobBrief, draft: CoverLetterDraft, bullets: list[str])
     experience = "\n".join(f"- {b}" for b in bullets) or "- (no bullets retrieved)"
     return (
         f"POSTING\nTitle: {brief.title}\nCompany: {brief.company}\n"
-        f"Description:\n{brief.description or '(none provided)'}\n\n"
+        f"Description:\n{posting_block(brief.description)}\n\n"
         f"THE SEEKER'S REAL EXPERIENCE BULLETS (the only facts the letter may claim):\n"
         f"{experience}\n\n"
         f"DRAFT LETTER\nSubject: {draft.subject}\n\n{draft.body}\n\n"
@@ -265,7 +235,7 @@ class DecideWorthIt(BaseNode[AgentState, AgentDeps, AgentResult]):
     async def run(
         self, ctx: GraphRunContext[AgentState, AgentDeps]
     ) -> ResearchCompany | End[AgentResult]:
-        verdict = (await ctx.deps.worth_it_agent.run(_worth_it_prompt(self.brief))).output
+        verdict = (await ctx.deps.worth_it_agent.run(screen_prompt(self.brief))).output
         ctx.state.reasoning = verdict.reasoning
         if not verdict.worth_it:
             return End(AgentResult(worth_it=False, reasoning=verdict.reasoning))
@@ -382,8 +352,9 @@ def _build_graph() -> Graph[AgentState, AgentDeps, JobBrief, AgentResult]:  # ty
 _GRAPH = _build_graph()
 
 
-def make_worth_it_agent(model: Model | str) -> Agent[None, WorthItVerdict]:
-    return Agent(model, output_type=WorthItVerdict, instructions=_WORTH_IT_INSTRUCTIONS)
+#: The screen the ordinary `draft` path also runs (`drafting/screen.py`) — same prompt, same
+#: verdict shape, so the two paths cannot drift into disagreeing about the stop-stack.
+make_worth_it_agent = make_screen_agent
 
 
 def make_research_agent(model: Model | str) -> Agent[None, str]:

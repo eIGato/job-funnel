@@ -9,7 +9,7 @@ import enum
 import hashlib
 from datetime import datetime
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from sqlalchemy import (
     Boolean,
@@ -34,14 +34,68 @@ class Base(DeclarativeBase):
     pass
 
 
-def compute_content_hash(company: str, title: str, url: str) -> str:
-    """The dedup key: normalized company+title+url.
+#: Query parameters that identify a *fetch* rather than a posting. Adzuna mints a fresh `se=`
+#: search token on every API call, so the same ad came back under a new URL — and therefore a
+#: new content_hash — on every ingest run: 548 rows for 165 real ads, ten identical postings in
+#: a row in the admin, and a cover letter drafted for each. Seed list; extend as boards show new
+#: volatile parameters. `utm_*` is handled by prefix, below.
+_VOLATILE_QUERY_PARAMS = frozenset(
+    {"se", "ref", "referer", "referrer", "src", "gclid", "fbclid", "msclkid", "trk", "mc_cid"}
+)
+
+
+def normalize_url(url: str) -> str:
+    """Drop the parts of a URL that differ between two fetches of the same posting.
+
+    Casefolds scheme/host, strips `www.` and a trailing slash, removes tracking and session
+    parameters, and sorts what survives so parameter order cannot fork the hash. The path keeps
+    its case: plenty of boards use case-sensitive slugs.
+    """
+    parsed = urlparse(url.strip())
+    kept = sorted(
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key.casefold() not in _VOLATILE_QUERY_PARAMS and not key.casefold().startswith("utm_")
+    )
+    return urlunparse(
+        (
+            parsed.scheme.casefold(),
+            parsed.netloc.casefold().removeprefix("www."),
+            parsed.path.rstrip("/"),
+            "",
+            urlencode(kept),
+            "",
+        )
+    )
+
+
+def compute_content_hash(
+    company: str,
+    title: str,
+    url: str,
+    *,
+    source_id: int | None = None,
+    external_id: str | None = None,
+) -> str:
+    """The dedup key: company+title, plus the most stable identity available for the posting.
 
     The single definition of the hash. `NormalizedJob` (the ingest path) and the `Job` insert
     hook (every other path, including the admin) both call this: two implementations would
     drift and silently break dedup.
+
+    The board's own id is preferred over the URL, because a URL is not a stable identity on
+    every board (see `_VOLATILE_QUERY_PARAMS`). It is scoped by `source_id` — ids are unique
+    within a board, not across boards, and two boards numbering from 1 must not collide. When
+    the adapter cannot supply an id, the normalized URL stands in.
+
+    company+title stay in the key either way, so a board that recycles an external id for a
+    different posting still cannot collapse two roles into one row.
     """
-    raw = "|".join((company.strip().casefold(), title.strip().casefold(), url.strip().casefold()))
+    if source_id is not None and external_id and external_id.strip():
+        identity = f"src:{source_id}|ext:{external_id.strip().casefold()}"
+    else:
+        identity = normalize_url(url)
+    raw = "|".join((company.strip().casefold(), title.strip().casefold(), identity))
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -52,11 +106,26 @@ class SourceKind(enum.StrEnum):
 
 
 class AtsProvider(enum.StrEnum):
-    """Applicant tracking systems with a public, no-auth board API (PLAN.md Phase 3.5 D)."""
+    """Applicant tracking systems with a public, no-auth board API (PLAN.md Phase 3.5 D).
+
+    The last two were added 2026-08-03 with name-based board discovery: the point of guessing a
+    slug from a company name is to reach the *employer's* own posting, and European employers
+    are spread across more vendors than the original three. Measured over 26 real employers in
+    the table, greenhouse/lever/ashby covered 14 of 16 boards found — the tail is real but thin,
+    which is why these are additions and not replacements.
+
+    Workable is deliberately absent. Its public widget API still names a company but returns an
+    empty `jobs` array for every board (checked against veriff, bolt, wolt, glovo, adeva on
+    2026-08-03), and there is no other listing endpoint that does not need a per-posting
+    shortcode. An adapter for it would spend a request per board per run to return nothing,
+    then disable itself on `_MAX_EMPTY_RUNS`.
+    """
 
     GREENHOUSE = "greenhouse"
     LEVER = "lever"
     ASHBY = "ashby"
+    RECRUITEE = "recruitee"
+    SMARTRECRUITERS = "smartrecruiters"
 
 
 class ApplyChannel(enum.StrEnum):
@@ -165,7 +234,12 @@ class Job(Base):
     embedding: Mapped[bytes | None] = mapped_column(LargeBinary)
 
     hard_filter_passed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Cosine against the profile with the corpus mean removed (matching/embed.centered_similarity),
+    # so this is roughly -0.2..0.3 and not the 0.72..0.86 band raw e5 cosine produces. Both are
+    # rewritten wholesale on every `match`; NULL means "not on the shortlist".
     match_score: Mapped[float | None] = mapped_column(Float)
+    #: Percentage of the shortlist scoring below this posting, 0-100. The reviewable number.
+    match_percentile: Mapped[float | None] = mapped_column(Float)
 
     source: Mapped[Source] = relationship(back_populates="jobs")
     application: Mapped[Application | None] = relationship(
@@ -185,7 +259,13 @@ def _fill_content_hash(_mapper: object, _connection: object, target: Job) -> Non
     hand. Without this hook, creating a Job anywhere other than ingest raises NotNullViolation.
     Recomputed on update too, so editing company/title/url keeps the dedup key honest.
     """
-    target.content_hash = compute_content_hash(target.company, target.title, target.url)
+    target.content_hash = compute_content_hash(
+        target.company,
+        target.title,
+        target.url,
+        source_id=target.source_id,
+        external_id=target.external_id,
+    )
 
 
 @event.listens_for(Job, "before_insert")

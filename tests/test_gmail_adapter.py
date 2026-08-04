@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from funnel.adapters import registry
 from funnel.adapters.gmail import GmailAlertsAdapter, parse_message, parse_raw_email
 
@@ -148,7 +150,7 @@ def test_landing_jobs_decodes_the_click_redirect_and_splits_title_from_company()
 def test_content_hashes_are_distinct_within_a_message() -> None:
     for name in ("hh", "habr", "linkedin", "wellfound", "glassdoor", "indeed", "landing.jobs"):
         jobs = _jobs(name)
-        hashes = [j.content_hash for j in jobs]
+        hashes = [j.content_hash_for(1) for j in jobs]
         assert len(set(hashes)) == len(hashes)
 
 
@@ -164,3 +166,138 @@ def test_parsing_ignores_the_subject_wording() -> None:
 
 def test_adapter_is_registered_under_its_name() -> None:
     assert registry()["gmail-alerts"] is GmailAlertsAdapter
+
+
+# --------------------------------------------------------------------------------------
+# OAuth token handling. These drive `get_credentials`, which WRITES the token file, so the
+# settings it reads must be redirected at `funnel.config.get_settings` — the module
+# `gmail.get_settings` is a function-local import and patching it there silently does
+# nothing. `_real_secrets_untouched` is the seatbelt: an early version of this test patched
+# the wrong target and overwrote the developer's actual Gmail token with a stub.
+# --------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def gmail_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:
+    """Point Gmail's token/secret paths into tmp, and prove the real ones stay untouched."""
+    import funnel.config
+    from funnel.config import Settings
+
+    token, secret = tmp_path / "token.json", tmp_path / "client.json"
+    secret.write_text("{}", encoding="utf-8")
+    real = Settings()
+    before = [
+        (p, p.read_bytes() if p.exists() else None)
+        for p in (real.gmail_token_path, real.gmail_credentials_path)
+    ]
+
+    # No raising=False: if this attribute ever stops existing, the test must fail loudly
+    # rather than quietly fall through to the real settings again.
+    monkeypatch.setattr(
+        funnel.config,
+        "get_settings",
+        lambda: Settings(gmail_token_path=token, gmail_credentials_path=secret),
+    )
+    yield token, secret
+
+    for path, content in before:
+        now = path.read_bytes() if path.exists() else None
+        assert now == content, f"the test wrote to a real secrets file: {path}"
+
+
+class _DeadCreds:
+    """A token Google has revoked: it still looks refreshable, but refreshing fails."""
+
+    valid = False
+    expired = True
+    refresh_token = "stale"
+
+    def refresh(self, _request: object) -> None:
+        from google.auth.exceptions import RefreshError
+
+        raise RefreshError("invalid_grant: Token has been expired or revoked.")
+
+    def to_json(self) -> str:
+        return '{"token": "fresh"}'
+
+
+class _FreshCreds(_DeadCreds):
+    valid = True
+
+    def refresh(self, _request: object) -> None:  # pragma: no cover - must never be called
+        raise AssertionError("a freshly minted token must not need refreshing")
+
+
+def _mock_browser_flow(monkeypatch: pytest.MonkeyPatch, reached: list[bool]) -> None:
+    class _Flow:
+        @staticmethod
+        def from_client_secrets_file(*_a: object, **_kw: object) -> _Flow:
+            return _Flow()
+
+        def run_local_server(self, **_kw: object) -> _FreshCreds:
+            reached.append(True)
+            return _FreshCreds()
+
+    monkeypatch.setattr("google_auth_oauthlib.flow.InstalledAppFlow", _Flow)
+
+
+def test_a_revoked_token_does_not_block_reauthorization(
+    monkeypatch: pytest.MonkeyPatch, gmail_paths: tuple[Path, Path]
+) -> None:
+    """Regression: `auth-gmail` could not run while the token it exists to replace was on disk.
+
+    Google revokes a refresh token on a password change, a "remove access", or six months of
+    disuse. `creds.refresh()` then raises RefreshError, which used to propagate straight out of
+    get_credentials — so the browser flow below it was never reached and the command appeared to
+    do nothing at all ("the browser doesn't open").
+    """
+    from funnel.adapters import gmail
+
+    token, _ = gmail_paths
+    token.write_text('{"refresh_token": "stale"}', encoding="utf-8")
+    monkeypatch.setattr(
+        "google.oauth2.credentials.Credentials.from_authorized_user_file",
+        staticmethod(lambda *_a, **_kw: _DeadCreds()),
+    )
+    reached: list[bool] = []
+    _mock_browser_flow(monkeypatch, reached)
+
+    creds = gmail.get_credentials(interactive=True)
+
+    assert reached == [True], "the browser flow was never reached"
+    assert creds.valid is True
+    assert token.read_text(encoding="utf-8") == '{"token": "fresh"}'
+
+
+def test_a_malformed_token_file_does_not_block_reauthorization(
+    monkeypatch: pytest.MonkeyPatch, gmail_paths: tuple[Path, Path]
+) -> None:
+    """An empty or truncated token file raises ValueError out of google-auth's loader.
+
+    Same stance as the revoked token: the file that is broken must not be what stops the
+    command that replaces it.
+    """
+    from funnel.adapters import gmail
+
+    token, _ = gmail_paths
+    token.write_text("{}", encoding="utf-8")  # what google-auth rejects outright
+    reached: list[bool] = []
+    _mock_browser_flow(monkeypatch, reached)
+
+    creds = gmail.get_credentials(interactive=True)
+
+    assert reached == [True], "a malformed token file blocked re-authorization"
+    assert creds.valid is True
+
+
+def test_a_malformed_token_is_reported_clearly_when_non_interactive(
+    gmail_paths: tuple[Path, Path],
+) -> None:
+    """The pipeline path must not open a browser; it points at `auth-gmail` instead."""
+    from funnel.adapters import gmail
+
+    token, _ = gmail_paths
+    token.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="auth-gmail"):
+        gmail.get_credentials(interactive=False)

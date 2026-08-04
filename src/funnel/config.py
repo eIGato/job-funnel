@@ -75,6 +75,23 @@ class Settings(BaseSettings):
         ),
     )
     llm_api_key: SecretStr | None = Field(default=None)
+    draft_screen: bool = Field(
+        default=True,
+        description=(
+            "Run the soft stop-stack screen (drafting/screen.py) before drafting: one cheap "
+            "call that declines PHP/Node/fullstack-first roles and obvious content mismatches "
+            "instead of writing a letter the human then marks DECLINED by hand."
+        ),
+    )
+    screen_model: str | None = Field(
+        default=None,
+        description=(
+            "Model for that screen; falls back to llm_model. The screen is a coarse binary "
+            "judgment, not prose, so a cheaper model than the one chosen for letter quality is "
+            "the obvious setting (e.g. anthropic:claude-haiku-4-5-20251001) — left unset "
+            "because picking it is the human's call (invariant 8)."
+        ),
+    )
     cover_letter_language: Literal["en", "ru"] = Field(
         default="en",
         description="OPEN QUESTION (PLAN.md section 7): cover letter language.",
@@ -98,7 +115,49 @@ class Settings(BaseSettings):
 
     # --- Matching ---
     match_top_k: int = Field(default=25, ge=1, description="Shortlist size after ranking.")
-    match_score_threshold: float = Field(default=0.0, ge=-1.0, le=1.0)
+    #: A floor, not a selector. `match_top_k` already decides how many postings get drafted for;
+    #: this decides when there are simply not that many worth drafting for, so a thin week ends
+    #: with three letters instead of twenty-five padded out with whatever ranked highest.
+    #:
+    #: Expressed as a percentile rather than a score on purpose. A centered score is only
+    #: meaningful against the corpus it was centered on, and that corpus grows with every
+    #: ingest — an absolute floor would quietly drift. A percentile means the same thing in
+    #: every run. Measured 2026-07-31 over 2061 scored rows: rank 25 sits at 97.6, rank 100 at
+    #: 91.0 ("Senior Vue Developer" — arguable but a real backend-adjacent role), rank 206 at
+    #: 81.3 ("Virtual Assistant" — not). 90 lands between the last defensible row and the first
+    #: indefensible one, and is non-binding at today's volume: it only bites when the pool is thin.
+    match_percentile_threshold: float = Field(
+        default=90.0,
+        ge=0.0,
+        le=100.0,
+        description="Minimum match percentile a posting needs before it is drafted for.",
+    )
+    #: Added to a remote posting's score when the shortlist is ordered. A preference, not a
+    #: filter — `matching/filters.py` deliberately keeps on-site postings ("it merely ranks
+    #: below remote, and ranking is a sort, not this predicate"), and sorting by `is_remote`
+    #: first turned that sort into a partition: 893 remote rows stood ahead of 1718 on-site
+    #: ones, so the best-matching posting in the database sat at rank 894 while a 3D artist
+    #: made the top 25 (measured 2026-08-03).
+    #:
+    #: 0.02 is about a quarter of the score spread (sd 0.09 centered, and the two pools score
+    #: alike: remote mean 0.025, on-site -0.016). At that size remote wins a tie and a small
+    #: deficit, and a clearly better on-site role still outranks a mediocre remote one — the
+    #: top 25 came out 13 remote / 12 on-site. Raise it to lean harder on remote; 0 sorts on
+    #: merit alone.
+    remote_bonus: float = Field(
+        default=0.02,
+        ge=0.0,
+        description="Score bonus for a remote posting when ordering the shortlist.",
+    )
+    #: How many roles at one company may hold shortlist slots at once. An ATS board is a whole
+    #: employer at once, not a posting: the first one registered put 14 of 25 slots in Reddit's
+    #: hands (2026-08-03), including a frontend role, an engineering manager and a data
+    #: scientist — a company's twelfth-best opening beating another company's best is not what
+    #: the ranking is for. Three is enough to cover a genuine multi-team opening without the
+    #: shortlist becoming one employer's careers page.
+    shortlist_per_company: int = Field(
+        default=3, ge=1, description="Maximum shortlist slots one company may hold."
+    )
 
     # --- Admin ---
     admin_host: str = Field(default="127.0.0.1")

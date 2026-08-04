@@ -59,6 +59,8 @@ def get_credentials(*, interactive: bool = False) -> Credentials:
     """Return valid Gmail OAuth credentials, refreshing or minting them as needed.
 
     - A saved token is loaded and, if expired, refreshed silently and rewritten.
+    - A refresh token Google has *revoked* is discarded, not fatal: re-authorizing is the
+      whole point of ``funnel auth-gmail``, and a dead token file must not be what stops it.
     - With no usable token and ``interactive=True``, run the installed-app browser flow
       once (this is what ``funnel auth-gmail`` does) and persist the result.
     - With no usable token and ``interactive=False`` (the pipeline path), raise with a
@@ -68,6 +70,7 @@ def get_credentials(*, interactive: bool = False) -> Credentials:
     Imports of the Google libraries are local so that merely importing the adapter
     registry stays cheap.
     """
+    from google.auth.exceptions import RefreshError
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
@@ -80,21 +83,39 @@ def get_credentials(*, interactive: bool = False) -> Credentials:
 
     creds: Credentials | None = None
     if token_path.exists():
-        # google-auth ships py.typed but leaves these methods unannotated.
-        creds = Credentials.from_authorized_user_file(str(token_path), GMAIL_SCOPES)  # type: ignore[no-untyped-call]
+        try:
+            # google-auth ships py.typed but leaves these methods unannotated.
+            creds = Credentials.from_authorized_user_file(str(token_path), GMAIL_SCOPES)  # type: ignore[no-untyped-call]
+        except ValueError:
+            # Empty, truncated or hand-edited: `from_authorized_user_file` raises
+            # "Authorized user info was not in the expected format". Same stance as the revoked
+            # refresh token below — a broken token file must never block the command whose one
+            # job is to replace it. Discard and re-authorize.
+            creds = None
 
     if creds and creds.valid:
         return creds
 
     if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())  # type: ignore[no-untyped-call]
-        _write_token(token_path, creds)
-        return creds
+        try:
+            creds.refresh(Request())  # type: ignore[no-untyped-call]
+        except RefreshError:
+            # Google revokes a refresh token on a password change, a "remove access" in the
+            # account console, or six months of disuse. Before this was caught, the dead token
+            # file made `auth-gmail` itself fail here — it raised out of the refresh branch and
+            # never reached the browser flow below, so the one command that exists to fix a
+            # broken token could not run while the broken token was on disk. Drop it and
+            # re-authorize instead.
+            creds = None
+        else:
+            _write_token(token_path, creds)
+            return creds
 
     if not interactive:
         raise RuntimeError(
-            f"No usable Gmail token at {token_path}. Run `uv run funnel auth-gmail` once "
-            "to authorize (it opens a browser); the pipeline stays non-interactive."
+            f"No usable Gmail token at {token_path} (missing, or the refresh token was "
+            "revoked). Run `uv run funnel auth-gmail` once to re-authorize; the pipeline "
+            "stays non-interactive."
         )
 
     if not creds_path.exists():
