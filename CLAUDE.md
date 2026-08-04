@@ -138,6 +138,9 @@ uv run ruff check . && uv run ruff format .
 uv run mypy src
 uv run pytest
 
+# run all four before every push (once per clone; core.hooksPath is local config)
+git config core.hooksPath .githooks
+
 # how systemd drives it (--build: the code is baked into the image, not bind-mounted,
 # so without it the timer runs the checkout as of the last build)
 docker compose run --rm --build app uv run funnel run-funnel
@@ -198,6 +201,12 @@ docker compose run --rm --build app uv run funnel run-funnel
 - **Invariants are tested.** `tests/test_invariants.py` guards the boundaries above (no
   torch, no LLM outside `drafting/`+`replies/`, Gmail scope read-only, no Django, no
   hardcoded secrets). A failure there means a boundary was broken, not that the test is wrong.
+- **The gates run locally, not in CI.** `.githooks/pre-push` runs ruff, mypy and pytest on
+  every push. There is deliberately no GitHub Actions workflow: the suite is hermetic — it
+  touches neither Postgres nor the network, and never downloads the e5 model — so all four
+  gates finish in about eight seconds, well under what a runner spends on checkout and
+  `uv sync` alone. Keep the suite hermetic and this stays true; the day a test needs a live
+  service, revisit the choice rather than bolting a service container onto a hook.
 
 ---
 
