@@ -80,9 +80,7 @@ def upgrade() -> None:
     repaired: dict[int, dict[str, str]] = {}
     groups: dict[str, list[Any]] = {}
     for row in rows:
-        fixed = {
-            column: repair_mojibake(getattr(row, column) or "") for column in _TEXT_COLUMNS
-        }
+        fixed = {column: repair_mojibake(getattr(row, column) or "") for column in _TEXT_COLUMNS}
         if any(fixed[column] != (getattr(row, column) or "") for column in _TEXT_COLUMNS):
             repaired[row.id] = fixed
         digest = compute_content_hash(

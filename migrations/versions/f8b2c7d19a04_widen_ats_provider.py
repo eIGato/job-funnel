@@ -38,10 +38,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Narrowing back only works while no long-named vendor has a board; drop those first."""
-    op.execute(
-        "DELETE FROM ats_boards WHERE provider IN "
-        "('recruitee', 'smartrecruiters')"
-    )
+    op.execute("DELETE FROM ats_boards WHERE provider IN ('recruitee', 'smartrecruiters')")
     op.alter_column(
         "ats_boards",
         "provider",
