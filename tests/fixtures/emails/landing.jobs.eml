@@ -1,0 +1,39 @@
+From: Landing.Jobs <notifications@landing.jobs>
+Subject: Landing.Jobs - New jobs matching your subscription have been published!
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html>
+<body>
+<img alt="Landing.Jobs" src="http://landing.jobs/assets/logos/png/Landing_Logo.png">
+<h1>Hello there,</h1>
+<p>Good news! We&rsquo;ve published new jobs that match your subscriptions:</p>
+<ol>
+  <li>
+    For AI, Back-end Developer
+    <ul>
+      <li>
+        <ul>
+          <li><a href="https://landing.jobs/ahoy/messages/REDACTEDTOKEN/click?signature=REDACTED&amp;url=https%3A%2F%2Flanding.jobs%2Fat%2Facme-robotics%2Fsenior-python-engineer%3Futm_campaign%3Dplatform%2520messages%26utm_medium%3Demail">Senior Python Engineer @ Acme Robotics</a></li>
+          <li><a href="https://landing.jobs/ahoy/messages/REDACTEDTOKEN/click?signature=REDACTED&amp;url=https%3A%2F%2Flanding.jobs%2Fat%2Fglobex-systems%2Fbackend-developer-remote%3Futm_campaign%3Dplatform%2520messages%26utm_medium%3Demail">Backend Developer (Remote) @ Globex Systems</a></li>
+        </ul>
+      </li>
+    </ul>
+  </li>
+  <li>
+    For Data Engineer
+    <ul>
+      <li>
+        <ul>
+          <li><a href="https://landing.jobs/ahoy/messages/REDACTEDTOKEN/click?signature=DIFFERENTSIGNATURE&amp;url=https%3A%2F%2Flanding.jobs%2Fat%2Facme-robotics%2Fsenior-python-engineer%3Futm_campaign%3Dplatform%2520messages%26utm_content%3Dsecond%2520subscription">Senior Python Engineer @ Acme Robotics</a></li>
+        </ul>
+      </li>
+    </ul>
+  </li>
+</ol>
+<p>You currently have 2 active subscriptions.
+Feel free to manage them <a href="https://landing.jobs/ahoy/messages/REDACTEDTOKEN/click?signature=REDACTED&amp;url=https%3A%2F%2Flanding.jobs%2Fdashboard%2Fsubscriptions">here</a>.</p>
+<p>Too many notifications? You can <a href="https://landing.jobs/ahoy/messages/REDACTEDTOKEN/click?signature=REDACTED&amp;url=https%3A%2F%2Flanding.jobs%2Fnotification-preferences">change your settings</a>.</p>
+<a href="https://landing.jobs/ahoy/messages/REDACTEDTOKEN/click?signature=REDACTED&amp;url=https%3A%2F%2Flanding.jobs">Landing.Jobs</a>
+</body>
+</html>

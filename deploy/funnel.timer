@@ -1,0 +1,17 @@
+[Unit]
+Description=Run the job-search funnel three times a day
+Documentation=https://github.com/eIGato/job-funnel
+
+[Timer]
+# 3x/day (PLAN.md Phase 7). Boards refresh through the working day; more often than this
+# buys nothing and just burns embedding time and API calls.
+OnCalendar=*-*-* 08,13,19:00
+# The machine is a laptop and will be asleep at some of these. Persistent=true runs a missed
+# occurrence once on the next boot instead of silently skipping the day.
+Persistent=true
+# Do not have all three fire at the same second as everything else on the box.
+RandomizedDelaySec=5min
+Unit=funnel.service
+
+[Install]
+WantedBy=timers.target

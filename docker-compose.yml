@@ -1,0 +1,41 @@
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-funnel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-funnel}
+      POSTGRES_DB: ${POSTGRES_DB:-funnel}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # Postgres 18+ wants a single mount at /var/lib/postgresql and puts the cluster in a
+      # version-named subdirectory; mounting .../data directly makes the container abort.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-funnel} -d ${POSTGRES_DB:-funnel}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  app:
+    build: .
+    env_file: .env
+    environment:
+      # Inside the compose network the database is `db`, not localhost.
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-funnel}:${POSTGRES_PASSWORD:-funnel}@db:5432/${POSTGRES_DB:-funnel}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # fastembed weights survive image rebuilds, so they download only once.
+      - fastembed-cache:/app/.cache/fastembed
+      - ./data:/app/data:ro
+      - ./secrets:/app/secrets
+    # A batch tool: the container does its work and exits. There is no long-lived process.
+    # Driven by: docker compose run --rm app uv run funnel run-funnel
+    profiles: ["cli"]
+
+volumes:
+  pgdata:
+  fastembed-cache:

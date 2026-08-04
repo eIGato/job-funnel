@@ -216,3 +216,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Claude Code personal settings (kept out of the repo: permissions are per-developer)
+.claude/settings.local.json
+
+# OAuth client secrets and tokens (invariant 7: secrets live only in .env)
+/secrets/*
+!/secrets/.gitkeep
+
+# Personal data: the CV lives here
+/data/*
+!/data/.gitkeep
+
+# fastembed ONNX weights: large, downloaded on first run
+/.cache/
