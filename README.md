@@ -40,6 +40,17 @@ uv run mypy src
 uv run pytest
 ```
 
+All three run automatically before every push, via `.githooks/pre-push`. Git does not
+carry that setting across a clone, so enable it once:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The suite is hermetic — no Postgres, no network, no model download — so the full set of
+gates takes about eight seconds. That is why the checks live here and not in a CI
+workflow. To push past a red gate deliberately: `git push --no-verify`.
+
 ## How systemd drives it
 
 ```bash

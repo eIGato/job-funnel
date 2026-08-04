@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Quality gates before anything leaves the machine: ruff, mypy, pytest.
+#
+# The whole suite runs in about eight seconds and touches neither Postgres nor
+# the network, so this is cheaper than a CI round trip. Enable it once per
+# clone with:
+#
+#     git config core.hooksPath .githooks
+#
+# To push past a red gate on purpose: git push --no-verify
+
+set -uo pipefail
+
+# stdin gives one "<local ref> <local sha> <remote ref> <remote sha>" line per
+# ref. A deletion has an all-zero local sha and no tree worth checking; if every
+# line is a deletion (or there are no lines at all), there is nothing to gate.
+has_work=""
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+    case "$local_sha" in
+        *[!0]*) has_work="yes" ;;
+    esac
+done
+[ -n "$has_work" ] || exit 0
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+failed=""
+
+run() {
+    local name="$1"
+    shift
+    printf 'pre-push: %s\n' "$name"
+    if ! "$@"; then
+        failed="${failed}${failed:+, }${name}"
+    fi
+}
+
+# All four run even when an early one fails, so a single push reports every
+# problem instead of one per attempt.
+run "ruff check" uv run ruff check .
+run "ruff format" uv run ruff format --check .
+run "mypy" uv run mypy src
+run "pytest" uv run pytest -q
+
+if [ -n "$failed" ]; then
+    printf '\npre-push: FAILED (%s). Push aborted.\n' "$failed" >&2
+    printf 'pre-push: fix the above, or bypass with: git push --no-verify\n' >&2
+    exit 1
+fi
+
+printf 'pre-push: all gates passed\n'
