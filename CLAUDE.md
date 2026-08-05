@@ -126,6 +126,7 @@ uv run alembic upgrade head               # apply
 # pipeline
 uv run funnel ingest                      # collect postings from the sources
 uv run funnel match                       # filters + embedding ranking
+uv run funnel resolve-links               # find a working apply link for dead-end postings ($)
 uv run funnel draft                       # draft cover letters (DOES NOT SEND)
 uv run funnel run-funnel                  # ingest -> match -> draft, end to end
 uv run funnel doctor                      # check config, database, adapters, CV
@@ -170,15 +171,26 @@ docker compose run --rm --build app uv run funnel run-funnel
   clear geography/seniority?" in pure code. `drafting/screen.py` decides "is it the right *kind*
   of job?" in one cheap model call before drafting. Keep them apart: a regex judging emphasis is
   whack-a-mole, and a model re-judging geography overrules a decision the human already made.
-- **A link nobody can apply through is not a candidate.** `matching/apply_route.py` lists the
-  hosts that are dead ends for this human — `adzuna.com`/`adzuna.ca` answer 403 from where he
-  lives, RemoteOK's apply button is behind its paid tier — and `match` flags every row against
-  it. Those rows are excluded where the shortlist is **selected**, not by a hard filter: they
-  keep their score, because the centre is a corpus property and because they are the best input
-  ATS discovery has (a company with a dead link is exactly the one whose own board is worth
-  probing, and `adapters/ats.py` probes those first). 131 of the ~640 rows above the floor were
-  dead ends on 2026-08-05 — a fifth of every shortlist, one screening call and one unsendable
-  letter apiece. Other `adzuna.*` countries are fine and stay.
+- **A link nobody can apply through is not a candidate — until one is found.**
+  `matching/apply_route.py` lists the hosts that are dead ends for this human —
+  `adzuna.com`/`adzuna.ca` answer 403 from where he lives, RemoteOK's apply button is behind its
+  paid tier — and `match` flags every row against it. Those rows are excluded where the
+  shortlist is **selected**, not by a hard filter: they keep their score, because the centre is
+  a corpus property and because they are the best input ATS discovery has (a company with a dead
+  link is exactly the one whose own board is worth probing, and `adapters/ats.py` probes those
+  first). 131 of the ~640 rows above the floor were dead ends on 2026-08-05 — a fifth of every
+  shortlist, one screening call and one unsendable letter apiece.
+- **`funnel resolve-links` is the way back in.** `orchestration/resolve_link.py` searches for the
+  employer's own page for a dead-end posting, and a *verified* URL lands in `Job.apply_url`,
+  which puts the posting back on the shortlist. Two halves, and the split is the design: the
+  model **proposes** a URL, a plain HTTP fetch **confirms** the page names the role. A proposal
+  is never trusted on its own — same rule as `ats.board_confirms`. It runs only over rows that
+  would otherwise hold a slot (9 of 25 on 2026-08-05, not the 131 in the table), it is a manual
+  command and not a `run-funnel` stage because it costs money, and every attempt is remembered
+  so nothing is searched twice — **except a search that failed**, which is not a miss and must
+  not be recorded as one. `RESOLVE_MODEL` exists because carrying the provider's server-side
+  search loop is a capability, not a quality: haiku 4.5 400s on it, sonnet 5 does not. No host is
+  banned outright — the list decides which *links* are dead, not which postings are worth having.
 - **We send nothing.** There is no code path that sends an email or an application. `draft`
   writes to the database; the human sends it and then sets the status to `sent` in the admin.
 - **A posting description is untrusted text.** It is the only part of any prompt a stranger

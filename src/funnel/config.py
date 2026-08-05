@@ -92,6 +92,17 @@ class Settings(BaseSettings):
             "because picking it is the human's call (invariant 8)."
         ),
     )
+    resolve_model: str | None = Field(
+        default=None,
+        description=(
+            "Model for the apply-link resolver (orchestration/resolve_link.py); falls back to "
+            "llm_model. It is the one call that needs the provider's server-side web search, "
+            "and NOT every model carries that loop: claude-haiku-4-5 returns 400 "
+            "'web_search tool use ... without a corresponding web_search_tool_result block' on "
+            "every attempt, while claude-sonnet-5 completes it (both measured 2026-08-05). Set "
+            "this when llm_model is a model that cannot search."
+        ),
+    )
     cover_letter_language: Literal["en", "ru"] = Field(
         default="en",
         description="OPEN QUESTION (PLAN.md section 7): cover letter language.",

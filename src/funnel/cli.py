@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import typer
@@ -68,8 +69,35 @@ def shortlist_rank(remote_bonus: float) -> ColumnElement[float | None]:
     return Job.match_score + case((Job.is_remote, remote_bonus), else_=0.0)
 
 
+def apply_route_clause(*, needing_link: bool) -> ColumnElement[bool]:
+    """Which side of the apply-route question a row is on.
+
+    `needing_link=False` — the row has a link the human can use: either its own is fine, or
+    `resolve-links` found the employer's page. This is what `draft` and the agent layer select.
+
+    `needing_link=True` — its own link is a dead end, nothing has been found, and nothing has
+    been *tried*. This is what `resolve-links` selects. `apply_resolved_at` is the third of
+    those conditions and the one that bounds the spend: a row that was searched and came back
+    empty keeps its timestamp and is never searched again, however long it stays in the table.
+    """
+    from sqlalchemy import and_, or_
+
+    if needing_link:
+        return and_(
+            Job.apply_blocked.is_(True),
+            Job.apply_url.is_(None),
+            Job.apply_resolved_at.is_(None),
+        )
+    return or_(Job.apply_blocked.is_(False), Job.apply_url.isnot(None))
+
+
 def shortlist_select(
-    *, top_n: int, floor: float, remote_bonus: float, per_company: int = 3
+    *,
+    top_n: int,
+    floor: float,
+    remote_bonus: float,
+    per_company: int = 3,
+    needing_link: bool = False,
 ) -> Select[tuple[Job]]:
     """The `top_n` highest-ranked postings nobody has decided on yet.
 
@@ -105,6 +133,13 @@ def shortlist_select(
     only place that acts on it: the rows stay scored, because they hold the corpus centre steady
     and because they are what ATS discovery probes for a company's own board (its link is the
     direct one).
+
+    `needing_link` flips that clause to select the dead ends instead, which is how
+    `resolve-links` finds what to search for — the same window, read from the other side. That
+    is the point of one function serving both: **the rows worth a paid search are exactly the
+    rows that would otherwise hold a slot**, and that is 9 of a 25-slot shortlist (measured
+    2026-08-05), not the 131 dead ends in the table. A resolver fed by its own broader query
+    would spend an order of magnitude more for postings nobody was going to see.
     """
     from sqlalchemy import desc
     from sqlalchemy.orm import aliased
@@ -137,7 +172,7 @@ def shortlist_select(
         .where(
             Job.match_score.isnot(None),
             Job.hard_filter_passed.is_(True),
-            Job.apply_blocked.is_(False),
+            apply_route_clause(needing_link=needing_link),
             Job.match_percentile >= floor,
             ~role_is_handled,
         )
@@ -425,6 +460,92 @@ def draft(
         )
 
 
+@app.command(name="resolve-links")
+def resolve_links(
+    limit: int | None = typer.Option(
+        None, help="How many dead-end postings to search for. Defaults to the shortlist size."
+    ),
+) -> None:
+    """Search for the employer's own apply page for postings whose own link is a dead end.
+
+    Adzuna's US and CA sites answer 403 from where the human lives and RemoteOK's apply button
+    is behind its paid tier, so those postings hold no shortlist slot — `draft` never sees them.
+    This is the way back in: one web search per posting (`orchestration/resolve_link.py`), a
+    plain HTTP fetch to confirm the page really names the role, and the verified URL goes in
+    `Job.apply_url`. A posting that gets one becomes an ordinary shortlist candidate on the next
+    `draft`, RemoteOK and Adzuna alike — the host list decides which links are dead, not which
+    postings are worth having.
+
+    **Only rows that would otherwise hold a slot are searched.** That is what the shortlist
+    window is for: 9 rows of a 25-slot shortlist were dead ends on 2026-08-05, against 131 in
+    the table. At $10/1000 searches this run costs cents; a resolver over the whole table would
+    cost dollars for postings nobody was going to read.
+
+    Every attempt is remembered (`apply_resolved_at`), so a posting nobody could find a page for
+    is searched once and never again. Clear that column in the admin to ask for a retry.
+
+    Deliberately NOT part of `run-funnel`: the timer fires three times a day and nothing that
+    spends money joins it without the human saying so. It sends nothing (invariant 2).
+    """
+    from funnel.orchestration.resolve_link import resolve_apply_url
+
+    settings = get_settings()
+    if not (settings.llm_api_key and settings.llm_api_key.get_secret_value()):
+        typer.secho(
+            "resolve-links: LLM_API_KEY is empty. Set it in .env (provider for llm_model="
+            f"{settings.llm_model}). The search needs it; nothing was sent.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+
+    floor = settings.match_percentile_threshold
+    with session_scope() as session:
+        jobs = session.scalars(
+            shortlist_select(
+                top_n=limit or settings.match_top_k,
+                floor=floor,
+                remote_bonus=settings.remote_bonus,
+                per_company=settings.shortlist_per_company,
+                needing_link=True,
+            )
+        ).all()
+        if not jobs:
+            typer.secho(
+                f"resolve-links: no unsearched dead ends at or above the {floor:.0f}th "
+                "percentile. Run `funnel match` if the shortlist is stale.",
+                fg=typer.colors.YELLOW,
+            )
+            return
+
+        found = failed = 0
+        for job in jobs:
+            result = asyncio.run(resolve_apply_url(job))
+            if result.searched:
+                # Stamped on a miss too: that is what stops the next run paying for the same
+                # search. NOT stamped when the search itself failed — a provider error is not
+                # evidence that the posting has no page, and writing one off on a 400 is how
+                # the first live run retired a real posting (2026-08-05).
+                job.apply_resolved_at = datetime.now(tz=UTC)
+                job.apply_url = result.url
+            found += result.url is not None
+            failed += not result.searched
+            verdict = "found" if result.url else ("error" if not result.searched else "none ")
+            colour = None if result.url else typer.colors.YELLOW
+            typer.secho(
+                f"  {verdict}: {job.company[:28]} — {job.title[:40]}\n"
+                f"         {result.url or result.reasoning[:100]}",
+                fg=colour,
+            )
+
+        typer.secho(
+            f"resolve-links: {found} of {len(jobs)} dead ends now have a direct link "
+            f"({len(jobs) - found - failed} recorded as unfindable and never searched again"
+            + (f", {failed} left for the next run after a failed search" if failed else "")
+            + ")",
+            fg=typer.colors.GREEN,
+        )
+
+
 @app.command(name="agent-draft")
 def agent_draft(
     limit: int = typer.Option(5, help="How many top shortlisted postings to run the agent over."),
@@ -473,7 +594,7 @@ def agent_draft(
             .where(
                 Job.match_score.isnot(None),
                 Job.hard_filter_passed.is_(True),
-                Job.apply_blocked.is_(False),
+                apply_route_clause(needing_link=False),
                 Job.match_percentile >= settings.match_percentile_threshold,
             )
             .order_by(desc(Job.is_remote), desc(Job.match_score))

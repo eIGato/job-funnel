@@ -232,6 +232,44 @@ def test_the_shortlist_skips_postings_with_no_apply_route() -> None:
     assert "jobs.apply_blocked IS false" in where
 
 
+def test_a_resolved_dead_end_is_back_on_the_shortlist() -> None:
+    """The host list decides which *links* are dead, not which postings are worth having.
+
+    Once `resolve-links` has found and verified the employer's own page, the posting is an
+    ordinary candidate — RemoteOK and Adzuna alike. Without the OR, a resolved row would keep
+    its `apply_blocked` flag and stay excluded forever, which would make the whole resolver a
+    no-op.
+    """
+    where, _, _ = _compiled_shortlist().partition("LIMIT")
+    assert "jobs.apply_url IS NOT NULL" in where
+    assert "OR" in where
+
+
+def test_the_resolver_selects_the_rows_the_shortlist_would_have_held() -> None:
+    """One window, read from the other side — that is why both share `shortlist_select`.
+
+    The rows worth a paid search are exactly the ones that would otherwise hold a slot: 9 of a
+    25-slot shortlist on 2026-08-05, against 131 dead ends in the table. A resolver with its own
+    broader query would spend an order of magnitude more on postings nobody was going to see.
+    """
+    from sqlalchemy.dialects import postgresql
+
+    sql = str(
+        cli.shortlist_select(top_n=25, floor=90.0, remote_bonus=0.02, needing_link=True).compile(
+            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+        )
+    )
+    where, _, _ = sql.partition("LIMIT")
+    assert "jobs.apply_blocked IS true" in where
+    assert "jobs.apply_url IS NULL" in where
+    # The third condition is what bounds the spend: a row already searched is never searched
+    # again, however long it stays in the table.
+    assert "jobs.apply_resolved_at IS NULL" in where
+    # Still the shortlist window: same floor, same undecided rule, same limit.
+    assert "match_percentile >= 90.0" in where
+    assert "NOT (EXISTS" in where
+
+
 def test_the_company_cap_is_applied_after_twins_collapse() -> None:
     """Order matters: five rows of one role would otherwise spend the whole allowance."""
     sql = _compiled_shortlist()
