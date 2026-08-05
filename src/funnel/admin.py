@@ -94,10 +94,16 @@ class JobAdmin(ModelView, model=Job):
         Job.is_remote,
         Job.apply_channel,
         Job.hard_filter_passed,
+        Job.apply_blocked,
         Job.match_percentile,
         Job.posted_at,
     ]
-    column_labels = {Job.match_percentile: "Match"}
+    # "No apply route" rather than the column name: the human's question in front of a
+    # high-scoring row that never gets drafted is "why is this being skipped?", and the answer
+    # is that the link is a dead end from here (`matching/apply_route.py`), not that the posting
+    # is bad. Sortable, so the blocked rows can be read as a batch — those are the ones worth
+    # chasing by hand.
+    column_labels = {Job.match_percentile: "Match", Job.apply_blocked: "No apply route"}
     column_formatters = {Job.match_percentile: _percentile, Job.url: _link}
     column_searchable_list = [Job.company, Job.title]
     column_sortable_list = [
@@ -105,6 +111,7 @@ class JobAdmin(ModelView, model=Job):
         Job.match_score,
         Job.is_remote,
         Job.apply_channel,
+        Job.apply_blocked,
         Job.posted_at,
         Job.company,
     ]

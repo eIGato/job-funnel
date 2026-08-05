@@ -219,6 +219,19 @@ def test_shortlist_caps_how_many_slots_one_company_holds() -> None:
     assert "company_rank" not in after
 
 
+def test_the_shortlist_skips_postings_with_no_apply_route() -> None:
+    """A link the human cannot apply through must not hold a slot (2026-08-05).
+
+    Adzuna's US and CA sites answer 403 from where the human lives and RemoteOK's apply button
+    is behind its paid tier — 131 of the ~640 rows above the floor, a fifth of the shortlist
+    spent on letters that could not be sent. Excluded in the WHERE like every other selection
+    rule, so the slot goes to the next posting instead of being lost.
+    """
+    sql = _compiled_shortlist()
+    where, _, _ = sql.partition("LIMIT")
+    assert "jobs.apply_blocked IS false" in where
+
+
 def test_the_company_cap_is_applied_after_twins_collapse() -> None:
     """Order matters: five rows of one role would otherwise spend the whole allowance."""
     sql = _compiled_shortlist()

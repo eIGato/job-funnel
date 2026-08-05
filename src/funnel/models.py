@@ -234,6 +234,12 @@ class Job(Base):
     embedding: Mapped[bytes | None] = mapped_column(LargeBinary)
 
     hard_filter_passed: Mapped[bool] = mapped_column(Boolean, default=False)
+    #: True when this URL leads nowhere the human can apply — a geo-blocked site, a paywalled
+    #: apply button (`matching/apply_route.py`). Such a posting keeps its score and its place in
+    #: the corpus but gets no shortlist slot. Derived, not typed: `match` recomputes it for every
+    #: row on every run, exactly as it does `hard_filter_passed`, so editing `BLOCKED_HOSTS`
+    #: takes effect by itself instead of applying to newly ingested rows only.
+    apply_blocked: Mapped[bool] = mapped_column(Boolean, default=False)
     # Cosine against the profile with the corpus mean removed (matching/embed.centered_similarity),
     # so this is roughly -0.2..0.3 and not the 0.72..0.86 band raw e5 cosine produces. Both are
     # rewritten wholesale on every `match`; NULL means "not on the shortlist".

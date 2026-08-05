@@ -610,8 +610,30 @@ trick as "chat with your PDF", except the retrieval is over CV bullets.
   pydantic-ai stack, lighter, no second ecosystem. LangGraph's resume-line recognizability was
   weighed and declined. Not built yet — this only records the library choice for Phase 7.
 
+- **Postings with no apply route** (2026-08-05). A link the human cannot apply through gets **no
+  shortlist slot**. `matching/apply_route.py` holds the host list and the evidence:
+  `adzuna.com` and `adzuna.ca` answer 403 from Montenegro (the whole site, not the apply button
+  — the other Adzuna countries are unaffected and stay), and RemoteOK gates applying behind its
+  paid tier, with no way round it in the feed (every row's `apply_url` is a copy of its own
+  `url`). Together they were 131 of the ~640 rows above the floor — a fifth of the shortlist.
+
+  Excluded at **selection**, not by a hard filter: a filtered row loses its score, which moves
+  the corpus centre every other score is measured against, and would hide those companies from
+  the one automatic route to a direct link — the ATS name probe, which now takes them first
+  (`adapters/ats.probe_candidates`). Measured alternatives that did **not** work: a twin row
+  from another source for the same company+title (1 hit in 131), and RemoteOK's `apply_url`
+  (0 in 100). Reading an apply link out of a paywalled page is out under invariant 9.
+
 ### Still open
 
+- **A general web search for a direct link.** The human's manual workaround is to google the
+  company plus the title and apply on the employer's own site; the funnel has no search of its
+  own, and adding one (provider, key, ToS) is the human's call. Today the ATS probe is the only
+  automatic route, at roughly a 9% hit rate (7 boards confirmed over ~79 companies tried).
+- **Adzuna `us`/`ca` in the source config.** The rows still ingest and score, they just take no
+  slot. 64 of the 72 they contributed above the floor were on-site US/Canada, and the 8 remote
+  ones were staffing agencies advertising W2 employment. Awaiting the human's verdict on
+  dropping the two countries from `Source.config`.
 - **Which boards actually have an available API/alerts today** — verify while building Phase 3.
 - **Telegram ingest account** (Phase 3.5 C): a dedicated number + login code. Deferred by the
   human (2026-07-24) — it only widens the ingest funnel and is not needed for the MVP.

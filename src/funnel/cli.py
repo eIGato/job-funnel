@@ -97,6 +97,14 @@ def shortlist_select(
     2026-08-03 shortlist opened with EuroCert five times, Rose International four and STAFIDE
     twice, twelve slots for six roles. The highest-scoring row of a role represents it, which
     also picks the best of a board's per-city variants.
+
+    **A posting the human cannot apply to takes no slot** (`matching/apply_route.py`). Some
+    boards' links are dead ends — a site that answers 403 from where the human lives, an apply
+    button behind a paywall — and 131 of the ~640 rows above the floor were such links on
+    2026-08-05, a fifth of the shortlist spent on letters that could not be sent. This is the
+    only place that acts on it: the rows stay scored, because they hold the corpus centre steady
+    and because they are what ATS discovery probes for a company's own board (its link is the
+    direct one).
     """
     from sqlalchemy import desc
     from sqlalchemy.orm import aliased
@@ -129,6 +137,7 @@ def shortlist_select(
         .where(
             Job.match_score.isnot(None),
             Job.hard_filter_passed.is_(True),
+            Job.apply_blocked.is_(False),
             Job.match_percentile >= floor,
             ~role_is_handled,
         )
@@ -237,6 +246,7 @@ def match() -> None:
     """
     import numpy as np
 
+    from funnel.matching.apply_route import is_blocked
     from funnel.matching.embed import (
         centered_similarity,
         embed_texts,
@@ -251,12 +261,18 @@ def match() -> None:
         every = session.scalars(select(Job)).all()
 
         retired = 0
+        blocked = 0
         needs_embedding: list[Job] = []
         for job in every:
             passed = passes_hard_filters(job)
             if job.hard_filter_passed and not passed:
                 retired += 1
             job.hard_filter_passed = passed
+            # Scored like everything else, but off the shortlist: no apply route (see
+            # matching/apply_route.py). Recomputed here rather than at ingest so a change to the
+            # host list lands on the whole table at once.
+            job.apply_blocked = is_blocked(job.url)
+            blocked += job.apply_blocked and passed
             if passed and job.embedding is None:
                 needs_embedding.append(job)
 
@@ -297,6 +313,7 @@ def match() -> None:
             f"match: {len(every)} scanned, {len(needs_embedding)} newly embedded, "
             f"{len(population)} scored ({len(every) - len(population)} filtered out"
             + (f", {retired} newly retired" if retired else "")
+            + (f", {blocked} scored but unapplyable" if blocked else "")
             + f"), top score {float(scores.max()):.3f}",
             fg=typer.colors.GREEN,
         )
@@ -447,13 +464,16 @@ def agent_draft(
     deps = build_agent_deps(do_research=research)
 
     with session_scope() as session:
-        # Same quality floor as `draft`. This pass is four model calls and a web search per
-        # posting, so spending it below the floor is the more expensive version of the mistake.
+        # Same quality floor as `draft`, and the same apply-route rule: this pass is four model
+        # calls and a web search per posting, so spending it below the floor — or on a posting
+        # with no way to apply (`matching/apply_route.py`) — is the expensive version of the
+        # mistake `draft` would have made for one call.
         jobs = session.scalars(
             select(Job)
             .where(
                 Job.match_score.isnot(None),
                 Job.hard_filter_passed.is_(True),
+                Job.apply_blocked.is_(False),
                 Job.match_percentile >= settings.match_percentile_threshold,
             )
             .order_by(desc(Job.is_remote), desc(Job.match_score))

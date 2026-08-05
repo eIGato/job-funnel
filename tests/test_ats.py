@@ -181,6 +181,47 @@ def test_a_company_name_equal_to_the_guessed_slug_is_not_evidence() -> None:
     assert board_confirms("Clera", "clera", ["Backend Engineer"], echo) is False
 
 
+def _compiled_probe_candidates(scan: int = 300) -> str:
+    """The candidate query as PostgreSQL sees it — no database needed to read it."""
+    from sqlalchemy.dialects import postgresql
+
+    from funnel.adapters.ats import probe_candidates
+
+    return str(
+        probe_candidates(scan).compile(
+            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+        )
+    )
+
+
+def test_companies_with_no_apply_route_are_probed_first() -> None:
+    """For a dead-end posting the employer's own board is the only route to applying at all.
+
+    An ordinary posting already has a working link and the probe merely improves it; a
+    geo-blocked or paywalled one has nothing else in the funnel that can help it
+    (`matching/apply_route.py`), so it gets the run's limited requests first.
+    """
+    sql = _compiled_probe_candidates()
+    order = sql[sql.rindex("ORDER BY") :]
+    assert "apply_blocked DESC" in order
+    assert order.index("apply_blocked DESC") < order.index("match_percentile DESC")
+
+
+def test_the_probe_window_is_still_bounded_by_rank() -> None:
+    """The two orderings are not one: blocked-first must reorder the window, not replace it.
+
+    A single `ORDER BY apply_blocked DESC, match_percentile DESC` over the whole table would
+    hand the run's whole budget to dead-end postings at rank 900 while a live company at rank 2
+    went unprobed. The rank cut has to happen in the subquery, before the reordering.
+    """
+    sql = _compiled_probe_candidates(scan=300)
+    before_cut, _, after_cut = sql.partition("LIMIT 300")
+    window_order = before_cut[before_cut.rindex("ORDER BY") :]
+    assert "match_percentile DESC" in window_order, "the window is cut by rank"
+    assert "apply_blocked" not in window_order, "the apply route must not decide who is in it"
+    assert "apply_blocked DESC" in after_cut, "and it orders what survived the cut"
+
+
 def test_the_probe_window_advances_between_runs() -> None:
     """Regression: the same shape of bug that made `funnel draft` a silent no-op.
 

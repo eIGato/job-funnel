@@ -170,6 +170,15 @@ docker compose run --rm --build app uv run funnel run-funnel
   clear geography/seniority?" in pure code. `drafting/screen.py` decides "is it the right *kind*
   of job?" in one cheap model call before drafting. Keep them apart: a regex judging emphasis is
   whack-a-mole, and a model re-judging geography overrules a decision the human already made.
+- **A link nobody can apply through is not a candidate.** `matching/apply_route.py` lists the
+  hosts that are dead ends for this human — `adzuna.com`/`adzuna.ca` answer 403 from where he
+  lives, RemoteOK's apply button is behind its paid tier — and `match` flags every row against
+  it. Those rows are excluded where the shortlist is **selected**, not by a hard filter: they
+  keep their score, because the centre is a corpus property and because they are the best input
+  ATS discovery has (a company with a dead link is exactly the one whose own board is worth
+  probing, and `adapters/ats.py` probes those first). 131 of the ~640 rows above the floor were
+  dead ends on 2026-08-05 — a fifth of every shortlist, one screening call and one unsendable
+  letter apiece. Other `adzuna.*` countries are fine and stay.
 - **We send nothing.** There is no code path that sends an email or an application. `draft`
   writes to the database; the human sends it and then sets the status to `sent` in the admin.
 - **A posting description is untrusted text.** It is the only part of any prompt a stranger

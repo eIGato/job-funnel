@@ -34,6 +34,7 @@ from funnel.schemas import NormalizedJob
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from sqlalchemy import Select
     from sqlalchemy.orm import Session
 
 #: Consecutive barren runs before a board is switched off. Four is roughly a day and a half at
@@ -207,6 +208,26 @@ def _record_slugs(session: Session, provider: AtsProvider) -> int:
     return added
 
 
+def probe_candidates(scan: int = _PROBE_SCAN) -> Select[tuple[str, str]]:
+    """(company, title) rows to draw probe candidates from, best first. A pure query builder.
+
+    Two orderings, and they are not the same one: the *window* is the top `scan` postings by
+    rank, and within it the unapplyable ones come first. Ranking by `apply_blocked` in a single
+    ORDER BY would put a dead-end posting at rank 900 ahead of a live one at rank 2 and spend
+    the run's whole request budget below the shortlist.
+    """
+    ranked = (
+        select(Job.company, Job.title, Job.apply_blocked, Job.match_percentile)
+        .where(Job.match_percentile.isnot(None))
+        .order_by(Job.match_percentile.desc())
+        .limit(scan)
+        .subquery()
+    )
+    return select(ranked.c.company, ranked.c.title).order_by(
+        ranked.c.apply_blocked.desc(), ranked.c.match_percentile.desc()
+    )
+
+
 def _companies_worth_probing(
     session: Session, limit: int, already_tried: set[str]
 ) -> list[tuple[str, list[str]]]:
@@ -216,6 +237,13 @@ def _companies_worth_probing(
     hit rate that is only good among *employers*. Companies that reach the shortlist are the
     ones worth an apply route, and there are tens of them a day.
 
+    **Companies whose links are dead ends go first** (`matching/apply_route.py`). For an
+    ordinary posting the probe buys a fuller description and a nicer link; for one whose only
+    URL is geo-blocked or paywalled, the employer's own board is the *only* automatic route to
+    applying at all, and nothing else in the funnel will find it. This reorders the window, it
+    does not widen it — the rows are still the top `_PROBE_SCAN` by rank, so an unapplyable
+    posting at rank 800 is still not worth a request.
+
     **`already_tried` is applied before the limit**, which is the whole of why this function
     takes it. Taking the top `limit` and skipping the tried ones inside the caller's loop reads
     the same but does the opposite: the tried companies keep their rank, keep their slots, and
@@ -223,12 +251,7 @@ def _companies_worth_probing(
     made `draft` a silent no-op for days — same shape, same fix, written down here so the next
     reader does not have to rediscover it.
     """
-    rows = session.execute(
-        select(Job.company, Job.title)
-        .where(Job.match_percentile.isnot(None))
-        .order_by(Job.match_percentile.desc())
-        .limit(_PROBE_SCAN)
-    ).all()
+    rows = session.execute(probe_candidates()).all()
     grouped: dict[str, list[str]] = {}
     for company, title in rows:
         if f"{_BY_NAME}{company}" in already_tried:
