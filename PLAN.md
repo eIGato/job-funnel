@@ -619,41 +619,49 @@ trick as "chat with your PDF", except the retrieval is over CV bullets.
 
   Excluded at **selection**, not by a hard filter: a filtered row loses its score, which moves
   the corpus centre every other score is measured against, and would hide those companies from
-  the ATS name probe, which now takes them first (`adapters/ats.probe_candidates`). Measured
-  alternatives that did **not** work: a twin row from another source for the same company+title
-  (1 hit in 131), and RemoteOK's `apply_url` (0 in 100). Reading an apply link out of a
-  paywalled page is out under invariant 9.
+  the one automatic route to a direct link — the ATS name probe, which now takes them first
+  (`adapters/ats.probe_candidates`). Measured alternatives that did **not** work: a twin row
+  from another source for the same company+title (1 hit in 131), and RemoteOK's `apply_url`
+  (0 in 100). Reading an apply link out of a paywalled page is out under invariant 9.
 
-- **Resolving a dead end by web search** (2026-08-05). **Yes, and the exclusion is conditional
-  on it.** `funnel resolve-links` (`orchestration/resolve_link.py`) does by machine what the
-  human does by hand — search the company plus the title, take the employer's own page — and a
-  posting with a verified `apply_url` is an ordinary shortlist candidate again, RemoteOK and
-  Adzuna alike. No source is banned outright: the host list says which *links* are dead.
+- **Resolving a dead end by web search: BUILT, MEASURED, REMOVED** (2026-08-05). Do not build it
+  again without reading this. `funnel resolve-links` searched for the employer's own page
+  (company + title), verified the result by fetching it, and put a confirmed URL on the posting
+  so it could return to the shortlist. It worked — on a control posting it found Reddit's real
+  Greenhouse URL, and it caught the model proposing a *different company's* page for YouFibre,
+  which is exactly what the verification half was for. It was reverted anyway, on cost:
 
-  - **A proposal is not a fact.** The model proposes a URL, a plain HTTP fetch confirms the page
-    names the role, and only then is it stored. Same rule as `ats.board_confirms`; a wrong link
-    in the admin costs the human a click and their trust in the column.
-  - **Only rows that would otherwise hold a slot are searched** — 9 of a 25-slot shortlist on
-    2026-08-05, against 131 dead ends in the table. Both sides use `cli.shortlist_select`, which
-    is why the windows cannot drift apart.
-  - **Not in `run-funnel`.** $10/1000 searches is cents per run, but the timer fires three times
-    a day and nothing that spends money joins it without the human saying so.
-  - **`RESOLVE_MODEL`.** Carrying the provider's server-side web-search loop is a capability,
-    not a quality: `claude-haiku-4-5` fails every attempt with a 400, `claude-sonnet-5`
-    completes it (measured 2026-08-05, on the first live run). The local `.env` had drifted to
-    haiku, which is what surfaced this.
-  - **A failed search is not a miss.** Attempts are remembered so nothing is searched twice, but
-    recording an errored attempt retires a real posting forever — it did, once, before
-    `LinkResult.searched` existed.
+  - **The estimate that sold it was wrong by 30-50x.** $10/1000 searches is the line item people
+    quote, and it is not the bill: web-search results come back as **input tokens**, and the
+    provider's server-side loop resends the whole conversation on every iteration. Real cost on
+    `claude-sonnet-5` was on the order of **a dollar per posting**, not the 1-3 cents estimated
+    from the search fee alone. Roughly $10 went on ~17 postings before anyone noticed.
+  - **At that price it cannot be routine.** 9 dead ends per shortlist × 3 timer runs a day is
+    tens of dollars a day to fill in some links.
+  - **Nothing measured what it spent.** A command that costs money must report tokens and price
+    per row. It did not, which is why the estimate went unchallenged for an afternoon.
+  - **The order of operations was backwards anyway.** 6 of the 9 candidates were RemoteOK junk
+    rows ("Basic", "AWESOME LIFE", "Mews"). Free deterministic filtering belongs first, then the
+    cheap screen, and only then anything paid — see the RemoteOK item below.
 
-- **Adzuna `us`/`ca` stay in the source config** (2026-08-05). The rows take no shortlist slot,
-  but the human chose to keep ingesting them for ATS slug discovery. Counter-evidence worth
-  revisiting: of the 7 boards the name probe has confirmed, only one company appears in an
-  Adzuna row at all (and it also arrives via arbeitnow and gmail-alerts), while **33 of the 114
-  companies unique to adzuna.com/.ca have been probed for 0 hits** — against 7 in ~79 overall.
-  23 remain untried; revisit once they are.
+  Consequence: **`matching/apply_route.py` is unconditional again.** A dead-end host is excluded
+  from the shortlist, full stop; RemoteOK included. The only automatic route to an employer's own
+  posting is the free one — the ATS name probe in `adapters/ats.py`, ~9% hit rate. If this is
+  ever revisited, the entry price is a measured cost-per-row on a single posting, before any
+  batch runs.
 
 ### Still open
+
+- **RemoteOK junk rows reach the shortlist.** Six of the nine top-ranked dead ends on 2026-08-05
+  were page furniture with a real company name and a nonsense title — "Basic", "AWESOME LIFE",
+  "I am a Professional", "Mews". They pass `_unwritten_body` (their bodies are plausible prose)
+  and `_JUNK_TITLES` (which needs an exact match). They cost a screening call each. Deterministic
+  fix in `matching/filters.py`, free; not yet built.
+- **Adzuna `us`/`ca` stay in the source config** (2026-08-05, human's call). The rows take no
+  shortlist slot but keep feeding ATS slug discovery. Counter-evidence worth revisiting: of the
+  7 boards the name probe has confirmed, only one company appears in an Adzuna row at all (and it
+  also arrives via arbeitnow and gmail-alerts), while **33 of the 114 companies unique to
+  adzuna.com/.ca have been probed for 0 hits** — against 7 in ~79 overall. 23 remain untried.
 - **Which boards actually have an available API/alerts today** — verify while building Phase 3.
 - **Telegram ingest account** (Phase 3.5 C): a dedicated number + login code. Deferred by the
   human (2026-07-24) — it only widens the ingest funnel and is not needed for the MVP.

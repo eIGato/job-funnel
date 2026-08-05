@@ -236,20 +236,10 @@ class Job(Base):
     hard_filter_passed: Mapped[bool] = mapped_column(Boolean, default=False)
     #: True when this URL leads nowhere the human can apply — a geo-blocked site, a paywalled
     #: apply button (`matching/apply_route.py`). Such a posting keeps its score and its place in
-    #: the corpus but gets no shortlist slot *unless* `apply_url` was found. Derived, not typed:
-    #: `match` recomputes it for every row on every run, exactly as it does `hard_filter_passed`,
-    #: so editing `BLOCKED_HOSTS` takes effect by itself instead of applying to new rows only.
+    #: the corpus but gets no shortlist slot. Derived, not typed: `match` recomputes it for every
+    #: row on every run, exactly as it does `hard_filter_passed`, so editing `BLOCKED_HOSTS`
+    #: takes effect by itself instead of applying to newly ingested rows only.
     apply_blocked: Mapped[bool] = mapped_column(Boolean, default=False)
-    #: The employer's own posting page, found by `funnel resolve-links` when `url` is a dead end
-    #: (`orchestration/resolve_link.py`). Only ever set to a URL that was fetched and found to
-    #: name this posting — a link here is one the human can actually use, and it is the one the
-    #: admin shows. Null on every posting whose own `url` already works.
-    apply_url: Mapped[str | None] = mapped_column(Text)
-    #: When resolution was last attempted, set on success and on failure alike. A row with a
-    #: timestamp and no `apply_url` is a remembered miss: it is never searched again, which is
-    #: what bounds the spend as the table grows (the same trick as the `!miss:` rows in
-    #: `adapters/ats.py`). Clear it in the admin to have the next run try again.
-    apply_resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Cosine against the profile with the corpus mean removed (matching/embed.centered_similarity),
     # so this is roughly -0.2..0.3 and not the 0.72..0.86 band raw e5 cosine produces. Both are
     # rewritten wholesale on every `match`; NULL means "not on the shortlist".

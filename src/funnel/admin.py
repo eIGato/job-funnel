@@ -103,12 +103,7 @@ class JobAdmin(ModelView, model=Job):
     # is that the link is a dead end from here (`matching/apply_route.py`), not that the posting
     # is bad. Sortable, so the blocked rows can be read as a batch — those are the ones worth
     # chasing by hand.
-    column_labels = {
-        Job.match_percentile: "Match",
-        Job.apply_blocked: "No apply route",
-        Job.apply_url: "Direct link",
-        Job.apply_resolved_at: "Link searched",
-    }
+    column_labels = {Job.match_percentile: "Match", Job.apply_blocked: "No apply route"}
     column_formatters = {Job.match_percentile: _percentile, Job.url: _link}
     column_searchable_list = [Job.company, Job.title]
     column_sortable_list = [
@@ -127,14 +122,10 @@ class JobAdmin(ModelView, model=Job):
     # monotonic in it; the remote bonus is small enough not to reorder what a human skims.
     column_default_sort = [(Job.match_percentile, True)]
     column_details_exclude_list = [Job.embedding]  # raw bytes are noise in the UI
-    # Both URLs clickable, because on a resolved posting they are two different destinations:
-    # `url` is the dead end the posting came from (kept — it is the audit trail for why this row
-    # exists) and `apply_url` is the employer's page the human should actually open.
     column_formatters_detail = {
         Job.description: _multiline,
         Job.match_percentile: _percentile,
         Job.url: _link,
-        Job.apply_url: _link,
     }
 
     # content_hash is derived on write (models._fill_content_hash) — nobody types a sha256.
