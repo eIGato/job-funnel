@@ -34,6 +34,27 @@ app = typer.Typer(
 #: peak memory rather than durability.
 _SCORE_CHUNK = 100
 
+#: Below this many characters of body, the batch does not draft for a posting — the admin's
+#: "Screen & draft letter" button does, after the human has pasted the real text into the row.
+#:
+#: A letter written from a title and a company name is a letter about nothing, and that is what
+#: the top of the shortlist was spending its slots on: of the 554 rows above the floor on
+#: 2026-08-06, 124 had an empty body (gmail alerts carry a subject line and a link, no posting)
+#: and 71 more were a single short line — a technology tag list, or arbeitnow's 46-character
+#: stub. Together 36% of every shortlist, one screening call and one useless letter apiece.
+#:
+#: A length floor, not "the body has no newline in it". Adzuna serves its teaser as one
+#: unbroken paragraph, and those 500 characters are real: salary, requirements, stack. The
+#: literal reading would have dropped 68 of them along with the junk. The exact value is not
+#: load-bearing either — measured over the same rows, nothing at all has a body between 162 and
+#: 369 characters, so any floor in that gap selects the identical 197 rows.
+#:
+#: This is a *selection* rule, like the apply-route exclusion below it: the row keeps its score
+#: and its rank, `funnel draft --job <id>` and the admin button still draft for it on demand.
+#: The hard filters deliberately have no minimum-body rule (see `matching/filters.py`) — a terse
+#: posting is still a real posting, and throwing it out would put it beyond the button's reach.
+MIN_DRAFTABLE_BODY = 300
+
 
 def _role_key(column: InstrumentedAttribute[str]) -> ColumnElement[str]:
     """The (company, title) identity a cover letter is written for, folded for comparison.
@@ -105,6 +126,12 @@ def shortlist_select(
     only place that acts on it: the rows stay scored, because they hold the corpus centre steady
     and because they are what ATS discovery probes for a company's own board (its link is the
     direct one).
+
+    **A posting with too little text to write from takes no slot either**
+    (`MIN_DRAFTABLE_BODY`). An empty or one-line body yields a letter about nothing, and 197 of
+    the 554 rows above the floor were such bodies on 2026-08-06. The admin's per-row button is
+    what these are for: the human pastes the real description into the row and draws the letter
+    from there, which is exactly the loop that button was added for.
     """
     from sqlalchemy import desc
     from sqlalchemy.orm import aliased
@@ -138,6 +165,7 @@ def shortlist_select(
             Job.match_score.isnot(None),
             Job.hard_filter_passed.is_(True),
             Job.apply_blocked.is_(False),
+            func.length(func.trim(Job.description)) >= MIN_DRAFTABLE_BODY,
             Job.match_percentile >= floor,
             ~role_is_handled,
         )
@@ -363,12 +391,14 @@ def draft(
     Measured 2026-08-03 — all 25 slots held a decided row and `draft` had been a silent no-op
     for days, with 2853 ingested postings behind 49 shortlist entries.
 
-    `--job <id>` is the deliberate exception, and the only way to redo a decided posting. Some
-    boards serve a teaser rather than a posting — RemoteOK republishes LinkedIn snippets that
-    break off at "Job Summary: In this…", 121 characters with nothing in them to write a letter
-    from. Paste the real description into the row in the admin, then name the row here: it is
-    re-screened and re-drafted from the text as it now stands, rank and existing status
-    ignored. Nothing is sent, here as everywhere (invariant 2).
+    A posting with under `MIN_DRAFTABLE_BODY` characters of body is passed over as well: some
+    boards serve a teaser rather than a posting, and a gmail alert carries no body at all. The
+    batch has nothing to write from, so it writes nothing and leaves the row for the human.
+
+    `--job <id>` is that row's way back in, and the only way to redo a decided posting. Paste
+    the real description into the row in the admin — or press "Screen & draft letter" there,
+    which runs this same step — and the letter follows from the text as it now stands, rank and
+    existing status ignored. Nothing is sent, here as everywhere (invariant 2).
     """
     settings = get_settings()
     if not (settings.llm_api_key and settings.llm_api_key.get_secret_value()):

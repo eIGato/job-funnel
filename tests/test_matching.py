@@ -37,6 +37,20 @@ def test_stop_phrase_is_case_insensitive(job: NormalizedJob) -> None:
     assert passes_hard_filters(blocked) is False
 
 
+def test_a_terse_posting_is_still_a_posting(job: NormalizedJob) -> None:
+    """The shortlist's body floor (`cli.MIN_DRAFTABLE_BODY`) must not leak in here.
+
+    "Python backend. Remote. Write to @hr." is a whole Telegram posting. It takes no shortlist
+    slot — there is nothing to write a letter from — but it keeps its score and stays one admin
+    button away from one. Rejecting it here would put it beyond that button's reach.
+    """
+    from funnel.cli import MIN_DRAFTABLE_BODY
+
+    terse = job.model_copy(update={"description": "Python backend. Remote. Write to @hr."})
+    assert len(terse.description) < MIN_DRAFTABLE_BODY
+    assert passes_hard_filters(terse) is True
+
+
 def test_ru_by_location_is_a_hard_stop(job: NormalizedJob) -> None:
     for loc in ("Moscow", "Россия", "Minsk", "Санкт-Петербург"):
         blocked = job.model_copy(update={"location": loc})

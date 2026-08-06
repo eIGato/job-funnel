@@ -203,6 +203,10 @@ _JUNK_TITLES: frozenset[str] = frozenset(
 #: of ~430 for postings that pass). It would only have penalized the terse Telegram postings,
 #: which are short *and* real. A filter that cannot be shown to catch the thing it is aimed at
 #: does not earn its false positives.
+#:
+#: There *is* a minimum-body rule downstream (`cli.MIN_DRAFTABLE_BODY`), and it is not this one:
+#: it decides who takes a shortlist slot, not who is a posting. A short posting keeps its score
+#: and stays one button away from a letter; dropping it here would put it out of reach instead.
 
 #: Words any real posting says somewhere, in the languages we ingest. A body that is prose and
 #: still never reaches one of these is not a posting: it is a scraped page. RemoteOK republishes

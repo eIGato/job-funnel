@@ -232,6 +232,30 @@ def test_the_shortlist_skips_postings_with_no_apply_route() -> None:
     assert "jobs.apply_blocked IS false" in where
 
 
+def test_the_shortlist_skips_postings_with_nothing_to_write_from() -> None:
+    """An empty or one-line body must not hold a slot (2026-08-06).
+
+    Gmail alerts carry a subject line and a link, no posting: 124 of the 554 rows above the
+    floor had an empty body and 71 more were a single short line, so 36% of every shortlist
+    bought a screening call and a letter written from a title. The admin's per-row button is
+    the path for these now — the human pastes the real description in and draws the letter from
+    there. In the WHERE like every other selection rule, so the slot goes to the next posting.
+    """
+    sql = _compiled_shortlist()
+    where, _, after = sql.partition("LIMIT")
+    assert "length(trim(jobs.description)) >= 300" in where
+    assert "length(trim(" not in after
+
+
+def test_the_body_floor_does_not_reject_a_one_paragraph_teaser() -> None:
+    """A length floor, not a newline test: Adzuna's 500-character teaser is one paragraph.
+
+    Salary, requirements and stack, all real — the literal reading of "one line" would have
+    dropped 68 of those along with the junk.
+    """
+    assert cli.MIN_DRAFTABLE_BODY < 426, "Adzuna's shortest teaser is 426 characters"
+
+
 def test_the_company_cap_is_applied_after_twins_collapse() -> None:
     """Order matters: five rows of one role would otherwise spend the whole allowance."""
     sql = _compiled_shortlist()

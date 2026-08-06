@@ -183,6 +183,19 @@ docker compose run --rm --build app uv run funnel run-funnel
   web-search resolver ran about a dollar a posting, because search results arrive as input
   tokens and the server-side loop resends the conversation each iteration. Read PLAN.md §7
   before building it again.
+- **A body nobody can write from is not a candidate either.** `cli.MIN_DRAFTABLE_BODY` (300
+  chars) keeps a posting with an empty or one-line description out of the shortlist. Same shape
+  as the rule above — excluded where the shortlist is **selected**, so the row keeps its score
+  and stays one click from a letter: the admin's "Screen & draft letter" button is the path for
+  these now, after the human pastes the real description into the row. Measured 2026-08-06: of
+  554 rows above the floor, 124 had an empty body (a gmail alert is a subject line and a link)
+  and 71 more were a single short line — 36% of every shortlist buying a screening call and a
+  letter written from a title. **A length floor, not "the body has no newline"**: Adzuna serves
+  its teaser as one unbroken 500-character paragraph with salary, requirements and stack in it,
+  and the literal reading would have dropped 68 real postings with the junk. The exact number is
+  not load-bearing — nothing has a body between 162 and 369 chars, so any floor in that gap
+  selects the same rows. The hard filters still have **no** minimum-body rule (a terse Telegram
+  posting is real, and rejecting it there would put it beyond the button's reach).
 - **We send nothing.** There is no code path that sends an email or an application. `draft`
   writes to the database; the human sends it and then sets the status to `sent` in the admin.
 - **A posting description is untrusted text.** It is the only part of any prompt a stranger

@@ -7,6 +7,10 @@ The one button that *does* something is `JobAdmin.screen_and_draft_action`, and 
 same thing the timer does — screen a posting and leave a draft. It exists because the workflow
 it serves is a browser workflow: a board serves a teaser, the human pastes the real description
 into the row, and the letter should follow from the same page. Still nothing sent (invariant 2).
+
+That button is also why the batch no longer drafts from a body it cannot write from
+(`cli.MIN_DRAFTABLE_BODY`): those postings keep their rank and wait here for a human to fill
+the body in, instead of spending a shortlist slot on a letter about a title.
 """
 
 from __future__ import annotations
