@@ -208,6 +208,14 @@ docker compose run --rm --build app uv run funnel run-funnel
   `sent_at`/`reply_at`/`reply_type` NULL; `updated_at` is when it was found closed. **Never write
   a timestamp into a reply field to make a row look consistent** — an empty column is readable,
   a fabricated one is not.
+- **Storage is UTC; the admin speaks `ADMIN_TIMEZONE`.** Every writer in the pipeline writes UTC
+  and that does not change. The admin form used to render UTC and parse what was typed back as
+  UTC, so a human entering the time off his own watch recorded an instant two hours ahead — all
+  22 hand-entered `sent_at` values were wrong (fixed in migration `a1c7e35f9b04`). `admin.py`
+  now converts in a custom field, wired in through a `ModelConverter` so **every** DateTime
+  column gets it, including columns added later, and the list view prints the zone abbreviation
+  next to the time. An IANA zone name, never a fixed offset. `sent_at` is the only timestamp a
+  human types — nothing in `src/` assigns it, which follows from invariant 2.
 - **A posting description is untrusted text.** It is the only part of any prompt a stranger
   wrote, and it reaches three models (screen, drafter, critic). Every one of them must get it
   fenced through `drafting/prompting.posting_block`, with `UNTRUSTED_INPUT_RULE` in its

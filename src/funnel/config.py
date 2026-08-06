@@ -162,6 +162,15 @@ class Settings(BaseSettings):
     # --- Admin ---
     admin_host: str = Field(default="127.0.0.1")
     admin_port: int = Field(default=8000)
+    admin_timezone: str = Field(
+        default="Europe/Podgorica",
+        description=(
+            "The wall clock the admin reads and writes. Storage stays UTC; this is a display "
+            "and parsing setting, so that typing the time off your own watch records the right "
+            "instant. An IANA name, never a fixed offset — the offset changes twice a year and "
+            "a hardcoded +02:00 would silently start lying at the October changeover."
+        ),
+    )
 
 
 @lru_cache

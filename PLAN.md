@@ -664,6 +664,15 @@ trick as "chat with your PDF", except the retrieval is over CV bullets.
   7 boards the name probe has confirmed, only one company appears in an Adzuna row at all (and it
   also arrives via arbeitnow and gmail-alerts), while **33 of the 114 companies unique to
   adzuna.com/.ca have been probed for 0 hits** — against 7 in ~79 overall. 23 remain untried.
+- **A reply to a Telegram application has nothing to match on** (noted 2026-08-06). The human
+  applies through Telegram and the answer arrives by email, but there is no sent message, so
+  `find_sent_thread` finds no thread; the recruiter usually writes from freemail, which
+  `_GENERIC_DOMAINS` skips by design; and an informal subject line rarely carries the company
+  name. All three strategies in `replies/match.py` therefore miss, and the reply sits unmatched
+  in the admin forever. Two ways out, both unbuilt: a recruiter-address column on Application
+  plus a fourth strategy, or just linking these by hand in `ReplyAdmin` (which is what the
+  editable `Reply.application` field is already for). Not urgent — unmatched is a reviewable
+  state, not a wrong one.
 - **Which boards actually have an available API/alerts today** — verify while building Phase 3.
 - **Telegram ingest account** (Phase 3.5 C): a dedicated number + login code. Deferred by the
   human (2026-07-24) — it only widens the ingest funnel and is not needed for the MVP.

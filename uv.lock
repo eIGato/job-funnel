@@ -948,6 +948,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
+    { name = "types-wtforms" },
 ]
 
 [package.metadata]
@@ -976,6 +977,7 @@ dev = [
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-asyncio", specifier = ">=1.4.0" },
     { name = "ruff", specifier = ">=0.15.21" },
+    { name = "types-wtforms", specifier = ">=3.2.1.20260518" },
 ]
 
 [[package]]
@@ -2420,6 +2422,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/7c/f7/68adc395201b20b872d68e975386832e8005ffeacedd43a1d837a32815be/typer-0.26.8.tar.gz", hash = "sha256:c244a6bd558886fe3f8780efb6bdd28bb9aff005a94eedebaa5cb32926fe2f7e", size = 202097, upload-time = "2026-06-26T09:22:45.705Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/80/87/b9fd69c92c6102a066e1b86a35243f53e70bd4c709f2a26d9f4fee4f4dc0/typer-0.26.8-py3-none-any.whl", hash = "sha256:3512ca79ac5c11113414b36e80281b872884477722440691c89d1112e321a49c", size = 122564, upload-time = "2026-06-26T09:22:44.72Z" },
+]
+
+[[package]]
+name = "types-wtforms"
+version = "3.2.1.20260518"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "markupsafe" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/bf/f0/0c84f7175c56089ba0c000d1eb4f20b144721b7446b90280625f3c8ce23b/types_wtforms-3.2.1.20260518.tar.gz", hash = "sha256:05fb7adfc8cdd72c7b597e20b74f6270511ca492a80953805f25ee7d1cfd1282", size = 17505, upload-time = "2026-05-18T06:07:30.769Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6e/94/0da3294e8c4fd4b64e96d57f7a768fb57e3b2d77ac0aed142c25fe1f28d5/types_wtforms-3.2.1.20260518-py3-none-any.whl", hash = "sha256:193377e60e715920b47481fbc62a7f3796045d0492e02a46319c5064eee81e23", size = 24303, upload-time = "2026-05-18T06:07:29.866Z" },
 ]
 
 [[package]]

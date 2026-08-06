@@ -16,10 +16,15 @@ the body in, instead of spending a shortlist slot on a letter about a title.
 from __future__ import annotations
 
 from collections import Counter
-from typing import TYPE_CHECKING, Any
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, ClassVar, cast
+from zoneinfo import ZoneInfo
 
 from markupsafe import Markup, escape
 from sqladmin import Admin, ModelView, action
+from sqladmin.fields import DateTimeField
+from sqladmin.formatters import BASE_FORMATTERS
+from sqladmin.forms import ModelConverter, ModelConverterBase, converts
 from starlette.applications import Starlette
 from starlette.responses import RedirectResponse
 
@@ -29,7 +34,92 @@ from funnel.models import Application, Job, Reply, Source
 
 if TYPE_CHECKING:
     from sqlalchemy import Select
+    from sqlalchemy.orm import ColumnProperty
     from starlette.requests import Request
+    from wtforms.fields.core import UnboundField
+
+
+def admin_zone() -> ZoneInfo:
+    """The wall clock the admin speaks (`ADMIN_TIMEZONE`). Storage is UTC regardless."""
+    return ZoneInfo(get_settings().admin_timezone)
+
+
+def _to_local(value: datetime) -> datetime:
+    """A stored instant as the human's wall clock. A naive value is read as UTC, as stored."""
+    aware = value.replace(tzinfo=UTC) if value.tzinfo is None else value
+    return aware.astimezone(admin_zone())
+
+
+class LocalDateTimeField(DateTimeField):
+    """A datetime field that reads and writes the human's local wall clock.
+
+    Every timestamp column is `DateTime(timezone=True)` and everything the pipeline writes is
+    UTC — which is right, and stays. The problem was only ever the form: it rendered the UTC
+    value and parsed whatever was typed straight back as UTC, so entering the time off your own
+    watch recorded an instant two hours in the future. Every one of the 22 hand-entered
+    `sent_at` values was wrong by exactly the offset (migration a1c7e35f9b04).
+
+    Conversion lives in the field rather than in the view, so it cannot be forgotten on a
+    column added later: `LocalTimeConverter` maps *every* DateTime column onto this field.
+
+    Subclassed from sqladmin's DateTimeField rather than wtforms' own: that is the one carrying
+    `DateTimePickerWidget`, and inheriting from the plain wtforms field silently swapped the
+    calendar picker for a bare text box.
+
+    At the autumn changeover an hour repeats, and a bare wall clock inside it is genuinely
+    ambiguous; `replace(tzinfo=...)` resolves it to the first pass (`fold=0`). One hour a year,
+    on a field a human can correct — not worth a disambiguation UI.
+    """
+
+    def process_data(self, value: Any) -> None:
+        if isinstance(value, datetime):
+            value = _to_local(value).replace(tzinfo=None)
+        super().process_data(value)
+
+    def process_formdata(self, valuelist: Any) -> None:
+        super().process_formdata(valuelist)
+        if isinstance(self.data, datetime) and self.data.tzinfo is None:
+            self.data = self.data.replace(tzinfo=admin_zone()).astimezone(UTC)
+
+
+class LocalTimeConverter(ModelConverter):
+    """Route every DateTime column to `LocalDateTimeField`, and say so on the label."""
+
+    @converts("DateTime")  # type: ignore[untyped-decorator]  # sqladmin ships no types
+    def conv_datetime(
+        self, model: type, prop: ColumnProperty[Any], kwargs: dict[str, Any]
+    ) -> UnboundField[Any]:
+        # Matching wtforms' own default when the view names no label, so the zone is appended
+        # to "Sent At" rather than replacing it with the raw column key.
+        label = kwargs.get("label") or prop.key.replace("_", " ").title()
+        kwargs["label"] = f"{label} ({get_settings().admin_timezone})"
+        # Constructing a wtforms field outside a form yields an UnboundField, which is what a
+        # converter is expected to return; the stubs describe the bound case only.
+        return cast("UnboundField[Any]", LocalDateTimeField(**kwargs))
+
+
+def _local_datetime(value: datetime) -> str:
+    """List and detail rendering: the same wall clock the form takes, with the zone spelled out.
+
+    The zone abbreviation is the point. A bare "21:00" next to a UTC one elsewhere is how this
+    bug started; "21:00 CEST" cannot be misread, and it comes from the value's own offset, so it
+    stays honest across the changeover.
+    """
+    return _to_local(value).strftime("%Y-%m-%d %H:%M %Z")
+
+
+class LocalTimeView:
+    """Mixin: local wall clock in the forms, in the list and in the detail view.
+
+    A mixin rather than a base ModelView because sqladmin's metaclass registers a view by its
+    `model=` keyword; this carries only the two settings and each view keeps its own model.
+    """
+
+    form_converter: ClassVar[type[ModelConverterBase]] = LocalTimeConverter
+    column_type_formatters: ClassVar[dict[type, Any]] = {
+        **BASE_FORMATTERS,
+        datetime: _local_datetime,
+    }
 
 
 def _multiline(model: Any, attribute: str) -> Markup:
@@ -49,7 +139,7 @@ def _multiline(model: Any, attribute: str) -> Markup:
     )
 
 
-class SourceAdmin(ModelView, model=Source):
+class SourceAdmin(LocalTimeView, ModelView, model=Source):
     name = "Source"
     name_plural = "Sources"
     icon = "fa-solid fa-rss"
@@ -87,7 +177,7 @@ def _percentile(model: Any, attribute: str) -> str:
     return "" if value is None else f"{value:.1f}%"
 
 
-class JobAdmin(ModelView, model=Job):
+class JobAdmin(LocalTimeView, ModelView, model=Job):
     name = "Job"
     name_plural = "Jobs"
     icon = "fa-solid fa-briefcase"
@@ -198,7 +288,7 @@ class JobAdmin(ModelView, model=Job):
         )
 
 
-class ApplicationAdmin(ModelView, model=Application):
+class ApplicationAdmin(LocalTimeView, ModelView, model=Application):
     name = "Application"
     name_plural = "Applications"
     icon = "fa-solid fa-paper-plane"
@@ -222,7 +312,7 @@ class ApplicationAdmin(ModelView, model=Application):
     page_size = 50
 
 
-class ReplyAdmin(ModelView, model=Reply):
+class ReplyAdmin(LocalTimeView, ModelView, model=Reply):
     """Incoming mail and what the classifier made of it.
 
     The review surface for everything `check-replies` refused to decide: rows with no
