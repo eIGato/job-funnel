@@ -169,10 +169,28 @@ class ApplicationStatus(enum.StrEnum):
     # fit on the soft stop-stack (PLAN.md section 7). Distinct from REJECTED, which is *them*
     # declining *us*. Kept off the plain-draft path so it is never re-drafted by the timer.
     DECLINED = "declined"
+    # The posting was closed by the time the human went to apply — no letter ever went out.
+    # Neither them declining us (REJECTED) nor us judging the fit (DECLINED), so it gets its own
+    # value: recording it as REJECTED counted a refusal against an application that was never
+    # sent, and needed a fabricated `reply_at` to look consistent. A CLOSED row keeps `sent_at`,
+    # `reply_at` and `reply_type` NULL; `updated_at` is when it was found closed, and anything
+    # more precise goes in `notes`. Terminal like the rest, so `shortlist` treats the role as
+    # handled and `check-replies` never scans it.
+    CLOSED = "closed"
     SENT = "sent"
     REJECTED = "rejected"
     INTERVIEW = "interview"
     NO_REPLY = "no_reply"
+
+
+#: The statuses `check-replies` scans, i.e. the ones where an incoming email could be an answer
+#: to us. Membership means a letter actually went out — which is why CLOSED and DECLINED are not
+#: here. Matching a reply to an application that was never sent is a mismatch by construction,
+#: and it has already happened: a justjoin.it *job alert* was linked to a never-sent row that had
+#: been filed as REJECTED, because the fallback matches on the sender's domain.
+REPLYABLE_STATUSES = frozenset(
+    {ApplicationStatus.SENT, ApplicationStatus.INTERVIEW, ApplicationStatus.REJECTED}
+)
 
 
 class ReplyType(enum.StrEnum):

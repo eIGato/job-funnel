@@ -576,7 +576,13 @@ def check_replies(
        `reply_confidence_threshold`, is stored for review but leaves the Application status
        untouched. A wrong auto-status would hide a real interview; an unread row would not.
     """
-    from funnel.models import Application, ApplicationStatus, Reply, ReplyType
+    from funnel.models import (
+        REPLYABLE_STATUSES,
+        Application,
+        ApplicationStatus,
+        Reply,
+        ReplyType,
+    )
     from funnel.replies.classify import classify_reply
     from funnel.replies.inbox import build_service, fetch_recent, find_sent_thread
     from funnel.replies.match import match_reply
@@ -596,15 +602,7 @@ def check_replies(
     with session_scope() as session:
         sent = list(
             session.scalars(
-                select(Application).where(
-                    Application.status.in_(
-                        [
-                            ApplicationStatus.SENT,
-                            ApplicationStatus.INTERVIEW,
-                            ApplicationStatus.REJECTED,
-                        ]
-                    )
-                )
+                select(Application).where(Application.status.in_(REPLYABLE_STATUSES))
             ).all()
         )
 

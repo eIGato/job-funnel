@@ -198,6 +198,16 @@ docker compose run --rm --build app uv run funnel run-funnel
   posting is real, and rejecting it there would put it beyond the button's reach).
 - **We send nothing.** There is no code path that sends an email or an application. `draft`
   writes to the database; the human sends it and then sets the status to `sent` in the admin.
+- **Not applying has three different statuses, and they stay apart.** `DECLINED` is the screen's
+  verdict on fit, `CLOSED` is a posting that stopped taking applications before the human got
+  there, `REJECTED` is them declining us — which presupposes a letter went out. `REJECTED` was
+  doing all three jobs until 2026-08-06: 16 of the 18 rejections on record had `sent_at IS NULL`
+  and a `reply_at` invented at noon of the day the closure was noticed, so any sent-to-reply rate
+  counted refusals against applications that never existed, and `check-replies` kept scanning
+  them (one had already collected a job-alert newsletter as its "reply"). A `CLOSED` row leaves
+  `sent_at`/`reply_at`/`reply_type` NULL; `updated_at` is when it was found closed. **Never write
+  a timestamp into a reply field to make a row look consistent** — an empty column is readable,
+  a fabricated one is not.
 - **A posting description is untrusted text.** It is the only part of any prompt a stranger
   wrote, and it reaches three models (screen, drafter, critic). Every one of them must get it
   fenced through `drafting/prompting.posting_block`, with `UNTRUSTED_INPUT_RULE` in its

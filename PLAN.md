@@ -137,9 +137,11 @@ No CTO profile: the human declined one. CTO alerts will therefore be scored agai
 backend profile and land mid-table. Revisit if the CTO alerts turn out to be noisy.
 
 **`Application`** — an application (one-to-one with Job)
-- `job` (FK), `status` (Enum: `shortlisted` / `drafted` / `declined` / `sent` / `rejected` /
-  `interview` / `no_reply`). `declined` = *we* chose not to apply (the Phase 7 agent's
-  decide-worth-it node), distinct from `rejected` = *they* declined us.
+- `job` (FK), `status` (Enum: `shortlisted` / `drafted` / `declined` / `closed` / `sent` /
+  `rejected` / `interview` / `no_reply`). Three of them are ways of not applying and they are
+  kept apart on purpose: `declined` = *we* chose not to apply (the Phase 7 agent's
+  decide-worth-it node), `closed` = the posting stopped taking applications before we got there,
+  and `rejected` = *they* declined us, which presupposes something was sent.
 - `cover_letter` (text), `sent_at`, `reply_at`, `reply_type`, `notes`
 
 ---
