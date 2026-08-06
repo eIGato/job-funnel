@@ -110,6 +110,41 @@ def test_short_company_names_do_not_match_by_substring() -> None:
     assert match_reply(_message(sender="jobs@aircall.com"), apps) is None
 
 
+def test_a_board_name_containing_a_company_name_does_not_match() -> None:
+    """The regression: 'join' sits inside 'justjoin', and a job alert became JOIN's answer.
+
+    Two independent guards now stop it — justjoin is a known board, and the containment is
+    anchored — so this asserts the outcome rather than either mechanism.
+    """
+    apps = [_application("JOIN", app_id=1)]
+    message = _message(sender='"justjoin.it" <no-reply@justjoin.it>', subject="New jobs for you")
+    assert match_reply(message, apps) is None
+
+
+def test_containment_is_anchored_not_free_substring() -> None:
+    """A legal tail the domain drops still matches; a name buried mid-word does not."""
+    itds = [_application("ITDS Polska Sp. z o.o.", app_id=1)]
+    assert match_reply(_message(sender="barbara@itds.pl"), itds) is itds[0]
+    buried = [_application("Cast", app_id=1)]
+    assert match_reply(_message(sender="hr@podcastly.test"), buried) is None
+
+
+@pytest.mark.parametrize(
+    "sender",
+    [
+        "no-reply@us.greenhouse-mail.io",  # the ATS list held the parent domain only
+        "no-reply@app.bamboohr.com",
+        "no-reply@wysylka.pracuj.pl",  # a board, on one of its several subdomains
+        "no-reply@adzuna.nl",  # and on one of its many country domains
+    ],
+)
+def test_platform_subdomains_do_not_reach_company_matching(sender: str) -> None:
+    """Every one of these passed an exact-membership test and matched on the company name."""
+    from funnel.replies.match import is_generic_sender
+
+    assert is_generic_sender(sender_domain(sender))
+
+
 def test_unknown_sender_is_unmatched() -> None:
     assert match_reply(_message(sender="hr@nowhere.test"), [_application("Acme")]) is None
 
