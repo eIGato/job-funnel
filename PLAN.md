@@ -188,6 +188,14 @@ visible by actually submitting the forms:
 
 Both are guarded by tests in `tests/test_invariants.py` (verified to fail without the fixes).
 
+The "filters by status" half of this phase only landed 2026-08-06, on sqladmin's own
+`column_filters` (it grew them since this was written; nothing had to be hand-rolled except
+"unmatched replies", which is an IS NULL on a foreign key and no built-in filter expresses it).
+Sorting by status had been standing in for it, and a sort is not a filter when 246 of 392
+applications are `declined`. Applications also gained search, over the posting's company and
+title through a dotted relationship path — an application is identified by its posting, so
+that is the only way to look one up.
+
 ### [x] Phase 3 — Ingest layer
 - The base interface `BaseAdapter.fetch() -> list[NormalizedJob]` (NormalizedJob is a
   Pydantic model).

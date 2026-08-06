@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 from markupsafe import Markup, escape
 from sqladmin import Admin, ModelView, action
 from sqladmin.fields import DateTimeField
+from sqladmin.filters import BooleanFilter, ForeignKeyFilter, StaticValuesFilter
 from sqladmin.formatters import BASE_FORMATTERS
 from sqladmin.forms import ModelConverter, ModelConverterBase, converts
 from starlette.applications import Starlette
@@ -30,11 +31,22 @@ from starlette.responses import RedirectResponse
 
 from funnel.config import get_settings
 from funnel.db import get_engine
-from funnel.models import Application, Job, Reply, Source
+from funnel.models import (
+    Application,
+    ApplicationStatus,
+    ApplyChannel,
+    Job,
+    Reply,
+    ReplyType,
+    Source,
+    SourceKind,
+)
 
 if TYPE_CHECKING:
+    from enum import StrEnum
+
     from sqlalchemy import Select
-    from sqlalchemy.orm import ColumnProperty
+    from sqlalchemy.orm import ColumnProperty, InstrumentedAttribute
     from starlette.requests import Request
     from wtforms.fields.core import UnboundField
 
@@ -122,6 +134,55 @@ class LocalTimeView:
     }
 
 
+def _enum_filter(
+    column: InstrumentedAttribute[Any], enum_cls: type[StrEnum], title: str | None = None
+) -> StaticValuesFilter:
+    """A dropdown of every member of an enum column.
+
+    `StaticValuesFilter` rather than `AllUniqueStringValuesFilter`: the values are known from
+    the type, so there is no reason to spend a `SELECT DISTINCT` on every page load, and a
+    status nothing currently holds still appears in the list instead of vanishing from it.
+    The stored form is the member *name*, but SQLAlchemy's Enum accepts either side of the
+    lookup, so the URL carries the readable lowercase value.
+    """
+    return StaticValuesFilter(
+        column,
+        values=[(member.value, member.value.replace("_", " ").capitalize()) for member in enum_cls],
+        title=title,
+    )
+
+
+class UnmatchedRepliesFilter:
+    """ "Which replies is nobody looking at?" — the one question this table is for.
+
+    Not expressible with the built-in filters: `application_id` is a foreign key, so
+    `ForeignKeyFilter` offers "which application" and never "none of them". Yet an unmatched
+    reply is precisely the review queue — a recruiter writing out of the blue, or an answer to
+    a Telegram application, which by construction has no thread and usually no company domain
+    to match on either (PLAN.md section 7).
+
+    `default_value = None` rather than sqladmin's private `_UNSET` sentinel — the protocol
+    requires the attribute, and the only consequence is that the filter is consulted on an
+    unfiltered page too, where it hands the query straight back.
+    """
+
+    has_operator = False
+    template = "sqladmin/filters/lookup_filter.html"
+    title = "Matched to an application"
+    parameter_name = "matched"
+    default_value: Any = None
+
+    async def lookups(self, request: Request, model: Any, run_query: Any) -> list[tuple[str, str]]:
+        return [("__all", "All"), ("no", "Unmatched only"), ("yes", "Matched only")]
+
+    async def get_filtered_query(self, query: Select[Any], value: Any, model: Any) -> Select[Any]:
+        if value == "no":
+            return query.filter(Reply.application_id.is_(None))
+        if value == "yes":
+            return query.filter(Reply.application_id.isnot(None))
+        return query
+
+
 def _multiline(model: Any, attribute: str) -> Markup:
     """Detail-view formatter: render long text with newlines preserved.
 
@@ -146,6 +207,7 @@ class SourceAdmin(LocalTimeView, ModelView, model=Source):
     column_list = [Source.id, Source.name, Source.kind, Source.enabled, Source.last_run_at]
     column_searchable_list = [Source.name]
     column_sortable_list = [Source.name, Source.last_run_at]
+    column_filters = [BooleanFilter(Source.enabled), _enum_filter(Source.kind, SourceKind)]
     # Source.jobs is cascade="all, delete-orphan": submitting this form with the field empty
     # deletes every job of the source (and their applications). Ingest owns this collection,
     # not the human — keep it off the form entirely.
@@ -208,6 +270,16 @@ class JobAdmin(LocalTimeView, ModelView, model=Job):
         Job.apply_blocked,
         Job.posted_at,
         Job.company,
+    ]
+    # The shortlist questions a human actually arrives with: which board did this come from,
+    # is it remote, and why is that high-scoring row never drafted (no apply route, or it never
+    # cleared the hard filters). Search covers company and title above.
+    column_filters = [
+        ForeignKeyFilter(Job.source_id, Source.name, foreign_model=Source, title="Source"),
+        BooleanFilter(Job.is_remote, title="Remote"),
+        BooleanFilter(Job.apply_blocked, title="No apply route"),
+        BooleanFilter(Job.hard_filter_passed, title="Passed hard filters"),
+        _enum_filter(Job.apply_channel, ApplyChannel, title="Apply channel"),
     ]
     # Score order, which is what the shortlist is now (PLAN.md section 7). It used to lead with
     # `is_remote`, matching a `draft` that sorted the same way — and that turned out to be the
@@ -300,7 +372,16 @@ class ApplicationAdmin(LocalTimeView, ModelView, model=Application):
         Application.reply_type,
         Application.reply_at,
     ]
-    column_sortable_list = [Application.status, Application.sent_at]
+    column_sortable_list = [Application.status, Application.sent_at, Application.reply_at]
+    # Sorting by status groups them; filtering is what "show me only the drafted ones" needs,
+    # and that is the normal way into this table.
+    column_filters = [
+        _enum_filter(Application.status, ApplicationStatus, title="Status"),
+        _enum_filter(Application.reply_type, ReplyType, title="Reply"),
+    ]
+    # Dotted paths: an application is identified by its posting, so searching it means searching
+    # the job. sqladmin joins the relationship for the search itself (`search_query`).
+    column_searchable_list = ["job.company", "job.title"]
     column_formatters_detail = {
         Application.cover_letter: _multiline,
         Application.notes: _multiline,
@@ -335,6 +416,10 @@ class ReplyAdmin(LocalTimeView, ModelView, model=Reply):
     ]
     column_searchable_list = [Reply.from_address, Reply.subject]
     column_sortable_list = [Reply.received_at, Reply.reply_type, Reply.confidence]
+    column_filters = [
+        _enum_filter(Reply.reply_type, ReplyType, title="Reply type"),
+        UnmatchedRepliesFilter(),
+    ]
     column_default_sort = [(Reply.received_at, True)]
     column_formatters_detail = {Reply.body: _multiline, Reply.reasoning: _multiline}
     # gmail_message_id is the idempotency key: editing it by hand would let check-replies
