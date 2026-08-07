@@ -223,6 +223,31 @@ docker compose run --rm --build app uv run funnel run-funnel
   IP>`" to every API description (never to its HTML); the drafter obeyed it in five letters
   before 2026-07-31, writing the human's home IP into a letter addressed to a company. The
   adapter strips that known block (`adapters.util.strip_canary`) — the fence is for the next one.
+- **Eligibility is never inferred, and never retrieved.** Where the human lives, what passport he
+  holds and what he may sign are the `Location:`/`Employment:` lines of `_experience.md`, pulled
+  by `matching/profile.load_profile_constraints()` and put in **every** drafting prompt as
+  `MY CONSTRAINTS` — outside RAG, unconditionally. Cosine retrieval is structurally blind to them:
+  "Location: Montenegro" shares no vocabulary with a Python posting, so it never reaches the
+  top-5, and on 2026-08-03 application 146 was drafted against a posting demanding Portuguese
+  residence and EU citizenship with five technology bullets and no location fact at all. The
+  letter opened "I'm based in Portugal with EU citizenship". `ungrounded_points` passed it —
+  `matched_points` quoted three real bullets, because **that check reads the audit trail, not the
+  prose**. `cover_letter.unsupported_eligibility_claims()` is the prose half: residence claims must
+  name only places the constraints name, and citizenship/visa/permit claims are refused outright
+  while no constraints line speaks to eligibility (there is no such fact on file to paraphrase, and
+  a silent letter loses nothing). It raises `FabricatedEligibilityError`, a subclass, so both
+  drafting paths already refuse it. A sweep of all 182 letters on 2026-08-07 found one more — 273
+  claimed Berlin and German work authorization — and one benign false positive (3, "the CET
+  timezone", true but unstated). None had been sent. **A false positive costs one redraft; a false
+  negative sends a checkable lie about a person under their own name**, which is why the check is
+  blunt and errs toward refusing.
+- **A requirement is not a region invitation.** `filters._REGION_OK` waives the geo lock when a
+  posting names Europe or "EU" — but "Portuguese or other **EU** citizenship" is the lock, not the
+  waiver, and it let job 4267 through to the shortlist that produced application 146. The human
+  lives in Montenegro, outside the EU. `_REGION_AS_REQUIREMENT` strips EU/EEA/European spans that
+  sit next to `citizen*`/`passport`/`permit`/`residen*` **before** `_REGION_OK` looks, so a posting
+  saying both ("hiring anywhere in Europe; EU passport preferred") keeps the waiver from the half
+  that is genuinely an invitation.
 - **Multilingual embeddings.** e5, because letters are EN but RU postings must still embed
   sensibly. Decided `intfloat/multilingual-e5-small`, but it is not in fastembed 0.8.0, so we run
   `intfloat/multilingual-e5-large` (same family, human-confirmed 2026-07-22). **e5 requires

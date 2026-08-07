@@ -88,6 +88,41 @@ def test_geo_lock_that_admits_europe_is_not_rejected(job: NormalizedJob) -> None
     assert passes_hard_filters(ok) is True
 
 
+def test_eu_citizenship_requirement_does_not_read_as_a_europe_welcome(job: NormalizedJob) -> None:
+    """ "EU" in a passport requirement is a lock, not an invitation (job 4267, 2026-08-03).
+
+    `_REGION_OK` matched the "EU" inside "Portuguese or other EU citizenship" and waived a lock
+    the human cannot open — he lives in Montenegro, outside the EU. The posting reached the
+    shortlist, and the letter answered the requirement by claiming it.
+    """
+    blocked = job.model_copy(
+        update={
+            "is_remote": True,
+            "description": (
+                "Availability for a remote regime based in Portugal. Candidates must be based in "
+                "Portugal and hold Portuguese or other EU citizenship, or a valid work permit."
+            ),
+        }
+    )
+    assert passes_hard_filters(blocked) is False
+
+
+def test_a_genuine_europe_welcome_survives_alongside_a_passport_preference(
+    job: NormalizedJob,
+) -> None:
+    """Only the requirement half is neutralized: an invitation elsewhere still waives the lock."""
+    ok = job.model_copy(
+        update={
+            "is_remote": True,
+            "description": (
+                "We are hiring remotely anywhere in Europe. You must be located in one of our "
+                "hubs; an EU passport is preferred but not required. Apply here."
+            ),
+        }
+    )
+    assert passes_hard_filters(ok) is True
+
+
 def test_worldwide_remote_geo_phrase_is_not_rejected(job: NormalizedJob) -> None:
     ok = job.model_copy(
         update={

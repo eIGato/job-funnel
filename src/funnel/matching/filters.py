@@ -122,6 +122,20 @@ _CONTRACTOR_OK = re.compile(
 #: multi-region net like "must be located in the Americas, Europe, or Israel" is a false positive.
 _REGION_OK = re.compile(r"europe|\beu\b|\beea\b|\bemea\b|anywhere|world-?wide", re.IGNORECASE)
 
+#: ...but "EU" in a *citizenship* requirement means the opposite of "EU" in an invitation, and
+#: `_REGION_OK` cannot tell them apart. "Candidates must be based in Portugal and hold Portuguese
+#: or other EU citizenship" is a lock the human cannot open — he lives in Montenegro, outside the
+#: EU — and it read as a Europe-welcome waiver, passing the posting through to a shortlist and a
+#: letter that answered the requirement by claiming it (application 146, 2026-08-03). These spans
+#: are removed before `_REGION_OK` looks, so a posting that says both ("open across Europe; EU
+#: passport preferred") still keeps its waiver from the half that is genuinely an invitation.
+_REGION_AS_REQUIREMENT = re.compile(
+    r"\b(?:eu|eea|european)\b[\w\s,/()-]{0,30}?"
+    r"\b(?:citizen\w*|national(?:s|ity)?|passport|work permit|residen\w+)\b"
+    r"|\bcitizens?(?:hip)?\s+(?:of|in)\s+(?:the\s+)?(?:eu|eea|europe\w*)\b",
+    re.IGNORECASE,
+)
+
 #: The posting names a citizenship/residency *preference* and then says it accepts everyone:
 #: "U.S. Citizens and Green Card Holders highly preferred, all valid work authorizations may
 #: apply". `_GEO_LOCKED` sees only the first half and reads a hard lock; this is the second half
@@ -329,6 +343,6 @@ def passes_hard_filters(job: _Filterable) -> bool:
         job.is_remote
         and bool(_GEO_LOCKED.search(haystack))
         and not _CONTRACTOR_OK.search(haystack)
-        and not _REGION_OK.search(haystack)
+        and not _REGION_OK.search(_REGION_AS_REQUIREMENT.sub(" ", haystack))
         and not _AUTHORIZATION_OPEN.search(haystack)
     )

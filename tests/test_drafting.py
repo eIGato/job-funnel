@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+import pytest
 from pydantic_ai.models.test import TestModel
 
 from funnel.drafting import cover_letter, screen
@@ -14,8 +15,6 @@ from funnel.drafting.cover_letter import CoverLetterDraft, draft_cover_letter, m
 from funnel.drafting.prompting import posting_block
 
 if TYPE_CHECKING:
-    import pytest
-
     from funnel.schemas import NormalizedJob
 
 
@@ -101,6 +100,66 @@ def test_ungrounded_points_accepts_paraphrase_of_real_bullets() -> None:
     bullets = ["Python backend developer with FastAPI, PostgreSQL and Kafka"]
     genuine = ["Python backend developer, FastAPI and PostgreSQL"]
     assert cover_letter.ungrounded_points(bullets, genuine) == []
+
+
+_CONSTRAINTS = (
+    "Location: Montenegro, ready to relocate or to work remotely.\n"
+    "Employment: employee or B2B (contractor)."
+)
+
+
+def test_unsupported_eligibility_claims_catches_application_146() -> None:
+    """The live 2026-08-03 failure: the posting's residency requirement asserted as fact.
+
+    "Candidates must be based in Portugal and hold Portuguese or other EU citizenship" went in;
+    "I'm based in Portugal with EU citizenship" came out. `matched_points` quoted three real
+    bullets, so the grounding check passed it — the lie was only ever in the prose.
+    """
+    body = "I'm based in Portugal with EU citizenship and available for the remote regime."
+    flagged = cover_letter.unsupported_eligibility_claims(_CONSTRAINTS, body)
+    assert flagged and "Portugal" in flagged[0]
+
+
+def test_unsupported_eligibility_claims_accepts_the_truth() -> None:
+    body = "I'm based in Montenegro and work remotely; relocating is on the table."
+    assert cover_letter.unsupported_eligibility_claims(_CONSTRAINTS, body) == []
+
+
+def test_citizenship_is_refused_when_the_profile_never_mentions_one() -> None:
+    """No citizenship line on file means no citizenship sentence, not a plausible guess.
+
+    Residence can be checked against a place name; a passport cannot be inferred from anything.
+    """
+    body = "I hold a valid work permit and need no sponsorship."
+    assert cover_letter.unsupported_eligibility_claims(_CONSTRAINTS, body)
+
+
+def test_generate_letter_refuses_a_fabricated_eligibility_claim(job: NormalizedJob) -> None:
+    """The refusal reaches the caller: both drafting paths already stop on this error type."""
+    fabricated = CoverLetterDraft(
+        body="I'm based in Portugal with EU citizenship.",
+        subject="Staff Python Engineer",
+        matched_points=["Built payment integrations"],
+    )
+    agent = make_agent(TestModel(custom_output_args=fabricated.model_dump()))
+    with pytest.raises(cover_letter.FabricatedEligibilityError):
+        asyncio.run(
+            cover_letter.generate_letter(
+                job, ["Built payment integrations"], language="en", agent=agent
+            )
+        )
+
+
+def test_the_prompt_always_carries_the_constraints_block(
+    job: NormalizedJob, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unconditional, outside retrieval: cosine never surfaces a location line for a tech posting."""
+    cover_letter._constraints.cache_clear()
+    monkeypatch.setattr(cover_letter, "load_profile_constraints", lambda: _CONSTRAINTS)
+    prompt = cover_letter._build_prompt(job, ["Built payment integrations"], "en")
+    cover_letter._constraints.cache_clear()
+    assert "MY CONSTRAINTS" in prompt
+    assert "Montenegro" in prompt
 
 
 def test_instructions_keep_the_posting_url_out_of_the_letter() -> None:
