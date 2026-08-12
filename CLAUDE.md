@@ -25,6 +25,11 @@ and to automate the drudgery of applying. It doubles as a portfolio piece for th
    Same trick for any board that offers alerts.
 2. **Human in the loop.** The system NEVER sends applications or emails on its own. The
    most it does is put a draft in the database and wait. A human sends it, by hand.
+   The OAuth scope is what enforces this, and the scope is **never** `gmail.send`,
+   `gmail.compose`, `gmail.insert` or full `https://mail.google.com/`. It is `gmail.readonly`
+   by default and `gmail.modify` when `GMAIL_TRASH_PARSED_ALERTS` is on (human-confirmed
+   2026-08-12) — a write scope that still cannot send and cannot delete permanently, so the
+   worst the system can do to an email is put it in Trash for 30 days.
 3. **Embeddings are local, via fastembed (ONNX). No torch.** Not a single token and not a
    single API call for matching or filtering.
 4. **The LLM lives only in `drafting/` and `replies/`.** Cover letters and reply
@@ -198,6 +203,15 @@ docker compose run --rm --build app uv run funnel run-funnel
   posting is real, and rejecting it there would put it beyond the button's reach).
 - **We send nothing.** There is no code path that sends an email or an application. `draft`
   writes to the database; the human sends it and then sets the status to `sent` in the admin.
+- **The mailbox is read, and at most tidied.** `GMAIL_TRASH_PARSED_ALERTS` (off by default)
+  makes `ingest` move an alert email to Trash — never delete it — but only through
+  `BaseAdapter.on_committed`, which runs **after** the transaction commits, and only for the
+  ids in `GmailAlertsAdapter.parsed_message_ids`, i.e. messages the parser got at least one
+  posting out of. An email that parsed into nothing is left alone on purpose: it is as likely
+  to be a board that changed its markup as it is to be junk, and it is the only copy a new
+  parser could be written against. Keep those three limits together — the hook exists so the
+  pipeline can have an irreversible source-side side effect without the pipeline knowing
+  which source it is.
 - **Not applying has three different statuses, and they stay apart.** `DECLINED` is the screen's
   verdict on fit, `CLOSED` is a posting that stopped taking applications before the human got
   there, `REJECTED` is them declining us — which presupposes a letter went out. `REJECTED` was

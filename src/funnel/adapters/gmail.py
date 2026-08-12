@@ -37,7 +37,7 @@ import stat
 from email import message_from_bytes, policy
 from email.message import EmailMessage
 from html.parser import HTMLParser
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 from urllib.parse import parse_qs, urlparse
 
 from funnel.adapters.base import BaseAdapter, register
@@ -50,15 +50,40 @@ if TYPE_CHECKING:
 
     from google.oauth2.credentials import Credentials
 
-#: Read-only on purpose. This system cannot send mail and never will, so a write scope
-#: would be strictly more authority than it has any use for.
-GMAIL_SCOPES: list[str] = ["https://www.googleapis.com/auth/gmail.readonly"]
+#: Read-only is the default and covers everything the pipeline reads: alert mail, Sent mail,
+#: replies. `gmail.modify` is asked for only when the human turns on trashing parsed alerts
+#: (`GMAIL_TRASH_PARSED_ALERTS`), because moving a message to Trash is a write and Gmail has no
+#: narrower scope for it.
+#:
+#: Neither scope can send: `gmail.send`, `gmail.compose` and `gmail.insert` are separate scopes
+#: and are never requested. That is what invariant 2 is actually about — the system has no way
+#: to put mail into the world, whatever it may do to mail already in the mailbox. Full access
+#: (`https://mail.google.com/`) is never requested either, so the worst this system can do to
+#: an email is recoverable: `modify` cannot delete permanently.
+GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+GMAIL_MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
+
+
+def gmail_scopes(*, allow_trash: bool | None = None) -> list[str]:
+    """The OAuth scopes to ask for, which is the least privilege the settings allow.
+
+    `allow_trash=None` reads the setting; the tests pass it explicitly so both states are
+    checked without touching the environment.
+    """
+    if allow_trash is None:
+        from funnel.config import get_settings
+
+        allow_trash = get_settings().gmail_trash_parsed_alerts
+    return [GMAIL_MODIFY_SCOPE] if allow_trash else [GMAIL_READONLY_SCOPE]
 
 
 def get_credentials(*, interactive: bool = False) -> Credentials:
     """Return valid Gmail OAuth credentials, refreshing or minting them as needed.
 
     - A saved token is loaded and, if expired, refreshed silently and rewritten.
+    - A token minted for narrower scopes than the settings now call for is discarded the
+      same way, because the alternative is an opaque 403 at the first call that needs the
+      missing scope.
     - A refresh token Google has *revoked* is discarded, not fatal: re-authorizing is the
       whole point of ``funnel auth-gmail``, and a dead token file must not be what stops it.
     - With no usable token and ``interactive=True``, run the installed-app browser flow
@@ -80,18 +105,26 @@ def get_credentials(*, interactive: bool = False) -> Credentials:
     settings = get_settings()
     creds_path: Path = settings.gmail_credentials_path
     token_path: Path = settings.gmail_token_path
+    scopes = gmail_scopes(allow_trash=settings.gmail_trash_parsed_alerts)
 
     creds: Credentials | None = None
     if token_path.exists():
         try:
             # google-auth ships py.typed but leaves these methods unannotated.
-            creds = Credentials.from_authorized_user_file(str(token_path), GMAIL_SCOPES)  # type: ignore[no-untyped-call]
+            creds = Credentials.from_authorized_user_file(str(token_path), scopes)  # type: ignore[no-untyped-call]
         except ValueError:
             # Empty, truncated or hand-edited: `from_authorized_user_file` raises
             # "Authorized user info was not in the expected format". Same stance as the revoked
             # refresh token below — a broken token file must never block the command whose one
             # job is to replace it. Discard and re-authorize.
             creds = None
+
+    if creds and not creds.has_scopes(scopes):  # type: ignore[no-untyped-call]
+        # Minted before the settings widened (turning on trashing is the case that does it).
+        # Google does not upgrade a token in place, and the missing scope surfaces as a bare
+        # 403 insufficientPermissions at whichever call needs it. Same stance as a revoked
+        # token: discard and send the human to `auth-gmail`.
+        creds = None
 
     if creds and creds.valid:
         return creds
@@ -113,9 +146,9 @@ def get_credentials(*, interactive: bool = False) -> Credentials:
 
     if not interactive:
         raise RuntimeError(
-            f"No usable Gmail token at {token_path} (missing, or the refresh token was "
-            "revoked). Run `uv run funnel auth-gmail` once to re-authorize; the pipeline "
-            "stays non-interactive."
+            f"No usable Gmail token at {token_path} (missing, revoked, or minted for "
+            f"narrower scopes than {', '.join(scopes)}). Run `uv run funnel auth-gmail` "
+            "once to re-authorize; the pipeline stays non-interactive."
         )
 
     if not creds_path.exists():
@@ -123,7 +156,7 @@ def get_credentials(*, interactive: bool = False) -> Credentials:
             f"Missing OAuth client secret at {creds_path}. Download a Desktop-app OAuth "
             "client from Google Cloud Console (Gmail API enabled) and save it there."
         )
-    flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), GMAIL_SCOPES)
+    flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), scopes)
     creds = flow.run_local_server(port=0)
     _write_token(token_path, creds)
     return creds
@@ -604,6 +637,14 @@ class GmailAlertsAdapter(BaseAdapter):
 
     name = "gmail-alerts"
 
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        super().__init__(config)
+        #: Gmail ids of the messages this fetch actually got postings out of. Only these are
+        #: eligible for the Trash (see `on_committed`) — a message that parsed into nothing
+        #: is as likely to be a board that changed its markup as it is to be junk, and
+        #: deleting it would throw away the one copy a new parser could be written against.
+        self.parsed_message_ids: list[str] = []
+
     async def fetch(self) -> list[NormalizedJob]:
         from googleapiclient.discovery import build
 
@@ -616,7 +657,49 @@ class GmailAlertsAdapter(BaseAdapter):
 
         listed = messages.list(userId="me", q=query, maxResults=max_results).execute()
         jobs: list[NormalizedJob] = []
+        self.parsed_message_ids = []
         for meta in listed.get("messages", []):
             raw = messages.get(userId="me", id=meta["id"], format="raw").execute()
-            jobs.extend(parse_raw_email(base64.urlsafe_b64decode(raw["raw"])))
+            parsed = parse_raw_email(base64.urlsafe_b64decode(raw["raw"]))
+            if parsed:
+                self.parsed_message_ids.append(str(meta["id"]))
+            jobs.extend(parsed)
         return jobs
+
+    async def on_committed(self) -> str | None:
+        """Move the alerts we got postings out of to Trash. Off unless the human turned it on.
+
+        Three deliberate limits, because this is the only thing the system does *to* the
+        mailbox:
+
+        - **Only after the commit.** The hook runs outside the transaction, so a posting is in
+          the database before its email stops being.
+        - **Only messages that yielded a posting.** A parse that found nothing keeps its email
+          (see `parsed_message_ids`).
+        - **Trash, never delete.** Gmail keeps a trashed message recoverable for 30 days,
+          which is the window in which a parser bug is actually noticed, and the `gmail.modify`
+          scope cannot permanently delete anything even if this code asked it to.
+
+        One failure does not stop the rest: the ids are independent, and a message that stays
+        in the inbox costs nothing but a re-parse that dedups to zero new rows.
+        """
+        from funnel.config import get_settings
+
+        if not self.parsed_message_ids or not get_settings().gmail_trash_parsed_alerts:
+            return None
+
+        from googleapiclient.discovery import build
+
+        creds = get_credentials(interactive=False)
+        service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        messages = service.users().messages()
+        trashed = failed = 0
+        for message_id in self.parsed_message_ids:
+            try:
+                messages.trash(userId="me", id=message_id).execute()
+            except Exception:
+                failed += 1
+            else:
+                trashed += 1
+        self.parsed_message_ids = []
+        return f"trashed {trashed} parsed alerts" + (f", {failed} failed" if failed else "")

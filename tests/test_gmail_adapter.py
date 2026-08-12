@@ -11,6 +11,8 @@ subject on purpose — a later "new jobs" email must parse the same way.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 from pathlib import Path
 
 import pytest
@@ -212,6 +214,10 @@ class _DeadCreds:
     expired = True
     refresh_token = "stale"
 
+    def has_scopes(self, _scopes: list[str]) -> bool:
+        """Granted the scopes asked for; this stub is about revocation, not scope drift."""
+        return True
+
     def refresh(self, _request: object) -> None:
         from google.auth.exceptions import RefreshError
 
@@ -298,6 +304,168 @@ def test_a_malformed_token_is_reported_clearly_when_non_interactive(
 
     token, _ = gmail_paths
     token.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="auth-gmail"):
+        gmail.get_credentials(interactive=False)
+
+
+# --------------------------------------------------------------------------------------
+# Trashing parsed alerts. The whole risk here is deleting an email whose postings never
+# reached the database, so these drive the two halves of that: which ids `fetch` marks as
+# eligible, and whether `on_committed` acts on them at all.
+# --------------------------------------------------------------------------------------
+
+_JUNK_EMAIL = (
+    b"From: newsletter@example.com\r\nSubject: Sale\r\n"
+    b'Content-Type: text/html; charset="utf-8"\r\n\r\n<p>50% off</p>\r\n'
+)
+
+
+class _Call:
+    """A googleapiclient request object: everything is deferred until `.execute()`."""
+
+    def __init__(self, result: dict[str, object]) -> None:
+        self._result = result
+
+    def execute(self) -> dict[str, object]:
+        return self._result
+
+
+class _FakeMessages:
+    def __init__(self, raws: dict[str, bytes]) -> None:
+        self._raws = raws
+        self.trashed: list[str] = []
+
+    def list(self, **_kw: object) -> _Call:
+        return _Call({"messages": [{"id": key} for key in self._raws]})
+
+    def get(self, *, id: str, **_kw: object) -> _Call:
+        return _Call({"id": id, "raw": base64.urlsafe_b64encode(self._raws[id]).decode()})
+
+    def trash(self, *, id: str, **_kw: object) -> _Call:
+        self.trashed.append(id)
+        return _Call({})
+
+
+@pytest.fixture
+def fake_gmail(monkeypatch: pytest.MonkeyPatch) -> _FakeMessages:
+    """A Gmail service serving one parseable alert and one message that parses to nothing."""
+    messages = _FakeMessages({"alert-1": (FIXTURES / "hh.eml").read_bytes(), "junk-1": _JUNK_EMAIL})
+
+    class _Service:
+        @staticmethod
+        def users() -> _Service:
+            return _Service()
+
+        @staticmethod
+        def messages() -> _FakeMessages:
+            return messages
+
+    monkeypatch.setattr("googleapiclient.discovery.build", lambda *_a, **_kw: _Service())
+    monkeypatch.setattr("funnel.adapters.gmail.get_credentials", lambda **_kw: object())
+    return messages
+
+
+def _with_trashing(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
+    """Redirect the settings `on_committed` reads (a function-local import of funnel.config)."""
+    import funnel.config
+    from funnel.config import Settings
+
+    monkeypatch.setattr(
+        funnel.config, "get_settings", lambda: Settings(gmail_trash_parsed_alerts=enabled)
+    )
+
+
+def test_only_messages_that_yielded_postings_are_eligible(fake_gmail: _FakeMessages) -> None:
+    """A message parsed into nothing may be a board that changed its markup, not junk."""
+    adapter = GmailAlertsAdapter({"query": "in:inbox"})
+
+    jobs = asyncio.run(adapter.fetch())
+
+    assert len(jobs) == 2  # both postings in the hh fixture
+    assert adapter.parsed_message_ids == ["alert-1"]
+
+
+def test_trashing_is_off_by_default(
+    monkeypatch: pytest.MonkeyPatch, fake_gmail: _FakeMessages
+) -> None:
+    _with_trashing(monkeypatch, enabled=False)
+    adapter = GmailAlertsAdapter({"query": "in:inbox"})
+    asyncio.run(adapter.fetch())
+
+    assert asyncio.run(adapter.on_committed()) is None
+    assert fake_gmail.trashed == []
+
+
+def test_trashing_touches_only_the_parsed_alerts(
+    monkeypatch: pytest.MonkeyPatch, fake_gmail: _FakeMessages
+) -> None:
+    _with_trashing(monkeypatch, enabled=True)
+    adapter = GmailAlertsAdapter({"query": "in:inbox"})
+    asyncio.run(adapter.fetch())
+
+    note = asyncio.run(adapter.on_committed())
+
+    assert fake_gmail.trashed == ["alert-1"], "the unparsed message must stay in the mailbox"
+    assert note is not None and "1" in note
+    # Idempotent: a second call has nothing left to act on, so a retry cannot double-trash.
+    assert asyncio.run(adapter.on_committed()) is None
+    assert fake_gmail.trashed == ["alert-1"]
+
+
+def test_a_stuck_id_does_not_keep_the_others_in_the_inbox(
+    monkeypatch: pytest.MonkeyPatch, fake_gmail: _FakeMessages
+) -> None:
+    _with_trashing(monkeypatch, enabled=True)
+    adapter = GmailAlertsAdapter()
+    adapter.parsed_message_ids = ["boom", "alert-1"]
+
+    real_trash = fake_gmail.trash
+
+    def _trash(*, id: str, **_kw: object) -> _Call:
+        if id == "boom":
+            raise RuntimeError("503")
+        return real_trash(id=id)
+
+    monkeypatch.setattr(fake_gmail, "trash", _trash)
+
+    note = asyncio.run(adapter.on_committed())
+
+    assert fake_gmail.trashed == ["alert-1"]
+    assert note is not None and "failed" in note
+
+
+def test_a_token_missing_the_new_scope_is_refused(
+    monkeypatch: pytest.MonkeyPatch, gmail_paths: tuple[Path, Path]
+) -> None:
+    """Turning on trashing widens the scope; the old token cannot be upgraded in place.
+
+    Google answers a call the token has no scope for with a bare 403 insufficientPermissions,
+    at whichever call happens to need it first. Catching the mismatch here turns that into the
+    one instruction that fixes it.
+    """
+    import funnel.config
+    from funnel.adapters import gmail
+    from funnel.config import Settings
+
+    token, secret = gmail_paths
+    monkeypatch.setattr(
+        funnel.config,
+        "get_settings",
+        lambda: Settings(
+            gmail_token_path=token, gmail_credentials_path=secret, gmail_trash_parsed_alerts=True
+        ),
+    )
+    token.write_text('{"refresh_token": "fine"}', encoding="utf-8")
+
+    class _NarrowCreds(_FreshCreds):
+        def has_scopes(self, _scopes: list[str]) -> bool:
+            return False  # minted for gmail.readonly
+
+    monkeypatch.setattr(
+        "google.oauth2.credentials.Credentials.from_authorized_user_file",
+        staticmethod(lambda *_a, **_kw: _NarrowCreds()),
+    )
 
     with pytest.raises(RuntimeError, match="auth-gmail"):
         gmail.get_credentials(interactive=False)

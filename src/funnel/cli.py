@@ -227,13 +227,15 @@ def _persist(session: Session, source: Source, fetched: list[NormalizedJob]) -> 
 @app.command()
 def ingest() -> None:
     """Collect postings from every enabled source. Re-running creates no duplicates."""
+    total = 0
+    used: list[tuple[str, adapters.BaseAdapter]] = []
+
     with session_scope() as session:
         sources = session.scalars(select(Source).where(Source.enabled.is_(True))).all()
         if not sources:
             typer.secho("No enabled sources. Add them in the admin.", fg=typer.colors.YELLOW)
             raise typer.Exit(0)
 
-        total = 0
         for source in sources:
             try:
                 adapter = adapters.get_adapter(source)
@@ -247,9 +249,23 @@ def ingest() -> None:
 
             new = _persist(session, source, fetched)
             total += new
+            used.append((source.name, adapter))
             typer.echo(f"  {source.name}: fetched {len(fetched)}, new {new}")
 
-        typer.secho(f"ingest: +{total} postings", fg=typer.colors.GREEN)
+    # Outside the transaction, and only because it committed: this is where an adapter is
+    # allowed a side effect on its source that a rollback could not take back — Gmail's
+    # trashes the alerts it parsed (BaseAdapter.on_committed). A source that failed above
+    # never reached `used`, so nothing is cleaned up on its behalf.
+    for name, adapter in used:
+        try:
+            note = asyncio.run(adapter.on_committed())
+        except Exception as exc:  # housekeeping must not fail a run whose postings are saved
+            typer.secho(f"  {name}: post-commit ERROR {exc}", fg=typer.colors.RED)
+            continue
+        if note:
+            typer.echo(f"  {name}: {note}")
+
+    typer.secho(f"ingest: +{total} postings", fg=typer.colors.GREEN)
 
 
 @app.command()
@@ -741,13 +757,18 @@ def seed_sources(
 
 @app.command(name="auth-gmail")
 def auth_gmail() -> None:
-    """Authorize Gmail read-only access (one-time, opens a browser). DOES NOT SEND."""
-    from funnel.adapters.gmail import get_credentials
+    """Authorize Gmail access (one-time, opens a browser). DOES NOT SEND.
+
+    Re-run this after flipping GMAIL_TRASH_PARSED_ALERTS: the scope changes with it, and a
+    token minted for the narrower one is refused rather than left to fail with a bare 403.
+    """
+    from funnel.adapters.gmail import get_credentials, gmail_scopes
 
     settings = get_settings()
+    scope = gmail_scopes()[0].rsplit("/", 1)[-1]
     typer.echo(f"Using client secret : {settings.gmail_credentials_path}")
     typer.echo(f"Token will be saved : {settings.gmail_token_path}")
-    typer.echo("A browser window will open for consent (scope: gmail.readonly).")
+    typer.echo(f"A browser window will open for consent (scope: {scope}).")
     typer.echo("If it does not, copy the URL printed below into a browser by hand.")
     try:
         get_credentials(interactive=True)
@@ -792,7 +813,15 @@ def doctor() -> None:
     typer.echo(f"adapters        : {', '.join(sorted(adapters.registry())) or 'none'}")
 
     if settings.gmail_token_path.exists():
-        typer.secho(f"gmail token     : ok ({settings.gmail_token_path})", fg=typer.colors.GREEN)
+        from funnel.adapters.gmail import gmail_scopes
+
+        scope = gmail_scopes()[0].rsplit("/", 1)[-1]
+        trash = "on" if settings.gmail_trash_parsed_alerts else "off"
+        typer.secho(
+            f"gmail token     : ok ({settings.gmail_token_path}), scope {scope}, "
+            f"trash parsed alerts {trash}",
+            fg=typer.colors.GREEN,
+        )
     else:
         typer.secho(
             "gmail token     : missing (run `uv run funnel auth-gmail`)",

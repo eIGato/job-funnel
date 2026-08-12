@@ -112,6 +112,17 @@ class Settings(BaseSettings):
     # --- Gmail: board alerts. We do not scrape LinkedIn. ---
     gmail_credentials_path: Path = Field(default=Path("secrets/gmail_credentials.json"))
     gmail_token_path: Path = Field(default=Path("secrets/gmail_token.json"))
+    gmail_trash_parsed_alerts: bool = Field(
+        default=False,
+        description=(
+            "After ingest commits, move every alert email the parser got at least one posting "
+            "out of into Gmail's Trash (recoverable for 30 days; nothing is deleted outright, "
+            "and an email that parsed into nothing is never touched). Off by default because "
+            "it is the only thing this system does *to* the mailbox: turning it on widens the "
+            "OAuth scope from gmail.readonly to gmail.modify — which still cannot send, "
+            "invariant 2 holds — and needs `funnel auth-gmail` re-run to mint a token for it."
+        ),
+    )
 
     # --- Matching ---
     match_top_k: int = Field(default=25, ge=1, description="Shortlist size after ranking.")
