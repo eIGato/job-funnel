@@ -226,6 +226,18 @@ docker compose run --rm --build app uv run funnel run-funnel
   linked before, 26 after, and 96 board alerts now get a Reply row with no classification call
   at all. The remaining ~20 real acknowledgements belong to applications the funnel has no
   `sent` row for; no heuristic can reach those.
+- **An application made outside the funnel is recorded from the mail it drew.** Most
+  acknowledgements here answer applications the funnel never saw — the human applied through a
+  board or a referral (~20 of 166 replies on 2026-08-12) — so every later message in that
+  conversation is unmatchable and any sent-to-reply rate uses the wrong denominator. The
+  classifier therefore also reports `company`/`role` (a **proposal**, on a call that already
+  happens — no extra tokens), stored as `Reply.detected_company`/`detected_role`, and the
+  admin's "Record as sent application" builds the row from them: a Job under the disabled
+  `manual` Source, an Application at `sent` with `sent_at` = when the email arrived, and the
+  thread it came in. **The human presses it** — the model only proposes, which is invariant 2
+  applied to an action rather than to sending. No employer named, no row: a row named after a
+  guess is worse than none. `replies/link.py` owns this and every other write a reply causes,
+  so the scan and the admin cannot drift.
 - **`check-replies` reads oldest first, and learns threads from incoming mail.** Pass 1 finds
   a Sent message for almost nothing (1 of 36 applications had a thread) because most
   applications go through a web form. So a conclusive match writes `message.thread_id` back

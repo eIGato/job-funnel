@@ -12,9 +12,10 @@ from datetime import UTC, datetime
 import pytest
 from pydantic_ai.models.test import TestModel
 
-from funnel.models import Application, Job
+from funnel.models import Application, ApplicationStatus, Job, Reply, Source, SourceKind
 from funnel.replies import inbox
 from funnel.replies.classify import ReplyClassification, classify_reply, make_agent
+from funnel.replies.link import MANUAL_SOURCE, record_as_application
 from funnel.replies.match import (
     company_slug,
     display_name,
@@ -378,3 +379,104 @@ def test_a_board_can_only_match_by_thread() -> None:
     assert _matched(digest, apps) is None
     # A board relaying an answer inside a known thread is still a match.
     assert _matched(digest._replace(thread_id="t-9"), apps) is apps[0]
+
+
+# --------------------------------------------------------------------------------------
+# Recording an application the funnel never saw. The suite has no database (see CLAUDE.md
+# on keeping it hermetic), so the session is a stand-in that hands back canned rows and
+# collects what was added: what is under test here is the decision, not the SQL.
+# --------------------------------------------------------------------------------------
+
+
+class _FakeSession:
+    """Answers each `scalar` from a queue, in the order `record_as_application` asks."""
+
+    def __init__(self, *answers: object) -> None:
+        self._answers = list(answers)
+        self.added: list[object] = []
+        self.flushed = 0
+
+    def scalar(self, _statement: object) -> object:
+        return self._answers.pop(0) if self._answers else None
+
+    def add(self, row: object) -> None:
+        self.added.append(row)
+        if getattr(row, "id", None) is None:
+            row.id = 900 + len(self.added)  # what a flush would assign
+
+    def flush(self) -> None:
+        self.flushed += 1
+
+
+def _orphan_reply(**kwargs: object) -> Reply:
+    fields: dict[str, object] = {
+        "id": 7,
+        "gmail_message_id": "m-7",
+        "thread_id": "t-7",
+        "from_address": "no-reply@ashbyhq.com",
+        "subject": "We've got your application!",
+        "body": "Thanks for applying.",
+        "received_at": datetime(2026, 8, 1, 9, 30, tzinfo=UTC),
+        "detected_company": "Moon Active",
+        "detected_role": "Backend Engineer",
+    }
+    return Reply(**(fields | kwargs))
+
+
+def test_recording_builds_the_application_out_of_the_email() -> None:
+    session = _FakeSession(None, None, None)  # no manual source, no job, no application yet
+
+    application = record_as_application(session, _orphan_reply())  # type: ignore[arg-type]
+
+    assert application is not None
+    assert application.status is ApplicationStatus.SENT
+    # The acknowledgement's arrival is the closest honest bound on when the letter went out.
+    assert application.sent_at == datetime(2026, 8, 1, 9, 30, tzinfo=UTC)
+    assert application.thread_id == "t-7"
+    job = next(row for row in session.added if isinstance(row, Job))
+    assert (job.company, job.title) == ("Moon Active", "Backend Engineer")
+    assert job.hard_filter_passed is False  # a record of an application, not a candidate
+
+
+def test_the_source_it_creates_is_disabled() -> None:
+    """`ingest` resolves adapters by Source.name, and there is no 'manual' adapter."""
+    session = _FakeSession(None, None, None)
+    record_as_application(session, _orphan_reply())  # type: ignore[arg-type]
+
+    source = next(row for row in session.added if isinstance(row, Source))
+    assert source.name == MANUAL_SOURCE
+    assert source.enabled is False
+
+
+def test_a_role_the_model_did_not_name_is_left_explicit() -> None:
+    session = _FakeSession(None, None, None)
+    record_as_application(session, _orphan_reply(detected_role=None))  # type: ignore[arg-type]
+
+    job = next(row for row in session.added if isinstance(row, Job))
+    assert job.title == "(role not stated)"
+
+
+def test_no_employer_no_row() -> None:
+    """A null company means the model refused to guess; a row named after a guess is worse."""
+    session = _FakeSession()
+    assert record_as_application(session, _orphan_reply(detected_company=None)) is None  # type: ignore[arg-type]
+    assert session.added == []
+
+
+def test_an_already_linked_reply_creates_nothing() -> None:
+    session = _FakeSession()
+    assert record_as_application(session, _orphan_reply(application_id=3)) is None  # type: ignore[arg-type]
+    assert session.added == []
+
+
+def test_a_second_acknowledgement_reuses_the_row_it_already_made() -> None:
+    """Two mails from one employer must not mint two applications (or collide on the hash)."""
+    source = Source(id=5, name=MANUAL_SOURCE, kind=SourceKind.API, enabled=False)
+    job = Job(id=6, source_id=5, company="Moon Active", title="Backend Engineer", url="")
+    existing = Application(id=8, job_id=6, status=ApplicationStatus.SENT)
+    session = _FakeSession(source, job, existing)
+
+    application = record_as_application(session, _orphan_reply(id=9))  # type: ignore[arg-type]
+
+    assert application is existing
+    assert session.added == []

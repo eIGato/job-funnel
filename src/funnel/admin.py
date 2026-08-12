@@ -413,9 +413,17 @@ class ReplyAdmin(LocalTimeView, ModelView, model=Reply):
         Reply.reply_type,
         Reply.confidence,
         Reply.application,
+        # What "Record as sent application" would create, visible before pressing it.
+        Reply.detected_company,
+        Reply.detected_role,
     ]
     column_searchable_list = [Reply.from_address, Reply.subject]
-    column_sortable_list = [Reply.received_at, Reply.reply_type, Reply.confidence]
+    column_sortable_list = [
+        Reply.received_at,
+        Reply.reply_type,
+        Reply.confidence,
+        Reply.detected_company,
+    ]
     column_filters = [
         _enum_filter(Reply.reply_type, ReplyType, title="Reply type"),
         UnmatchedRepliesFilter(),
@@ -426,6 +434,64 @@ class ReplyAdmin(LocalTimeView, ModelView, model=Reply):
     # re-fetch and re-bill a message already processed.
     form_excluded_columns = [Reply.gmail_message_id, Reply.created_at]
     page_size = 50
+
+    @action(
+        name="record_as_application",
+        label="Record as sent application",
+        confirmation_message=(
+            "Create a sent application for each of these, from the employer and role the "
+            "classifier read out of the email? Nothing is sent; this only records what "
+            "already happened."
+        ),
+    )
+    async def record_as_application_action(self, request: Request) -> RedirectResponse:
+        """Turn an orphan acknowledgement into the application it is evidence of.
+
+        The gap this closes: the human applies through a board or a referral, the funnel never
+        sees it, and the "we got your application" mail that comes back has nothing to attach
+        to — ~20 of 166 stored replies on 2026-08-12. Every later message in that conversation
+        is then unmatchable too, and the sent-to-reply rate is computed against the wrong
+        denominator.
+
+        The email is the only record of that application, so the row is built from it
+        (`replies.link.record_as_application`) and the reply is linked to it. Afterwards the
+        backlog is re-matched, because the sibling acknowledgement filed last week is now
+        matchable by the company it names — which is the same pass `check-replies` ends with.
+
+        Review-only (invariant 6) is about not acting on the human's behalf: this acts on their
+        press, from the row they selected, and it sends nothing (invariant 2). The classifier
+        only ever *proposed* the names, on a call already paid for.
+        """
+        from sqlalchemy import select
+
+        from funnel.db import session_scope
+        from funnel.models import REPLYABLE_STATUSES
+        from funnel.replies.link import record_as_application, relink_stored
+
+        ids = [int(pk) for pk in request.query_params.get("pks", "").split(",") if pk]
+        created = skipped = 0
+        with session_scope() as session:
+            for reply_id in ids:
+                reply = session.get(Reply, reply_id)
+                if reply is None or record_as_application(session, reply) is None:
+                    skipped += 1  # already linked, or the model would not name an employer
+                    continue
+                created += 1
+
+            session.flush()
+            applications = list(
+                session.scalars(
+                    select(Application).where(Application.status.in_(REPLYABLE_STATUSES))
+                ).all()
+            )
+            relinked, _ = relink_stored(session, applications)
+
+        summary = f"{created} recorded, {skipped} skipped, {relinked} other replies relinked"
+        return RedirectResponse(
+            request.url_for("admin:list", identity=self.identity).include_query_params(
+                recorded=summary
+            )
+        )
 
 
 app = Starlette()

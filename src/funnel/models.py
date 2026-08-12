@@ -409,6 +409,14 @@ class Reply(Base):
     confidence: Mapped[float | None] = mapped_column(Float)
     reasoning: Mapped[str | None] = mapped_column(Text)
 
+    #: Who the classifier thinks the email is about. A *proposal*, never a fact: it is what the
+    #: admin's "Record as sent application" fills a new row from, and nothing else reads it.
+    #: Most acknowledgements this mailbox receives belong to applications the funnel never saw
+    #: — the human applied outside it — and this is how such a row gets created from the only
+    #: record that exists of it (~20 of 166 replies on 2026-08-12).
+    detected_company: Mapped[str | None] = mapped_column(String(255))
+    detected_role: Mapped[str | None] = mapped_column(String(255))
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     application: Mapped[Application | None] = relationship(back_populates="replies")
