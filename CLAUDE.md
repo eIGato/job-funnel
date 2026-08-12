@@ -212,6 +212,25 @@ docker compose run --rm --build app uv run funnel run-funnel
   parser could be written against. Keep those three limits together — the hook exists so the
   pipeline can have an irreversible source-side side effect without the pipeline knowing
   which source it is.
+- **A reply is correlated on words, and a weak match never moves a status.**
+  `replies/match.py` compares whole words (folded for diacritics, legal forms dropped), not
+  slugs inside a run-together string: `profil` sits inside "profile" and matched a Toptal
+  acknowledgement to a Profil Software application. A run of consecutive words joining to
+  exactly the company slug counts too, because an ATS gives us `Chaosindustries` and mails
+  "CHAOS Industries" — equality on the run, never containment. `Match.conclusive` is the other
+  half: the thread, the company's own domain, the From display name and a unique company in
+  the subject may set `Application.status`; the same-company tie-break (two Reddit roles) and
+  a name found only in the body link the Reply and leave the status to the human. **A job
+  board can match by thread and nothing else** — its digests list companies by the dozen, and
+  one of them naming ours proves nothing. Measured over 166 stored replies (2026-08-12): 17
+  linked before, 26 after, and 96 board alerts now get a Reply row with no classification call
+  at all. The remaining ~20 real acknowledgements belong to applications the funnel has no
+  `sent` row for; no heuristic can reach those.
+- **`check-replies` reads oldest first, and learns threads from incoming mail.** Pass 1 finds
+  a Sent message for almost nothing (1 of 36 applications had a thread) because most
+  applications go through a web form. So a conclusive match writes `message.thread_id` back
+  onto the Application, and the oldest-first order means an acknowledgement teaches the thread
+  before the answer to it is looked at in the same batch.
 - **Not applying has three different statuses, and they stay apart.** `DECLINED` is the screen's
   verdict on fit, `CLOSED` is a posting that stopped taking applications before the human got
   there, `REJECTED` is them declining us — which presupposes a letter went out. `REJECTED` was

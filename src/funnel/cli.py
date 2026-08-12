@@ -19,6 +19,8 @@ if TYPE_CHECKING:
     from sqlalchemy import ColumnElement, Select
     from sqlalchemy.orm import InstrumentedAttribute, Session
 
+    from funnel.models import Application, Reply
+    from funnel.replies.inbox import IncomingMessage
     from funnel.schemas import NormalizedJob
 
 app = typer.Typer(
@@ -183,6 +185,25 @@ def shortlist_select(
         .where(roles.c.company_rank <= per_company)
         .order_by(desc(roles.c.rank_score))
         .limit(top_n)
+    )
+
+
+def _reply_row(message: IncomingMessage, application: Application | None) -> Reply:
+    """The record of one incoming email, without a verdict on it yet.
+
+    Separate from the classification on purpose: a board's bulk alert gets a row and no model
+    call, so it stays visible in the admin and stays out of the bill.
+    """
+    from funnel.models import Reply
+
+    return Reply(
+        application_id=application.id if application else None,
+        gmail_message_id=message.gmail_message_id,
+        thread_id=message.thread_id or None,
+        from_address=message.from_address,
+        subject=message.subject,
+        body=message.body,
+        received_at=message.received_at,
     )
 
 
@@ -585,12 +606,22 @@ def check_replies(
     Three passes, and every one of them refuses to guess:
 
     1. **Link.** For applications the human marked `sent` but that have no thread yet, look in
-       Sent mail for the message they sent. Only an unambiguous hit is stored.
+       Sent mail for the message they sent. Only an unambiguous hit is stored. Most
+       applications go through a web form and have no sent message at all, so the thread is
+       more often learned the other way round — see pass 3.
     2. **Fetch.** Read incoming mail, skipping any message already recorded — `check-replies`
        is idempotent and never re-bills a classification.
-    3. **Classify and apply.** An unmatched reply, or one classified below
+    3. **Classify and apply.** Oldest message first, because an acknowledgement teaches us the
+       thread that the real answer arrives in later. A conclusive match writes its thread back
+       onto the application, so every further message in that conversation matches by thread
+       alone. An unmatched reply, one matched only inconclusively, or one classified below
        `reply_confidence_threshold`, is stored for review but leaves the Application status
        untouched. A wrong auto-status would hide a real interview; an unread row would not.
+
+    Bulk mail from a job board that matches no application is recorded unclassified: it is
+    over half of everything the mailbox turns up (95 of 166 on 2026-08-12) and it is never an
+    answer to anything, so paying a model to call it `no_reply` bought nothing. The row is
+    still written, which keeps it visible in the admin and keeps the scan idempotent.
     """
     from funnel.models import (
         REPLYABLE_STATUSES,
@@ -601,7 +632,7 @@ def check_replies(
     )
     from funnel.replies.classify import classify_reply
     from funnel.replies.inbox import build_service, fetch_recent, find_sent_thread
-    from funnel.replies.match import match_reply
+    from funnel.replies.match import is_board_sender, match_reply, sender_domain
 
     settings = get_settings()
     if not (settings.llm_api_key and settings.llm_api_key.get_secret_value()):
@@ -643,12 +674,23 @@ def check_replies(
                 )
             ).all()
         )
-        fresh = [m for m in messages if m.gmail_message_id not in seen]
+        # Oldest first, so an acknowledgement matched in this very batch has already taught us
+        # its thread by the time the answer to it is looked at.
+        fresh = sorted(
+            (m for m in messages if m.gmail_message_id not in seen),
+            key=lambda m: (m.received_at is not None, m.received_at),
+        )
 
         # 3. Match, classify, apply.
-        applied = unmatched = uncertain = 0
+        applied = unmatched = uncertain = weak = bulk = 0
         for message in fresh:
-            matched = match_reply(message, sent)
+            match = match_reply(message, sent)
+
+            if match is None and is_board_sender(sender_domain(message.from_address)):
+                session.add(_reply_row(message, None))
+                bulk += 1
+                continue
+
             try:
                 verdict = asyncio.run(
                     classify_reply(message.subject, message.from_address, message.body)
@@ -657,23 +699,25 @@ def check_replies(
                 typer.secho(f"  {message.subject[:40]}: ERROR {exc}", fg=typer.colors.RED)
                 continue
 
-            session.add(
-                Reply(
-                    application_id=matched.id if matched else None,
-                    gmail_message_id=message.gmail_message_id,
-                    thread_id=message.thread_id or None,
-                    from_address=message.from_address,
-                    subject=message.subject,
-                    body=message.body,
-                    received_at=message.received_at,
-                    reply_type=verdict.reply_type,
-                    confidence=verdict.confidence,
-                    reasoning=verdict.reasoning,
-                )
-            )
+            row = _reply_row(message, match.application if match else None)
+            row.reply_type = verdict.reply_type
+            row.confidence = verdict.confidence
+            row.reasoning = verdict.reasoning
+            session.add(row)
 
-            if matched is None:
+            if match is None:
                 unmatched += 1
+                continue
+
+            # The thread of a conversation we are now sure about. Learned from the incoming
+            # side, which is the only side a web-form application has: pass 1 finds nothing
+            # for those, and without this the answer that follows an acknowledgement would be
+            # matched from scratch, on whatever the company happened to put in the subject.
+            if message.thread_id and match.application.thread_id is None:
+                match.application.thread_id = message.thread_id
+
+            if not match.conclusive:
+                weak += 1
                 continue
             if verdict.confidence < settings.reply_confidence_threshold:
                 uncertain += 1
@@ -681,21 +725,24 @@ def check_replies(
             if verdict.reply_type is ReplyType.NO_REPLY:
                 continue  # an auto-acknowledgement is not an answer; leave the status alone
 
-            matched.reply_type = verdict.reply_type
-            matched.reply_at = message.received_at
-            matched.status = (
+            application = match.application
+            application.reply_type = verdict.reply_type
+            application.reply_at = message.received_at
+            application.status = (
                 ApplicationStatus.INTERVIEW
                 if verdict.reply_type is ReplyType.INTERVIEW
                 else ApplicationStatus.REJECTED
             )
             applied += 1
             typer.echo(
-                f"  {verdict.reply_type.value}: {matched.job.company} ({verdict.confidence:.2f})"
+                f"  {verdict.reply_type.value}: {application.job.company} "
+                f"({verdict.confidence:.2f}, by {match.strategy})"
             )
 
         typer.secho(
             f"check-replies: {len(fresh)} new, {applied} applied, {uncertain} below threshold, "
-            f"{unmatched} unmatched, {linked} threads linked",
+            f"{weak} linked without a status, {unmatched} unmatched, {bulk} board alerts "
+            f"unclassified, {linked} threads linked",
             fg=typer.colors.GREEN,
         )
         if unmatched or uncertain:
