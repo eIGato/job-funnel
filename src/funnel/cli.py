@@ -14,6 +14,7 @@ from funnel.db import session_scope
 from funnel.models import Job, Source
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     from sqlalchemy import ColumnElement, Select
@@ -205,6 +206,71 @@ def _reply_row(message: IncomingMessage, application: Application | None) -> Rep
         body=message.body,
         received_at=message.received_at,
     )
+
+
+def _apply_verdict(application: Application, reply: Reply) -> bool:
+    """Move an application to what its reply says, if the reply is sure enough to say it.
+
+    The one place a classification becomes a status, so the live scan and the re-match below
+    cannot drift apart. An acknowledgement (`NO_REPLY`) is not an answer and changes nothing.
+    """
+    from funnel.models import ApplicationStatus, ReplyType
+
+    settings = get_settings()
+    if reply.reply_type is None or reply.confidence is None:
+        return False
+    if reply.confidence < settings.reply_confidence_threshold:
+        return False
+    if reply.reply_type is ReplyType.NO_REPLY:
+        return False
+
+    application.reply_type = reply.reply_type
+    application.reply_at = reply.received_at
+    application.status = (
+        ApplicationStatus.INTERVIEW
+        if reply.reply_type is ReplyType.INTERVIEW
+        else ApplicationStatus.REJECTED
+    )
+    return True
+
+
+def _relink_stored(session: Session, applications: Sequence[Application]) -> tuple[int, int]:
+    """Re-match every stored reply that never found an application. No mail, no model call.
+
+    Matching is pure and free, so it is re-run over the whole table rather than only over new
+    mail — the same reasoning as `match` rescoring every posting. A change to the rules, or an
+    application that only exists now (the admin turns an orphan acknowledgement into one), then
+    lands on the backlog by itself instead of applying to future mail only. That failure mode
+    has shipped twice in this pipeline already.
+
+    Returns (newly linked, statuses moved).
+    """
+    from funnel.models import Reply
+    from funnel.replies.inbox import IncomingMessage
+    from funnel.replies.match import match_reply
+
+    linked = applied = 0
+    orphans = session.scalars(select(Reply).where(Reply.application_id.is_(None))).all()
+    for reply in orphans:
+        message = IncomingMessage(
+            gmail_message_id=reply.gmail_message_id,
+            thread_id=reply.thread_id or "",
+            from_address=reply.from_address,
+            subject=reply.subject,
+            body=reply.body,
+            received_at=reply.received_at,
+        )
+        match = match_reply(message, applications)
+        if match is None:
+            continue
+
+        reply.application_id = match.application.id
+        linked += 1
+        if match.conclusive:
+            if reply.thread_id and match.application.thread_id is None:
+                match.application.thread_id = reply.thread_id
+            applied += _apply_verdict(match.application, reply)
+    return linked, applied
 
 
 def _persist(session: Session, source: Source, fetched: list[NormalizedJob]) -> int:
@@ -626,9 +692,7 @@ def check_replies(
     from funnel.models import (
         REPLYABLE_STATUSES,
         Application,
-        ApplicationStatus,
         Reply,
-        ReplyType,
     )
     from funnel.replies.classify import classify_reply
     from funnel.replies.inbox import build_service, fetch_recent, find_sent_thread
@@ -722,31 +786,50 @@ def check_replies(
             if verdict.confidence < settings.reply_confidence_threshold:
                 uncertain += 1
                 continue
-            if verdict.reply_type is ReplyType.NO_REPLY:
-                continue  # an auto-acknowledgement is not an answer; leave the status alone
+            if _apply_verdict(match.application, row):
+                applied += 1
+                typer.echo(
+                    f"  {verdict.reply_type.value}: {match.application.job.company} "
+                    f"({verdict.confidence:.2f}, by {match.strategy})"
+                )
 
-            application = match.application
-            application.reply_type = verdict.reply_type
-            application.reply_at = message.received_at
-            application.status = (
-                ApplicationStatus.INTERVIEW
-                if verdict.reply_type is ReplyType.INTERVIEW
-                else ApplicationStatus.REJECTED
-            )
-            applied += 1
-            typer.echo(
-                f"  {verdict.reply_type.value}: {application.job.company} "
-                f"({verdict.confidence:.2f}, by {match.strategy})"
-            )
+        # 4. And the backlog: replies that found nothing when they arrived, re-matched against
+        #    the applications (and the threads) that exist now. Free, so it runs every time.
+        relinked, relinked_applied = _relink_stored(session, sent)
 
         typer.secho(
-            f"check-replies: {len(fresh)} new, {applied} applied, {uncertain} below threshold, "
-            f"{weak} linked without a status, {unmatched} unmatched, {bulk} board alerts "
-            f"unclassified, {linked} threads linked",
+            f"check-replies: {len(fresh)} new, {applied + relinked_applied} applied, "
+            f"{uncertain} below threshold, {weak} linked without a status, {unmatched} "
+            f"unmatched, {bulk} board alerts unclassified, {linked} threads linked, "
+            f"{relinked} stored replies relinked",
             fg=typer.colors.GREEN,
         )
         if unmatched or uncertain:
             typer.echo("  Review them in the admin under Replies (unmatched have no Application).")
+
+
+@app.command(name="relink-replies")
+def relink_replies() -> None:
+    """Re-match stored replies against today's applications. Touches no mail and no model.
+
+    The same pass `check-replies` ends with, on its own so it can be run after a matching rule
+    changes or after an orphan reply is turned into an application, without waiting for the
+    next scan and without a Gmail token.
+    """
+    from funnel.models import REPLYABLE_STATUSES, Application
+
+    with session_scope() as session:
+        applications = list(
+            session.scalars(
+                select(Application).where(Application.status.in_(REPLYABLE_STATUSES))
+            ).all()
+        )
+        linked, applied = _relink_stored(session, applications)
+
+    typer.secho(
+        f"relink-replies: {linked} replies linked, {applied} statuses moved",
+        fg=typer.colors.GREEN,
+    )
 
 
 @app.command(name="run-funnel")
