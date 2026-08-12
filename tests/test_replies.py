@@ -480,3 +480,21 @@ def test_a_second_acknowledgement_reuses_the_row_it_already_made() -> None:
 
     assert application is existing
     assert session.added == []
+
+
+def test_an_existing_posting_is_reused_rather_than_duplicated() -> None:
+    """The funnel often already has the posting; the application belongs on that row.
+
+    Two of the eleven employers named across this mailbox's unmatched replies already had a
+    Job here (2026-08-12), so a manual-source-only lookup would have minted a twin the first
+    time the button was pressed.
+    """
+    source = Source(id=5, name=MANUAL_SOURCE, kind=SourceKind.API, enabled=False)
+    from_a_board = Job(id=6, source_id=99, company="Moon Active", title="Backend Engineer", url="")
+    session = _FakeSession(source, from_a_board, None)
+
+    application = record_as_application(session, _orphan_reply())  # type: ignore[arg-type]
+
+    assert application is not None
+    assert application.job_id == 6, "a stub was created beside the posting we already had"
+    assert not [row for row in session.added if isinstance(row, Job)]

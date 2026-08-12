@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from funnel.config import get_settings
 from funnel.models import Application, ApplicationStatus, Job, Reply, ReplyType, Source, SourceKind
@@ -139,8 +139,12 @@ def record_as_application(session: Session, reply: Reply) -> Application | None:
     - **`sent_at` is when the acknowledgement arrived**, which is the closest honest bound on
       when the letter went out — never a fabricated exact time (see CLAUDE.md on invented
       timestamps). The human corrects it in the admin if they know better.
-    - **The same employer and role reuse their row**, so two acknowledgements from one company
-      do not collide on `content_hash` or mint two applications.
+    - **The same employer and role reuse their row**, whatever source it came from, so two
+      acknowledgements from one company do not collide on `content_hash` or mint two
+      applications — and an application the funnel already knows about is not duplicated by a
+      stub. An Application that already exists on that row is left exactly as it is: the human
+      pressing this button is recording that a letter went out, which is not enough to
+      overwrite a status and a `sent_at` somebody already set.
 
     Returns the application, or None when the reply cannot become one.
     """
@@ -153,12 +157,18 @@ def record_as_application(session: Session, reply: Reply) -> Application | None:
     title = (reply.detected_role or "").strip() or "(role not stated)"
     source = _manual_source(session)
 
+    # Any source, not just `manual`: the funnel often already has the posting the human applied
+    # to through a board, and the application belongs on that row rather than on a stub beside
+    # it. Measured 2026-08-12 — of the 11 employers the classifier named across the unmatched
+    # replies, two (Toptal, Source Group International) already had a row here, so the
+    # manual-only lookup would have minted a twin on the button's very first use.
     job = session.scalar(
-        select(Job).where(
-            Job.source_id == source.id,
-            Job.company == company,
-            Job.title == title,
+        select(Job)
+        .where(
+            func.lower(func.trim(Job.company)) == company.casefold(),
+            func.lower(func.trim(Job.title)) == title.casefold(),
         )
+        .order_by((Job.source_id != source.id).asc(), Job.id.asc())
     )
     if job is None:
         job = Job(
