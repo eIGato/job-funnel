@@ -212,6 +212,22 @@ docker compose run --rm --build app uv run funnel run-funnel
   parser could be written against. Keep those three limits together — the hook exists so the
   pipeline can have an irreversible source-side side effect without the pipeline knowing
   which source it is.
+- **A board is an address, not a domain.** A board that mails alerts also mails the human about
+  a specific application, from a different address on the same domain — so the three places that
+  say "this sender is bulk" name the alert address wherever one exists: the `gmail-alerts` query
+  in `seeds.py` (which is what `GMAIL_TRASH_PARSED_ALERTS` may Trash), the exclusion in
+  `inbox.fetch_recent`, and `_BOARD_DOMAINS` in `replies/match.py`. Habr Career is the measured
+  case (2026-08-13): `subscribe@career.habr.com` sent 29 digests in a year, `noreply@` sent 4
+  "you applied to X at Y" receipts naming a company and linking the posting. The whole-domain
+  reading cost all three ways at once — the receipts were inside the Trash query (held out only
+  by the parser returning nothing on them, which is resting a deletion on the wrong thing),
+  excluded from `check-replies` outright, and unmatchable even so. All four answered an
+  application already stored as `sent`, within two minutes of `sent_at`. **hh.ru cannot be split
+  this way** — alerts and receipts share `noreply@hh.ru` — so it stays a whole domain, which is
+  why the rule is "wherever one exists" and not a blanket ban on domains. In `match.py` the
+  split is an exception list (`_BOARD_ADDRESS_EXCEPTIONS`) rather than a promotion of the alert
+  address, so an address the board invents next is still treated as bulk: a missed match costs a
+  human glance, a wrong one stamps a rejection onto the wrong application.
 - **A reply is correlated on words, and a weak match never moves a status.**
   `replies/match.py` compares whole words (folded for diacritics, legal forms dropped), not
   slugs inside a run-together string: `profil` sits inside "profile" and matched a Toptal

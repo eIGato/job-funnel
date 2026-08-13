@@ -116,6 +116,20 @@ _BOARD_DOMAINS = frozenset(
     }
 )
 
+#: Addresses on a board domain that are **not** bulk mail. A board that sends alerts also sends
+#: the human personally, and the personal one is exactly the acknowledgement this module exists
+#: to catch: Habr Career mails subscription digests from `subscribe@career.habr.com` and
+#: per-application receipts ("you applied to <role> at <company>") from
+#: `noreply@career.habr.com` — 4 in a year as of 2026-08-13, every one of them answering an
+#: application already on record as `sent`.
+#:
+#: An exception list rather than moving the alert address into `_BOARD_DOMAINS`: the domain
+#: entry keeps catching whatever `career.habr.com` starts mailing next, and an unknown new
+#: sender is better treated as bulk. That is the direction this module errs everywhere — a
+#: missed match costs a human glance, a wrong match stamps a rejection onto the wrong
+#: application. Listing `subscribe@` as the only board would have inverted it.
+_BOARD_ADDRESS_EXCEPTIONS = frozenset({"noreply@career.habr.com"})
+
 #: Dropped before comparing a company name to a domain — they are legal or generic noise that
 #: never shows up in the domain ("Acme Technologies Ltd" mails from acme.com).
 _COMPANY_NOISE = frozenset(
@@ -232,6 +246,12 @@ def sender_domain(address: str) -> str:
     return found.group(1).lower() if found else ""
 
 
+def sender_mailbox(address: str) -> str:
+    """The whole `local@domain` out of a From header, for the rules a domain cannot express."""
+    found = _ADDRESS.search(address)
+    return found.group(0).lower() if found else ""
+
+
 #: Enough of the public suffix list to strip 'co.uk'-style tails. Deliberately not a PSL
 #: dependency: an unknown suffix costs a missed match, never a wrong one.
 _SUFFIXES = frozenset({
@@ -316,8 +336,12 @@ def is_generic_sender(domain: str) -> bool:
     return registrable_domain(domain) in _BOARD_LABELS
 
 
-def is_board_sender(domain: str) -> bool:
+def is_board_sender(address: str) -> bool:
     """True when the sender is a job board, i.e. mails alerts rather than answers.
+
+    Takes the whole From header, not just the domain: a board's alert address and its
+    per-application address live on the same domain (`_BOARD_ADDRESS_EXCEPTIONS`), and only
+    the first one is bulk.
 
     Narrower than `is_generic_sender`, which also covers the ATSs — those send the
     acknowledgements this whole module exists to catch.
@@ -327,6 +351,9 @@ def is_board_sender(domain: str) -> bool:
     withholds the classification from it, and why the check runs *after* matching: a board
     relaying an answer to an application we know about is classified like any other reply.
     """
+    if sender_mailbox(address) in _BOARD_ADDRESS_EXCEPTIONS:
+        return False
+    domain = sender_domain(address)
     if registrable_domain(domain) in _BOARD_LABELS:
         return True
     return any(domain == board or domain.endswith(f".{board}") for board in _BOARD_DOMAINS)
@@ -409,7 +436,7 @@ def match_reply(message: IncomingMessage, applications: Sequence[Application]) -
     # its recommendations was matched to the EuroCert application by the body rule below
     # (2026-08-12, dry run). Everything a board relays that is genuinely an answer arrives in
     # a thread, and everything else it sends is an advertisement.
-    if is_board_sender(domain):
+    if is_board_sender(message.from_address):
         return None
 
     # 2. The sender's own domain is the company's. Skipped for ATS and freemail hosts, which

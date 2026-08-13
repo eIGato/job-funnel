@@ -340,6 +340,11 @@ def test_display_name(address: str, expected: str) -> None:
         # A person at a board is still a board sender: the classification is withheld, the row
         # is not, and a message that matched an application is classified before we get here.
         ("pykarpenko@avito.ru", True),
+        # Habr Career mails from two addresses and only one of them is bulk. The digest is a
+        # board; the per-application acknowledgement is the thing we are here to catch.
+        ("subscribe@career.habr.com", True),
+        ("noreply@career.habr.com", False),
+        ("Хабр Карьера <noreply@career.habr.com>", False),  # noqa: RUF001 (Cyrillic is the data)
         # The ATSs must never be skipped — they carry the acknowledgements.
         ("no-reply@us.greenhouse-mail.io", False),
         ("no-reply@ashbyhq.com", False),
@@ -347,7 +352,54 @@ def test_display_name(address: str, expected: str) -> None:
     ],
 )
 def test_is_board_sender(sender: str, is_board: bool) -> None:
-    assert is_board_sender(sender_domain(sender)) is is_board
+    assert is_board_sender(sender) is is_board
+
+
+def test_a_habr_acknowledgement_reaches_its_application() -> None:
+    """The regression the address split exists for (measured 2026-08-13).
+
+    Habr Career sends a per-application receipt from `noreply@` minutes after the human applies
+    through the web form — so there is no thread and no Sent mail, and the company name in the
+    body is the only handle. All four such emails in a year answered an application already
+    stored as `sent`. Treating the whole domain as a board refused every one of them.
+
+    Text is verbatim from the real message: this rule only ever fires on Russian mail.
+    """
+    apps = [_application("Raft Digital Solutions", app_id=167, title="AI архитектор")]
+    message = _message(
+        sender="Хабр Карьера <noreply@career.habr.com>",  # noqa: RUF001
+        subject="Вы откликнулись на вакансию AI архитектор на Хабр Карьере",  # noqa: RUF001
+        body=(
+            "Здравствуйте, Evgenii! Вы откликнулись на вакансию AI архитектор "
+            "(https://career.habr.com/vacancies/1000166542) компании Raft Digital Solutions "
+            "(https://career.habr.com/companies/raft)."
+        ),
+    )
+    assert _matched(message, apps) is apps[0]
+
+
+def test_a_habr_digest_is_still_refused() -> None:
+    """The other half: the subscription digest lists companies by the dozen and matches none."""
+    apps = [_application("Raft Digital Solutions", app_id=167)]
+    message = _message(
+        sender="Хабр Карьера <subscribe@career.habr.com>",  # noqa: RUF001
+        subject="Новые вакансии по вашей подписке «job-funnel» на Хабр Карьере",  # noqa: RUF001
+        body="Backend Developer, Raft Digital Solutions. Tech Lead Python, Acme.",
+    )
+    assert _matched(message, apps) is None
+
+
+def test_the_alert_query_names_habrs_alert_address_not_its_domain() -> None:
+    """What this query matches is what `GMAIL_TRASH_PARSED_ALERTS` may put in the Trash.
+
+    Widening it back to the domain would put Habr's per-application acknowledgements within
+    reach of the Trash again, held out only by the parser happening to return nothing on them.
+    """
+    from funnel.seeds import DEFAULT_SOURCES
+
+    query = next(s for s in DEFAULT_SOURCES if s.name == "gmail-alerts").config["query"]
+    assert "from:subscribe@career.habr.com" in query
+    assert "from:career.habr.com" not in query
 
 
 def test_a_run_together_company_name_matches_its_written_out_form() -> None:

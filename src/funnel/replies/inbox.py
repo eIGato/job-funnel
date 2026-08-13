@@ -114,10 +114,17 @@ def fetch_recent(service: Any, *, days: int, max_results: int = 100) -> list[Inc
 
     `-category:promotions` and the alert senders are dropped because job-board alerts arrive in
     the same mailbox and would otherwise be classified as replies to applications.
+
+    The exclusion names the **alert address** where a board has a separate one, because a board
+    that mails alerts also mails the human personally. Excluding all of `career.habr.com` threw
+    away the four "Вы откликнулись на вакансию X" acknowledgements Habr sent in a year — every
+    one of them naming a company and answering an application already in the database as `sent`
+    (measured 2026-08-13; the acknowledgement arrived within two minutes of `sent_at`). hh.ru
+    mails alerts and acknowledgements from the same `noreply@hh.ru` and cannot be split.
     """
     query = (
         f"newer_than:{days}d in:inbox -category:promotions "
-        "-from:linkedin.com -from:hh.ru -from:career.habr.com "
+        "-from:linkedin.com -from:hh.ru -from:subscribe@career.habr.com "
         "-from:wellfound.com -from:glassdoor.com -from:indeed.com "
         "-from:landing.jobs"
     )

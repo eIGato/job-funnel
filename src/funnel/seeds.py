@@ -88,13 +88,22 @@ DEFAULT_SOURCES: list[SourceConfig] = [
     # Landing.Jobs; add senders here as more boards come online. Left disabled by default —
     # enable in the admin once a real alert has landed in the mailbox, so a first run has
     # something to read.
+    #
+    # **Name the alert address, not the whole domain, wherever the board has one.** A board
+    # that mails alerts also mails the human personally, and this query decides what
+    # `GMAIL_TRASH_PARSED_ALERTS` is allowed to touch. Habr Career is the measured case
+    # (2026-08-13): `subscribe@` sent 29 subscription digests in a year and `noreply@` sent 4
+    # "Вы откликнулись на вакансию X" acknowledgements, each naming a company and linking the
+    # posting. Only the parser returning nothing on those kept them out of the Trash, and
+    # resting that on a parser is resting it on the wrong thing. hh.ru mails both from
+    # `noreply@hh.ru`, so it cannot be split this way and stays a whole domain.
     SourceConfig(
         name="gmail-alerts",
         kind=SourceKind.GMAIL,
         enabled=False,
         config={
             "query": (
-                "newer_than:7d (from:hh.ru OR from:career.habr.com "
+                "newer_than:7d (from:hh.ru OR from:subscribe@career.habr.com "
                 "OR from:jobalerts-noreply@linkedin.com "
                 "OR from:wellfound.com OR from:glassdoor.com "
                 "OR from:jobalert.indeed.com OR from:landing.jobs)"

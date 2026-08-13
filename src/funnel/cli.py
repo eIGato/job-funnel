@@ -631,7 +631,7 @@ def check_replies(
     from funnel.replies.classify import classify_reply
     from funnel.replies.inbox import build_service, fetch_recent, find_sent_thread
     from funnel.replies.link import link, relink_stored
-    from funnel.replies.match import is_board_sender, match_reply, sender_domain
+    from funnel.replies.match import is_board_sender, match_reply
 
     settings = get_settings()
     if not (settings.llm_api_key and settings.llm_api_key.get_secret_value()):
@@ -685,7 +685,7 @@ def check_replies(
         for message in fresh:
             match = match_reply(message, sent)
 
-            if match is None and is_board_sender(sender_domain(message.from_address)):
+            if match is None and is_board_sender(message.from_address):
                 session.add(_reply_row(message, None))
                 bulk += 1
                 continue

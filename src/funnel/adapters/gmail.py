@@ -629,9 +629,12 @@ class GmailAlertsAdapter(BaseAdapter):
 
     Expected config keys (Source.config JSONB):
       query: str, a Gmail search query spanning every board that emails alerts, e.g.
-             'newer_than:2d (from:hh.ru OR from:career.habr.com OR from:linkedin.com
-              OR from:wellfound.com OR from:glassdoor.com OR from:indeed.com
-              OR from:landing.jobs)'
+             'newer_than:2d (from:hh.ru OR from:subscribe@career.habr.com
+              OR from:jobalerts-noreply@linkedin.com OR from:wellfound.com
+              OR from:glassdoor.com OR from:jobalert.indeed.com OR from:landing.jobs)'
+             Name the board's alert address wherever it has one: whatever this query
+             matches is what `on_committed` may put in the Trash, and a board's other
+             addresses write to the human about specific applications (see `seeds.py`).
       max_results: int, cap on messages pulled per run.
     """
 
