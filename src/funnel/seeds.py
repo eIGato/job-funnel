@@ -84,10 +84,10 @@ DEFAULT_SOURCES: list[SourceConfig] = [
     SourceConfig(name="recruitee", kind=SourceKind.API, config={}),
     SourceConfig(name="smartrecruiters", kind=SourceKind.API, config={}),
     # The token is already in place (`funnel auth-gmail`); the query spans every board that
-    # emails alerts. Parsers exist for hh, Habr, LinkedIn, Wellfound, Glassdoor, Indeed and
-    # Landing.Jobs; add senders here as more boards come online. Left disabled by default —
-    # enable in the admin once a real alert has landed in the mailbox, so a first run has
-    # something to read.
+    # emails alerts. Parsers exist for hh, Habr, LinkedIn, Wellfound, Glassdoor, Indeed,
+    # Landing.Jobs, justjoin.it, pracuj.pl and getmatch.ru; add senders here as more boards come
+    # online. Left disabled by default — enable in the admin once a real alert has landed in the
+    # mailbox, so a first run has something to read.
     #
     # **Name the alert address, not the whole domain, wherever the board has one.** A board
     # that mails alerts also mails the human personally, and this query decides what
@@ -97,6 +97,15 @@ DEFAULT_SOURCES: list[SourceConfig] = [
     # posting. Only the parser returning nothing on those kept them out of the Trash, and
     # resting that on a parser is resting it on the wrong thing. hh.ru mails both from
     # `noreply@hh.ru`, so it cannot be split this way and stays a whole domain.
+    #
+    # **justjoin.it needs a third split: by subject.** `no-reply@justjoin.it` sends both the
+    # daily "New jobs for you" alert and the "You applied for X" receipt, and unlike hh's the
+    # receipt is *not* harmless to parse — it carries a "similar offers" block in the identical
+    # card markup, so the parser reads five postings out of it and the message becomes
+    # trash-eligible. Three such receipts were in the mailbox on 2026-08-17 and the exclusion
+    # holds all three out. If justjoin rewords the subject the failure is one lost receipt in
+    # Trash, recoverable for 30 days; the alternative — dropping the address — costs 20 alerts a
+    # month, since `jobs@hello.justjoin.it` mails a different, Polish-language selection.
     SourceConfig(
         name="gmail-alerts",
         kind=SourceKind.GMAIL,
@@ -106,7 +115,10 @@ DEFAULT_SOURCES: list[SourceConfig] = [
                 "newer_than:7d (from:hh.ru OR from:subscribe@career.habr.com "
                 "OR from:jobalerts-noreply@linkedin.com "
                 "OR from:wellfound.com OR from:glassdoor.com "
-                "OR from:jobalert.indeed.com OR from:landing.jobs)"
+                "OR from:jobalert.indeed.com OR from:landing.jobs "
+                "OR from:jobs@hello.justjoin.it "
+                'OR (from:no-reply@justjoin.it -subject:"You applied for") '
+                "OR from:rekomendacje@wysylka.pracuj.pl OR from:gmate@getmatch.ru)"
             ),
             "max_results": 100,
         },

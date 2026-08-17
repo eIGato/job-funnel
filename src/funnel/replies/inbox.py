@@ -121,12 +121,17 @@ def fetch_recent(service: Any, *, days: int, max_results: int = 100) -> list[Inc
     one of them naming a company and answering an application already in the database as `sent`
     (measured 2026-08-13; the acknowledgement arrived within two minutes of `sent_at`). hh.ru
     mails alerts and acknowledgements from the same `noreply@hh.ru` and cannot be split.
+
+    `no-reply@justjoin.it` is the same case as hh and is deliberately **not** excluded: it sends
+    the daily alert *and* the "You applied for X" receipt, and the receipt is worth a
+    classification. Its sibling `jobs@hello.justjoin.it` only ever digests, so that one is out.
     """
     query = (
         f"newer_than:{days}d in:inbox -category:promotions "
         "-from:linkedin.com -from:hh.ru -from:subscribe@career.habr.com "
         "-from:wellfound.com -from:glassdoor.com -from:indeed.com "
-        "-from:landing.jobs"
+        "-from:landing.jobs -from:jobs@hello.justjoin.it "
+        "-from:rekomendacje@wysylka.pracuj.pl -from:gmate@getmatch.ru"
     )
     return [parse_message(payload) for payload in _iter_messages(service, query, max_results)]
 

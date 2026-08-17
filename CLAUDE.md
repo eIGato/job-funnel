@@ -227,7 +227,28 @@ docker compose run --rm --build app uv run funnel run-funnel
   why the rule is "wherever one exists" and not a blanket ban on domains. In `match.py` the
   split is an exception list (`_BOARD_ADDRESS_EXCEPTIONS`) rather than a promotion of the alert
   address, so an address the board invents next is still treated as bulk: a missed match costs a
-  human glance, a wrong one stamps a rejection onto the wrong application.
+  human glance, a wrong one stamps a rejection onto the wrong application. pracuj.pl is the same
+  shape (`rekomendacje@wysylka.` vs `noreply@aplikacje.`, added 2026-08-17). **justjoin.it needs
+  a third split, by subject**, and it is the weakest one: `no-reply@justjoin.it` sends both the
+  alert and the "You applied for X" receipt, and unlike hh's the receipt is *not* harmless to
+  parse — it carries a "similar offers" block in the identical card markup, so the parser reads
+  five postings out of it and the message becomes trash-eligible. The `-subject:"You applied
+  for"` term lives in the **query**, never in the parser: a parser that judged what kind of mail
+  it was reading would be back to keying on a subject line, which is the one thing these parsers
+  never do. `tests/test_gmail_adapter.py` pins that down by asserting the parser *does* read the
+  receipt.
+- **No stable id in the link, no parser.** A mailbox sweep on 2026-08-17 found ten recurring
+  bulk senders the funnel was not reading. Three got parsers — justjoin.it (26 mails/mo),
+  pracuj.pl (37) and getmatch.ru (4), together **259 distinct postings from 158 companies out of
+  one week of mail**, none of them present under any other source. Five did not: Reed, Totaljobs,
+  24recruitment, `match.indeed.com` and spelljob wrap every posting in a per-recipient redirect
+  (`clicks.reed.co.uk/f/a/…`, `cts.indeed.com/v3/<blob>`) with no id anywhere and no plain-text
+  alternative carrying one, so each alert would mint a fresh row and a fresh cover letter — the
+  Adzuna `se=` bug again. Resolving the redirect means an HTTP call per posting inside the alert
+  parser; the one Reed link tried landed on a 404 under "Appcast Enterprise", an ad network. The
+  tenth, Adzuna's own alerts, *has* a stable id and is still skipped: `adzuna.com` is in
+  `BLOCKED_HOSTS` and Adzuna is already an API source. Reasons are in the `adapters/gmail.py`
+  docstring so the next sweep does not re-derive them.
 - **A reply is correlated on words, and a weak match never moves a status.**
   `replies/match.py` compares whole words (folded for diacritics, legal forms dropped), not
   slugs inside a run-together string: `profil` sits inside "profile" and matched a Toptal

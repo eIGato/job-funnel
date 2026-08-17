@@ -149,8 +149,113 @@ def test_landing_jobs_decodes_the_click_redirect_and_splits_title_from_company()
     assert all("/at/" in str(job.url) for job in jobs)
 
 
+def test_justjoin_counts_the_card_in_from_both_ends_in_either_language() -> None:
+    # justjoin mails the identical card layout in English (no-reply@) and in Polish
+    # (jobs@hello.), so the fields are taken by position: head company/city/title, tail work
+    # mode/contract/seniority/days/apply. The salary line between them is optional, which is
+    # what counting from both ends absorbs.
+    jobs = _jobs("justjoin")
+    assert len(jobs) == 3  # the banner and the "Show job offers" / unsubscribe links are not cards
+    first = jobs[0]
+    assert first.company == "Acme Robotics"
+    assert first.title == "Senior Python Engineer"
+    assert first.location == "Warszawa"
+    assert first.is_remote is True  # the "Remote" chip, not the title
+    # The stored URL drops the tracking query — justjoin concatenates two of them onto one href.
+    assert str(first.url) == (
+        "https://justjoin.it/job-offer/acme-robotics-senior-python-engineer-warszawa-python"
+    )
+    assert first.external_id == "acme-robotics-senior-python-engineer-warszawa-python"
+    # Polish card: "Praca hybrydowa" is not remote, and the localized labels are never read.
+    assert jobs[1].company == "Globex Systems"
+    assert jobs[1].location == "Kraków"
+    assert jobs[1].is_remote is False
+    # A card with no salary line is one shorter; the tail still lands on the work mode.
+    assert jobs[2].company == "Initech"
+    assert jobs[2].is_remote is True  # "Praca w pełni zdalna"
+
+
+def test_pracuj_groups_anchors_by_offer_id_and_recovers_the_city() -> None:
+    # A pracuj card is several anchors on the *same* offer link: title, an optional pay line,
+    # then the employer. The city is in neither — it is appended to the company name in the
+    # rendered text and subtracted back off here.
+    jobs = _jobs("pracuj")
+    assert len(jobs) == 3
+    first = jobs[0]
+    assert first.title == "Senior Python Engineer"  # the "!" badge chip was stripped
+    assert first.company == "Acme Robotics"  # not the pay line above it
+    assert first.location == "Warszawa"
+    assert str(first.url) == (
+        "https://pracuj.pl/praca/senior-python-engineer-warszawa,oferta,1004994023"
+    )
+    assert first.external_id == "1004994023"
+    # A card with no pay anchor at all: the employer is still the last text.
+    assert jobs[1].company == "Globex | Elavon"
+    assert jobs[1].location == "Warszawa (Mokotów)"
+    # Same employer twice in one mail: the second card takes its *own* line, not the first's.
+    assert jobs[2].company == "Acme Robotics"
+    assert jobs[2].location == "Kraków"
+    assert jobs[2].is_remote is True  # nothing but the title says so; the alert has no work mode
+
+
+def test_getmatch_stops_each_card_at_its_cell_so_the_footer_is_not_a_location() -> None:
+    # The place is the card's last line, so the card regex is bounded on </td>: unbounded, the
+    # digest's last posting would take "Отписаться" out of the footer as its location.
+    jobs = _jobs("getmatch")
+    assert len(jobs) == 3
+    first = jobs[0]
+    assert first.company == "Nimbus Labs"  # the anti-autolink zero-width joiner was dropped
+    assert first.title == "Head of Platform [Remote]"
+    assert first.location == "Remote work"  # the leading emoji marker was stripped
+    assert first.is_remote is True
+    assert str(first.url) == "https://getmatch.ru/vacancies/35779-head-of-platform"
+    assert first.external_id == "35779"
+    # A pay line above the place becomes the description; the place is still the last line.
+    assert jobs[1].description.startswith("от 365 000")
+    assert jobs[1].location == "Полная удалёнка из Москва"
+    # The last card of the digest: the footer that follows it is outside its cell.
+    assert jobs[2].location == "Офис или гибрид"
+    assert jobs[2].is_remote is False
+
+
+def test_a_justjoin_application_receipt_is_indistinguishable_to_the_parser() -> None:
+    """The receipt is held out by the Gmail query, never by the parser — this pins down why.
+
+    `no-reply@justjoin.it` sends both the daily alert and the "You applied for X" receipt, and
+    the receipt carries a "similar offers" block in the identical card markup. So the parser
+    reads postings out of it and the message would become trash-eligible; the exclusion has to
+    live in the source query (`seeds.py`), and this test fails the day someone tries to move it
+    into the parser instead.
+    """
+    html = (FIXTURES / "justjoin.eml").read_text(encoding="utf-8").split("\n\n", 1)[1]
+    receipt = "<p>Your application has been sent!</p>" + html
+    assert len(parse_message("no-reply@justjoin.it", receipt)) == 3
+
+
+def test_pracuj_is_keyed_on_the_alert_host_not_the_domain() -> None:
+    """`noreply@aplikacje.pracuj.pl` mails per-application news with a card block under it.
+
+    Parsing that on the domain would turn one acknowledgement into a dozen postings and — with
+    `GMAIL_TRASH_PARSED_ALERTS` on — Trash it. Only `wysylka.pracuj.pl` is an alert host.
+    """
+    html = (FIXTURES / "pracuj.eml").read_text(encoding="utf-8").split("\n\n", 1)[1]
+    assert len(parse_message("rekomendacje@wysylka.pracuj.pl", html)) == 3
+    assert parse_message("noreply@aplikacje.pracuj.pl", html) == []
+
+
 def test_content_hashes_are_distinct_within_a_message() -> None:
-    for name in ("hh", "habr", "linkedin", "wellfound", "glassdoor", "indeed", "landing.jobs"):
+    for name in (
+        "hh",
+        "habr",
+        "linkedin",
+        "wellfound",
+        "glassdoor",
+        "indeed",
+        "landing.jobs",
+        "justjoin",
+        "pracuj",
+        "getmatch",
+    ):
         jobs = _jobs(name)
         hashes = [j.content_hash_for(1) for j in jobs]
         assert len(set(hashes)) == len(hashes)

@@ -128,7 +128,13 @@ _BOARD_DOMAINS = frozenset(
 #: sender is better treated as bulk. That is the direction this module errs everywhere — a
 #: missed match costs a human glance, a wrong match stamps a rejection onto the wrong
 #: application. Listing `subscribe@` as the only board would have inverted it.
-_BOARD_ADDRESS_EXCEPTIONS = frozenset({"noreply@career.habr.com"})
+#:
+#: `noreply@aplikacje.pracuj.pl` is the same shape, found in the 2026-08-17 mailbox sweep: the
+#: recommendation mail comes from `rekomendacje@wysylka.pracuj.pl`, while this address sends
+#: "<role>: pracodawca udziela bezpośrednich informacji" — 4 of them, each naming the employer
+#: and the role, one of them answering application 71 (ITDS Polska, sent 2026-08-04). `pracuj`
+#: is in `_BOARD_LABELS`, so without this they were all being written off as bulk.
+_BOARD_ADDRESS_EXCEPTIONS = frozenset({"noreply@career.habr.com", "noreply@aplikacje.pracuj.pl"})
 
 #: Dropped before comparing a company name to a domain — they are legal or generic noise that
 #: never shows up in the domain ("Acme Technologies Ltd" mails from acme.com).

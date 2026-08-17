@@ -10,11 +10,13 @@ never learns which boards these are — that lives here, behind the `gmail-alert
 
 The parsers are deliberately structural, not textual: they key on the job-posting links
 (hh `/vacancy/<id>`, habr `/vacancies/<id>`, LinkedIn `/jobs/view/<id>`, Glassdoor's
-`jobListingId`, Indeed's `jk`) and the card body around them, never on a subject line or a
-greeting. A board's wording changes between the first "your alert has been created" email and
-the later "new jobs" ones; the link shapes and the per-card labels do not. Indeed pushes this
-further: its cards are read by counting in from both ends, because the middle lines are
-localized to whichever country site sent the alert.
+`jobListingId`, Indeed's `jk`, justjoin's `/job-offer/<slug>`, pracuj's `,oferta,<id>`) and the
+card body around them, never on a subject line or a greeting. A board's wording changes between
+the first "your alert has been created" email and the later "new jobs" ones; the link shapes and
+the per-card labels do not. Indeed pushes this further: its cards are read by counting in from
+both ends, because the middle lines are localized to whichever country site sent the alert;
+justjoin needs the same treatment for the same reason, since it mails the identical card layout
+in English from one address and in Polish from another.
 
 Most boards are parsed from the `text/html` part. Wellfound and Indeed are the exceptions and
 read `text/plain`: Wellfound's HTML wraps every posting link in an opaque
@@ -24,9 +26,24 @@ cards carry a snippet the HTML buries in table chrome. So a parser is handed bot
 (`_Alert`) and reads whichever one carries a stable id.
 
 Several boards (Habr, Landing.Jobs) hide the posting URL behind a per-recipient click
-redirect, and Indeed and Glassdoor hang tracking tokens off theirs. In every one of those the
-stored URL is rebuilt from the id alone (`_redirect_target`, or a canonical built from the
-id), so nothing personal to this mailbox ends up in the database.
+redirect, and Indeed, Glassdoor, justjoin, pracuj and getmatch hang tracking tokens off theirs.
+In every one of those the stored URL is rebuilt from the id alone (`_redirect_target`, or a
+canonical built from the id), so nothing personal to this mailbox ends up in the database.
+
+Boards that were surveyed and deliberately have **no** parser (mailbox sweep, 2026-08-17):
+
+- **Reed (23 msgs/yr), Totaljobs (23), 24recruitment (9), Indeed's `match.indeed.com` (8),
+  spelljob (2)** — every posting link is an opaque per-recipient redirect
+  (`clicks.reed.co.uk/f/a/…`, `click.totaljobsmail.com/f/a/…`, `cts.indeed.com/v3/<blob>`) with
+  no id in it anywhere, and no plain-text alternative that carries one. Ingesting them would
+  mint a fresh row and a fresh cover letter on every run, which is the Adzuna `se=` bug
+  (CLAUDE.md, "Dedup at the door"). Resolving the redirect would put a network call per posting
+  inside the alert parser; the one Reed link tried on 2026-08-17 redirected to a 404 under the
+  company name "Appcast Enterprise", an ad network rather than an employer.
+- **Adzuna's own alerts (34)** — `adzuna.com/land/ad/<id>` does carry a stable id, but that host
+  is in `matching/apply_route.BLOCKED_HOSTS` (403 from where the human lives) and Adzuna is
+  already an API source for eight countries. The rows would be duplicates that no shortlist can
+  select.
 """
 
 from __future__ import annotations
@@ -41,7 +58,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from urllib.parse import parse_qs, urlparse
 
 from funnel.adapters.base import BaseAdapter, register
-from funnel.adapters.util import clip, strip_html
+from funnel.adapters.util import clip, looks_remote, strip_html
 from funnel.schemas import NormalizedJob
 
 if TYPE_CHECKING:
@@ -219,6 +236,12 @@ def _anchors(html: str) -> list[tuple[str, str]]:
     collector = _AnchorCollector()
     collector.feed(html)
     return collector.anchors
+
+
+#: The href of an anchor already isolated by a card regex. Used by the boards whose card is one
+#: <a> wrapping the whole posting (Glassdoor, justjoin), where `_anchors` would flatten away the
+#: line structure the parser needs.
+_HREF = re.compile(r'href="([^"]*)"', re.IGNORECASE)
 
 
 def _lines(html: str) -> list[str]:
@@ -469,7 +492,6 @@ def _parse_wellfound(alert: _Alert) -> list[NormalizedJob]:
 
 #: Each Glassdoor posting is one <a> wrapping the whole card; the id rides in the href.
 _GD_ANCHOR = re.compile(r"<a\b[^>]*jobListing\.htm[^>]*>(.*?)</a>", re.DOTALL | re.IGNORECASE)
-_GD_HREF = re.compile(r'href="([^"]*)"', re.IGNORECASE)
 _GD_JID = re.compile(r"jobListingId=(\d+)")
 #: A trailing " 4.2 ★" employer rating hangs off the company name; drop it.
 _GD_RATING = re.compile(r"\s+\d(?:\.\d)?\s*★.*$")
@@ -483,7 +505,7 @@ def _parse_glassdoor(alert: _Alert) -> list[NormalizedJob]:
     """Glassdoor alerts: each posting is a single <a> card of company / title / location lines."""
     jobs: list[NormalizedJob] = []
     for anchor in _GD_ANCHOR.finditer(alert.html):
-        href_match = _GD_HREF.search(anchor.group(0))
+        href_match = _HREF.search(anchor.group(0))
         id_match = _GD_JID.search(href_match.group(1)) if href_match else None
         lines = [line for line in strip_html(anchor.group(1)).splitlines() if line.strip()]
         if id_match is None or len(lines) < 2:
@@ -579,7 +601,181 @@ def _parse_landing_jobs(alert: _Alert) -> list[NormalizedJob]:
     return jobs
 
 
+#: Each justjoin.it posting is one <a> wrapping the whole card, like Glassdoor's.
+_JJ_ANCHOR = re.compile(
+    r"<a\b[^>]*justjoin\.it/job-offer/[^>]*>(.*?)</a>", re.DOTALL | re.IGNORECASE
+)
+#: The slug in the path is the posting's id; everything after `?` is per-recipient tracking
+#: (and justjoin concatenates two query strings onto one href, so the cut matters).
+_JJ_SLUG = re.compile(r"justjoin\.it/job-offer/([^?\"'\s]+)")
+#: Head (company, city, title) plus tail (work mode, contract, seniority, days left, apply).
+#: A card with no salary line has exactly this many; one with a salary has nine.
+_JJ_MIN_LINES = 8
+#: The work-mode chip, in both languages justjoin mails: Remote / Praca w pełni zdalna.
+_JJ_REMOTE = re.compile(r"remote|zdaln", re.IGNORECASE)
+#: Hybrid / Praca hybrydowa. Read off the same chip and decisive against, so a wording like
+#: "praca zdalna hybrydowa" cannot be counted as remote.
+_JJ_HYBRID = re.compile(r"hybr", re.IGNORECASE)
+
+
+def _parse_justjoin(alert: _Alert) -> list[NormalizedJob]:
+    """justjoin.it alerts: a fixed card read in from both ends, past a localized middle.
+
+    Two addresses mail the identical layout — `no-reply@` in English, `jobs@hello.` in Polish —
+    so the fields are taken by position, never by label (the Indeed lesson). Head: company,
+    city, title. Tail: work mode, contract, seniority, days remaining, apply. The salary line
+    between them is present or absent, which is exactly what counting from both ends absorbs.
+    """
+    jobs: list[NormalizedJob] = []
+    seen: set[str] = set()
+    for anchor in _JJ_ANCHOR.finditer(alert.html):
+        href_match = _HREF.search(anchor.group(0))
+        slug_match = _JJ_SLUG.search(href_match.group(1)) if href_match else None
+        lines = [line.strip() for line in strip_html(anchor.group(1)).splitlines() if line.strip()]
+        if slug_match is None or len(lines) < _JJ_MIN_LINES or slug_match.group(1) in seen:
+            continue
+        seen.add(slug_match.group(1))
+        company, location, title = lines[0], lines[1], lines[2]
+        work_mode = lines[-5]
+        if not company or not title:
+            continue
+        jobs.append(
+            NormalizedJob(
+                url=f"https://justjoin.it/job-offer/{slug_match.group(1)}",
+                company=company,
+                title=title,
+                location=location or None,
+                is_remote=bool(_JJ_REMOTE.search(work_mode)) and not _JJ_HYBRID.search(work_mode),
+                external_id=slug_match.group(1),
+            )
+        )
+    return jobs
+
+
+#: A pracuj.pl posting path, `/praca/<slug>,oferta,<id>`. The slug holds no comma, so the group
+#: stops at `,oferta,` on its own and the tracking query after `?` never enters the URL.
+_PRACUJ_OFFER = re.compile(r"pracuj\.pl/praca/([^,\"'\s]+,oferta,\d+)")
+#: The yellow "!" chip pracuj renders *inside* the title anchor, ahead of the title itself.
+_PRACUJ_BADGE = re.compile(r"^!\s+")
+#: A pay line. It sits between the title anchor and the company anchor and carries the same
+#: href as both, so without this it would be read as the employer's name.
+#: The dash is escaped, not typed: pracuj writes the range with an en dash (U+2013) in some
+#: mails and a plain hyphen in others, and the two are indistinguishable in source.
+_PRACUJ_PAY = re.compile("\\d[\\d\\s\\u2013-]*(?:zł|pln|eur|usd)", re.IGNORECASE)
+
+
+def _parse_pracuj(alert: _Alert) -> list[NormalizedJob]:
+    """pracuj.pl recommendation mails: several anchors per card, all on the same offer link.
+
+    There is no card container to key on — a posting is a title anchor, an optional pay anchor
+    and a company anchor, each pointing at the same `,oferta,<id>` URL. So the anchors are
+    grouped by that id in document order: the first text is the title, the last one that is not
+    a pay line is the employer.
+
+    The city is not in any anchor: pracuj appends it to the company name in the rendered text
+    ("Integral Solutions Warszawa"). It is recovered by finding that line and subtracting the
+    company off the front, scanning forward only so two cards from the same employer keep their
+    own line rather than both taking the first.
+    """
+    html = alert.html
+    cards: dict[str, list[str]] = {}
+    for href, text in _anchors(html):
+        match = _PRACUJ_OFFER.search(href)
+        if match and text:
+            cards.setdefault(match.group(1), []).append(text)
+
+    lines = _lines(html)
+    cursor = 0
+    jobs: list[NormalizedJob] = []
+    for path, texts in cards.items():
+        title = _PRACUJ_BADGE.sub("", texts[0]).strip()
+        company = next((t for t in reversed(texts[1:]) if not _PRACUJ_PAY.search(t)), "").strip()
+        if not title or not company:
+            continue
+        location: str | None = None
+        for index in range(cursor, len(lines)):
+            line = lines[index]
+            if line.startswith(company) and len(line) > len(company):
+                location = line[len(company) :].strip() or None
+                cursor = index + 1
+                break
+        jobs.append(
+            NormalizedJob(
+                url=f"https://pracuj.pl/praca/{path}",
+                company=company,
+                title=title,
+                location=location,
+                # The alert states no work mode at all, so this reads the title and the city and
+                # nothing else. False is the safe answer here: an on-site EU posting is kept by
+                # the hard filters either way, it simply ranks below a remote one.
+                is_remote=looks_remote(title, location, ""),
+                external_id=path.rpartition(",")[2],
+            )
+        )
+    return jobs
+
+
+#: One getmatch.ru digest card: the vacancy anchor, " @ ", the company anchor, then the fields
+#: until the cell closes. Bounded on `</td>` on purpose — the digest's last card is followed by
+#: the footer, and an unbounded tail would read "Отписаться" as its location.
+_GM_CARD = re.compile(
+    r"<a\b[^>]*getmatch\.ru/vacancies/(\d+)-([^?\"'\s]*)[^>]*>(.*?)</a>"
+    r"\s*@\s*"
+    r"<a\b[^>]*getmatch\.ru/companies/[^>]*>(.*?)</a>"
+    r"(.*?)</td>",
+    re.DOTALL | re.IGNORECASE,
+)
+#: getmatch prefixes each field line with an emoji. Strip any leading run of non-word, non-space
+#: characters rather than naming the glyph, which is decoration and changes.
+_GM_ICON = re.compile(r"^[^\w\s]+\s*")
+#: getmatch sews a zero-width joiner into a company name that would otherwise auto-link
+#: ("Constructor‍.io"), which is markup, not spelling — and it lands in the dedup key and in
+#: the word comparison `replies/match.py` runs on a company name. Dropped here rather than in
+#: `text.repair_mojibake`, which deliberately leaves zero-width characters in a posting's own
+#: prose alone; this is one board's anti-autolink trick, in the two fields that carry identity.
+_GM_ZERO_WIDTH = re.compile("[\u200b-\u200d\u2060\ufeff]")
+
+
+def _parse_getmatch(alert: _Alert) -> list[NormalizedJob]:
+    """getmatch.ru weekly digests: "<title> @ <company>", then an optional pay line, then place.
+
+    The place line is the card's last, which is why the card regex stops at `</td>`. Most of
+    these postings are Russian ("Полная удалёнка из Москва") and exist to be rejected by the
+    RU/BY location filter — reading the place into `location` is what lets that filter see them
+    at all, instead of a remote-flagged posting with no place attached.
+    """
+    jobs: list[NormalizedJob] = []
+    for card in _GM_CARD.finditer(alert.html):
+        vacancy_id, slug, title_html, company_html, tail = card.groups()
+        title = _GM_ZERO_WIDTH.sub("", strip_html(title_html)).strip()
+        company = _GM_ZERO_WIDTH.sub("", strip_html(company_html)).strip()
+        if not title or not company:
+            continue
+        tail_lines = [line.strip() for line in strip_html(tail).splitlines() if line.strip()]
+        location = _GM_ICON.sub("", tail_lines[-1]).strip() if tail_lines else None
+        description = clip("\n".join(tail_lines[:-1]))
+        jobs.append(
+            NormalizedJob(
+                url=f"https://getmatch.ru/vacancies/{vacancy_id}-{slug}",
+                company=company,
+                title=title,
+                description=description,
+                location=location or None,
+                is_remote=looks_remote(title, location, description),
+                external_id=vacancy_id,
+            )
+        )
+    return jobs
+
+
 #: Sender-domain substring -> parser. First match wins; unknown senders yield nothing.
+#:
+#: `wysylka.pracuj.pl`, not `pracuj.pl`: the receipts from `noreply@aplikacje.pracuj.pl` ("the
+#: employer answers you directly") carry a "more employers waiting for you" block in the very
+#: same card markup, so the domain reading would parse a per-application message into a dozen
+#: postings — and, with `GMAIL_TRASH_PARSED_ALERTS` on, then Trash it. justjoin cannot be split
+#: this way (`no-reply@justjoin.it` sends both the alerts and the "You applied for X" receipts),
+#: so its receipts are held out by the Gmail query instead; see `seeds.py`.
 _PARSERS: tuple[tuple[str, Callable[[_Alert], list[NormalizedJob]]], ...] = (
     ("hh.ru", _parse_hh),
     ("career.habr.com", _parse_habr),
@@ -588,6 +784,9 @@ _PARSERS: tuple[tuple[str, Callable[[_Alert], list[NormalizedJob]]], ...] = (
     ("glassdoor.com", _parse_glassdoor),
     ("indeed.com", _parse_indeed),
     ("landing.jobs", _parse_landing_jobs),
+    ("justjoin.it", _parse_justjoin),
+    ("wysylka.pracuj.pl", _parse_pracuj),
+    ("getmatch.ru", _parse_getmatch),
 )
 
 
