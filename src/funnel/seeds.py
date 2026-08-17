@@ -85,9 +85,18 @@ DEFAULT_SOURCES: list[SourceConfig] = [
     SourceConfig(name="smartrecruiters", kind=SourceKind.API, config={}),
     # The token is already in place (`funnel auth-gmail`); the query spans every board that
     # emails alerts. Parsers exist for hh, Habr, LinkedIn, Wellfound, Glassdoor, Indeed,
-    # Landing.Jobs, justjoin.it, pracuj.pl and getmatch.ru; add senders here as more boards come
-    # online. Left disabled by default — enable in the admin once a real alert has landed in the
+    # Landing.Jobs, justjoin.it and pracuj.pl; add senders here as more boards come online.
+    # Left disabled by default — enable in the admin once a real alert has landed in the
     # mailbox, so a first run has something to read.
+    #
+    # **The window is 30 days, not a week.** With `GMAIL_TRASH_PARSED_ALERTS` on, an alert is
+    # read and Trashed within a run of arriving, so nothing older than a day is ever in scope
+    # and the window costs nothing in the steady state — it is what lets the pipeline catch up
+    # after a parser is added or the flag is turned on. Both happened on 2026-08-17: 247 board
+    # mails were sitting in the inbox, 187 of them older than a week, including 27 pracuj and
+    # justjoin alerts whose postings the funnel had never seen because the parsers did not yet
+    # exist. A 7-day window could never have reached them. `max_results` caps a single run, so
+    # a backlog that size clears over the next few timer ticks rather than in one burst.
     #
     # **Name the alert address, not the whole domain, wherever the board has one.** A board
     # that mails alerts also mails the human personally, and this query decides what
@@ -112,13 +121,36 @@ DEFAULT_SOURCES: list[SourceConfig] = [
         enabled=False,
         config={
             "query": (
-                "newer_than:7d (from:hh.ru OR from:subscribe@career.habr.com "
+                "newer_than:30d (from:hh.ru OR from:subscribe@career.habr.com "
                 "OR from:jobalerts-noreply@linkedin.com "
-                "OR from:wellfound.com OR from:glassdoor.com "
+                "OR from:wellfound.com OR from:noreply@glassdoor.com "
                 "OR from:jobalert.indeed.com OR from:landing.jobs "
                 "OR from:jobs@hello.justjoin.it "
                 'OR (from:no-reply@justjoin.it -subject:"You applied for") '
-                "OR from:rekomendacje@wysylka.pracuj.pl OR from:gmate@getmatch.ru)"
+                "OR from:rekomendacje@wysylka.pracuj.pl)"
+            ),
+            # Mail this funnel has decided it will never read, Trashed unread. Every entry is a
+            # measured "we already have this by another route", never "this looked like spam":
+            #   adzuna.com   - already an API source for eight countries, and the alert host is
+            #                  in BLOCKED_HOSTS (403 from Montenegro), so the rows would be
+            #                  duplicates no shortlist could select. adzuna.nl is marketing.
+            #   weworkremotely - already an RSS source.
+            #   getmatch.ru  - a weekly digest of what the human has already seen in the Telegram
+            #                  bot the same subscription feeds, where applying is one click
+            #                  (human, 2026-08-17). The parser written that morning was removed
+            #                  that afternoon: the postings were real, they were just not new.
+            #   info@glassdoor.com - the marketing address. `noreply@glassdoor.com` is the alert
+            #                  address and is parsed above; this is why both are named as
+            #                  addresses and neither as `glassdoor.com`.
+            # Reed, Totaljobs, 24recruitment, match.indeed.com and spelljob are NOT here. They
+            # have no parser either, but for the opposite reason — no stable id in any link —
+            # and their postings are genuinely new (34 of 47 Totaljobs postings measured were
+            # not in the table). Discarding those would be throwing away mail unread that a
+            # human might want; the fix for them is to unsubscribe, which is his call.
+            "discard_query": (
+                "newer_than:400d (from:no-reply@adzuna.com OR from:no-reply@adzuna.nl "
+                "OR from:hello@m.weworkremotely.com OR from:gmate@getmatch.ru "
+                "OR from:info@glassdoor.com)"
             ),
             "max_results": 100,
         },

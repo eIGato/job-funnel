@@ -198,26 +198,6 @@ def test_pracuj_groups_anchors_by_offer_id_and_recovers_the_city() -> None:
     assert jobs[2].is_remote is True  # nothing but the title says so; the alert has no work mode
 
 
-def test_getmatch_stops_each_card_at_its_cell_so_the_footer_is_not_a_location() -> None:
-    # The place is the card's last line, so the card regex is bounded on </td>: unbounded, the
-    # digest's last posting would take "Отписаться" out of the footer as its location.
-    jobs = _jobs("getmatch")
-    assert len(jobs) == 3
-    first = jobs[0]
-    assert first.company == "Nimbus Labs"  # the anti-autolink zero-width joiner was dropped
-    assert first.title == "Head of Platform [Remote]"
-    assert first.location == "Remote work"  # the leading emoji marker was stripped
-    assert first.is_remote is True
-    assert str(first.url) == "https://getmatch.ru/vacancies/35779-head-of-platform"
-    assert first.external_id == "35779"
-    # A pay line above the place becomes the description; the place is still the last line.
-    assert jobs[1].description.startswith("от 365 000")
-    assert jobs[1].location == "Полная удалёнка из Москва"
-    # The last card of the digest: the footer that follows it is outside its cell.
-    assert jobs[2].location == "Офис или гибрид"
-    assert jobs[2].is_remote is False
-
-
 def test_a_justjoin_application_receipt_is_indistinguishable_to_the_parser() -> None:
     """The receipt is held out by the Gmail query, never by the parser — this pins down why.
 
@@ -254,7 +234,6 @@ def test_content_hashes_are_distinct_within_a_message() -> None:
         "landing.jobs",
         "justjoin",
         "pracuj",
-        "getmatch",
     ):
         jobs = _jobs(name)
         hashes = [j.content_hash_for(1) for j in jobs]
@@ -440,9 +419,13 @@ class _FakeMessages:
     def __init__(self, raws: dict[str, bytes]) -> None:
         self._raws = raws
         self.trashed: list[str] = []
+        #: Gmail queries that select a subset. Anything not listed here matches everything,
+        #: which is what the fetch tests want; the discard tests need a query that does not.
+        self.by_query: dict[str, list[str]] = {}
 
-    def list(self, **_kw: object) -> _Call:
-        return _Call({"messages": [{"id": key} for key in self._raws]})
+    def list(self, *, q: str = "", **_kw: object) -> _Call:
+        ids = self.by_query.get(q, list(self._raws))
+        return _Call({"messages": [{"id": key} for key in ids]})
 
     def get(self, *, id: str, **_kw: object) -> _Call:
         return _Call({"id": id, "raw": base64.urlsafe_b64encode(self._raws[id]).decode()})
@@ -516,6 +499,57 @@ def test_trashing_touches_only_the_parsed_alerts(
     # Idempotent: a second call has nothing left to act on, so a retry cannot double-trash.
     assert asyncio.run(adapter.on_committed()) is None
     assert fake_gmail.trashed == ["alert-1"]
+
+
+def test_nothing_is_discarded_without_a_discard_query(
+    monkeypatch: pytest.MonkeyPatch, fake_gmail: _FakeMessages
+) -> None:
+    """Empty is the default and the only safe one: this is the query that discards mail unread."""
+    _with_trashing(monkeypatch, enabled=True)
+    adapter = GmailAlertsAdapter({"query": "in:inbox"})
+    asyncio.run(adapter.fetch())
+
+    asyncio.run(adapter.on_committed())
+
+    assert fake_gmail.trashed == ["alert-1"]
+
+
+def test_the_discard_query_trashes_mail_that_was_never_parsed(
+    monkeypatch: pytest.MonkeyPatch, fake_gmail: _FakeMessages
+) -> None:
+    """The one path that Trashes a message without having got anything out of it.
+
+    `junk-1` parses to nothing, so the parsed-alerts rule deliberately leaves it alone (see
+    `test_only_messages_that_yielded_postings_are_eligible`). Naming its sender in
+    `discard_query` is the explicit override — a standing decision about an address, not an
+    inference this code makes per message.
+    """
+    _with_trashing(monkeypatch, enabled=True)
+    fake_gmail.by_query["from:newsletter@example.com"] = ["junk-1"]
+    adapter = GmailAlertsAdapter(
+        {"query": "in:inbox", "discard_query": "from:newsletter@example.com"}
+    )
+    asyncio.run(adapter.fetch())
+
+    note = asyncio.run(adapter.on_committed())
+
+    assert sorted(fake_gmail.trashed) == ["alert-1", "junk-1"]
+    assert note is not None and "1 parsed" in note and "1 discarded unread" in note
+
+
+def test_the_discard_query_is_still_gated_on_the_setting(
+    monkeypatch: pytest.MonkeyPatch, fake_gmail: _FakeMessages
+) -> None:
+    """One consent switch for everything this system does to the mailbox, not two."""
+    _with_trashing(monkeypatch, enabled=False)
+    fake_gmail.by_query["from:newsletter@example.com"] = ["junk-1"]
+    adapter = GmailAlertsAdapter(
+        {"query": "in:inbox", "discard_query": "from:newsletter@example.com"}
+    )
+    asyncio.run(adapter.fetch())
+
+    assert asyncio.run(adapter.on_committed()) is None
+    assert fake_gmail.trashed == []
 
 
 def test_a_stuck_id_does_not_keep_the_others_in_the_inbox(

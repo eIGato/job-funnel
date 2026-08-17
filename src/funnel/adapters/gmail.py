@@ -26,24 +26,37 @@ cards carry a snippet the HTML buries in table chrome. So a parser is handed bot
 (`_Alert`) and reads whichever one carries a stable id.
 
 Several boards (Habr, Landing.Jobs) hide the posting URL behind a per-recipient click
-redirect, and Indeed, Glassdoor, justjoin, pracuj and getmatch hang tracking tokens off theirs.
-In every one of those the stored URL is rebuilt from the id alone (`_redirect_target`, or a
-canonical built from the id), so nothing personal to this mailbox ends up in the database.
+redirect, and Indeed, Glassdoor, justjoin and pracuj hang tracking tokens off theirs. In every
+one of those the stored URL is rebuilt from the id alone (`_redirect_target`, or a canonical
+built from the id), so nothing personal to this mailbox ends up in the database.
 
-Boards that were surveyed and deliberately have **no** parser (mailbox sweep, 2026-08-17):
+Boards that were surveyed and deliberately have **no** parser (mailbox sweep, 2026-08-17), for
+two different reasons — which is the difference between the two Gmail queries in `seeds.py`:
 
-- **Reed (23 msgs/yr), Totaljobs (23), 24recruitment (9), Indeed's `match.indeed.com` (8),
-  spelljob (2)** — every posting link is an opaque per-recipient redirect
-  (`clicks.reed.co.uk/f/a/…`, `click.totaljobsmail.com/f/a/…`, `cts.indeed.com/v3/<blob>`) with
-  no id in it anywhere, and no plain-text alternative that carries one. Ingesting them would
-  mint a fresh row and a fresh cover letter on every run, which is the Adzuna `se=` bug
-  (CLAUDE.md, "Dedup at the door"). Resolving the redirect would put a network call per posting
-  inside the alert parser; the one Reed link tried on 2026-08-17 redirected to a 404 under the
-  company name "Appcast Enterprise", an ad network rather than an employer.
-- **Adzuna's own alerts (34)** — `adzuna.com/land/ad/<id>` does carry a stable id, but that host
-  is in `matching/apply_route.BLOCKED_HOSTS` (403 from where the human lives) and Adzuna is
-  already an API source for eight countries. The rows would be duplicates that no shortlist can
-  select.
+*Nothing to read.* Reed (23 msgs/yr), Totaljobs (23), 24recruitment (9), Indeed's
+`match.indeed.com` (8) and spelljob (2) wrap every posting in an opaque per-recipient redirect
+(`clicks.reed.co.uk/f/a/…`, `click.totaljobsmail.com/f/a/…`, `cts.indeed.com/v3/<blob>`) with no
+id in it anywhere and no plain-text alternative that carries one. Ingesting them would mint a
+fresh row and a fresh cover letter on every run, which is the Adzuna `se=` bug (CLAUDE.md,
+"Dedup at the door"). Resolving the redirect means an HTTP call per posting inside the alert
+parser; the one Reed link tried landed on a 404 under "Appcast Enterprise", an ad network. These
+are **not** duplicates — 34 of 47 Totaljobs postings measured were new — so they stay in the
+inbox for a human to glance at, and the honest fix is to unsubscribe, not to have a batch job
+sweep them up forever.
+
+*Nothing we do not already have.* These are in `discard_query` and get Trashed unread:
+
+- **Adzuna's own alerts (34/yr)** — `adzuna.com/land/ad/<id>` does carry a stable id, but that
+  host is in `matching/apply_route.BLOCKED_HOSTS` (403 from where the human lives) and Adzuna is
+  already an API source for eight countries. `adzuna.nl` (5) is marketing with no postings at
+  all.
+- **WeWorkRemotely's digest (2)** — already an RSS source.
+- **getmatch.ru (4)** — a weekly digest of postings the human has already seen during the week
+  in the Telegram bot the same subscription feeds, where applying is one click (human, 2026-08-17).
+  A parser was written and removed the same day; the postings were real, they were just not new.
+- **`info@glassdoor.com` (2)** — Glassdoor's marketing address. `noreply@glassdoor.com` is the
+  alert address and is parsed; naming the address rather than the domain is what keeps the two
+  apart (CLAUDE.md, "A board is an address, not a domain").
 """
 
 from __future__ import annotations
@@ -715,59 +728,6 @@ def _parse_pracuj(alert: _Alert) -> list[NormalizedJob]:
     return jobs
 
 
-#: One getmatch.ru digest card: the vacancy anchor, " @ ", the company anchor, then the fields
-#: until the cell closes. Bounded on `</td>` on purpose — the digest's last card is followed by
-#: the footer, and an unbounded tail would read "Отписаться" as its location.
-_GM_CARD = re.compile(
-    r"<a\b[^>]*getmatch\.ru/vacancies/(\d+)-([^?\"'\s]*)[^>]*>(.*?)</a>"
-    r"\s*@\s*"
-    r"<a\b[^>]*getmatch\.ru/companies/[^>]*>(.*?)</a>"
-    r"(.*?)</td>",
-    re.DOTALL | re.IGNORECASE,
-)
-#: getmatch prefixes each field line with an emoji. Strip any leading run of non-word, non-space
-#: characters rather than naming the glyph, which is decoration and changes.
-_GM_ICON = re.compile(r"^[^\w\s]+\s*")
-#: getmatch sews a zero-width joiner into a company name that would otherwise auto-link
-#: ("Constructor‍.io"), which is markup, not spelling — and it lands in the dedup key and in
-#: the word comparison `replies/match.py` runs on a company name. Dropped here rather than in
-#: `text.repair_mojibake`, which deliberately leaves zero-width characters in a posting's own
-#: prose alone; this is one board's anti-autolink trick, in the two fields that carry identity.
-_GM_ZERO_WIDTH = re.compile("[\u200b-\u200d\u2060\ufeff]")
-
-
-def _parse_getmatch(alert: _Alert) -> list[NormalizedJob]:
-    """getmatch.ru weekly digests: "<title> @ <company>", then an optional pay line, then place.
-
-    The place line is the card's last, which is why the card regex stops at `</td>`. Most of
-    these postings are Russian ("Полная удалёнка из Москва") and exist to be rejected by the
-    RU/BY location filter — reading the place into `location` is what lets that filter see them
-    at all, instead of a remote-flagged posting with no place attached.
-    """
-    jobs: list[NormalizedJob] = []
-    for card in _GM_CARD.finditer(alert.html):
-        vacancy_id, slug, title_html, company_html, tail = card.groups()
-        title = _GM_ZERO_WIDTH.sub("", strip_html(title_html)).strip()
-        company = _GM_ZERO_WIDTH.sub("", strip_html(company_html)).strip()
-        if not title or not company:
-            continue
-        tail_lines = [line.strip() for line in strip_html(tail).splitlines() if line.strip()]
-        location = _GM_ICON.sub("", tail_lines[-1]).strip() if tail_lines else None
-        description = clip("\n".join(tail_lines[:-1]))
-        jobs.append(
-            NormalizedJob(
-                url=f"https://getmatch.ru/vacancies/{vacancy_id}-{slug}",
-                company=company,
-                title=title,
-                description=description,
-                location=location or None,
-                is_remote=looks_remote(title, location, description),
-                external_id=vacancy_id,
-            )
-        )
-    return jobs
-
-
 #: Sender-domain substring -> parser. First match wins; unknown senders yield nothing.
 #:
 #: `wysylka.pracuj.pl`, not `pracuj.pl`: the receipts from `noreply@aplikacje.pracuj.pl` ("the
@@ -786,7 +746,6 @@ _PARSERS: tuple[tuple[str, Callable[[_Alert], list[NormalizedJob]]], ...] = (
     ("landing.jobs", _parse_landing_jobs),
     ("justjoin.it", _parse_justjoin),
     ("wysylka.pracuj.pl", _parse_pracuj),
-    ("getmatch.ru", _parse_getmatch),
 )
 
 
@@ -834,7 +793,15 @@ class GmailAlertsAdapter(BaseAdapter):
              Name the board's alert address wherever it has one: whatever this query
              matches is what `on_committed` may put in the Trash, and a board's other
              addresses write to the human about specific applications (see `seeds.py`).
-      max_results: int, cap on messages pulled per run.
+      max_results: int, cap on messages pulled per run. Caps the discard sweep too.
+      discard_query: str, optional. Senders whose mail this funnel has decided it will
+             never read, because everything in it arrives through a source we already
+             have. Matching messages are Trashed **unread and unparsed** by
+             `on_committed`, under the same setting and the same scope as the parsed
+             alerts. Empty by default, and empty is the only safe default: this is the
+             one query that discards mail without having got anything out of it, so
+             every address in it has to be a decision somebody wrote down (they are,
+             in the module docstring above).
     """
 
     name = "gmail-alerts"
@@ -868,16 +835,35 @@ class GmailAlertsAdapter(BaseAdapter):
             jobs.extend(parsed)
         return jobs
 
+    def _discard_ids(self, messages: Any) -> list[str]:
+        """Gmail ids matching `discard_query` — mail we have decided never to read.
+
+        Held apart from `parsed_message_ids` because the justification is the opposite one.
+        A parsed alert is Trashed *because* we got its postings; these are Trashed because
+        everything in them reaches the funnel by another route already, so there is nothing to
+        get. That is a standing editorial decision about a handful of named addresses, not a
+        judgement this code makes per message — which is why it is a query in the source config
+        and not a rule here, and why an empty query means "discard nothing".
+        """
+        query = str(self.config.get("discard_query", "")).strip()
+        if not query:
+            return []
+        max_results = int(self.config.get("max_results", 50))
+        listed = messages.list(userId="me", q=query, maxResults=max_results).execute()
+        return [str(meta["id"]) for meta in listed.get("messages", [])]
+
     async def on_committed(self) -> str | None:
-        """Move the alerts we got postings out of to Trash. Off unless the human turned it on.
+        """Move alerts we read, and mail we never will, to Trash. Off unless turned on.
 
         Three deliberate limits, because this is the only thing the system does *to* the
         mailbox:
 
         - **Only after the commit.** The hook runs outside the transaction, so a posting is in
           the database before its email stops being.
-        - **Only messages that yielded a posting.** A parse that found nothing keeps its email
-          (see `parsed_message_ids`).
+        - **Only messages that yielded a posting, or that `discard_query` names.** A parse that
+          found nothing keeps its email (see `parsed_message_ids`): it is as likely to be a
+          board that changed its markup as it is to be junk. The discard list is the one
+          exception, and it is an explicit list of addresses rather than an inference.
         - **Trash, never delete.** Gmail keeps a trashed message recoverable for 30 days,
           which is the window in which a parser bug is actually noticed, and the `gmail.modify`
           scope cannot permanently delete anything even if this code asked it to.
@@ -887,7 +873,7 @@ class GmailAlertsAdapter(BaseAdapter):
         """
         from funnel.config import get_settings
 
-        if not self.parsed_message_ids or not get_settings().gmail_trash_parsed_alerts:
+        if not get_settings().gmail_trash_parsed_alerts:
             return None
 
         from googleapiclient.discovery import build
@@ -895,13 +881,23 @@ class GmailAlertsAdapter(BaseAdapter):
         creds = get_credentials(interactive=False)
         service = build("gmail", "v1", credentials=creds, cache_discovery=False)
         messages = service.users().messages()
+
+        discarded_ids = self._discard_ids(messages)
+        if not self.parsed_message_ids and not discarded_ids:
+            return None
+
         trashed = failed = 0
-        for message_id in self.parsed_message_ids:
+        for message_id in [*self.parsed_message_ids, *discarded_ids]:
             try:
                 messages.trash(userId="me", id=message_id).execute()
             except Exception:
                 failed += 1
             else:
                 trashed += 1
+        # Reported apart: "we read these" and "we will never read these" are different claims,
+        # and a run where the second number is not zero is one to look at.
+        summary = f"trashed {trashed} alerts ({len(self.parsed_message_ids)} parsed"
+        if discarded_ids:
+            summary += f", {len(discarded_ids)} discarded unread"
         self.parsed_message_ids = []
-        return f"trashed {trashed} parsed alerts" + (f", {failed} failed" if failed else "")
+        return summary + ")" + (f", {failed} failed" if failed else "")

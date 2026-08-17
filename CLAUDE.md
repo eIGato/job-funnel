@@ -238,17 +238,35 @@ docker compose run --rm --build app uv run funnel run-funnel
   never do. `tests/test_gmail_adapter.py` pins that down by asserting the parser *does* read the
   receipt.
 - **No stable id in the link, no parser.** A mailbox sweep on 2026-08-17 found ten recurring
-  bulk senders the funnel was not reading. Three got parsers — justjoin.it (26 mails/mo),
-  pracuj.pl (37) and getmatch.ru (4), together **259 distinct postings from 158 companies out of
-  one week of mail**, none of them present under any other source. Five did not: Reed, Totaljobs,
-  24recruitment, `match.indeed.com` and spelljob wrap every posting in a per-recipient redirect
+  bulk senders the funnel was not reading. Two got parsers — justjoin.it (26 mails/mo) and
+  pracuj.pl (37), together **254 distinct postings from ~155 companies out of one week of mail**,
+  none of them present under any other source. Five did not: Reed, Totaljobs, 24recruitment,
+  `match.indeed.com` and spelljob wrap every posting in a per-recipient redirect
   (`clicks.reed.co.uk/f/a/…`, `cts.indeed.com/v3/<blob>`) with no id anywhere and no plain-text
   alternative carrying one, so each alert would mint a fresh row and a fresh cover letter — the
   Adzuna `se=` bug again. Resolving the redirect means an HTTP call per posting inside the alert
-  parser; the one Reed link tried landed on a 404 under "Appcast Enterprise", an ad network. The
-  tenth, Adzuna's own alerts, *has* a stable id and is still skipped: `adzuna.com` is in
-  `BLOCKED_HOSTS` and Adzuna is already an API source. Reasons are in the `adapters/gmail.py`
-  docstring so the next sweep does not re-derive them.
+  parser; the one Reed link tried landed on a 404 under "Appcast Enterprise", an ad network.
+  Reasons are in the `adapters/gmail.py` docstring so the next sweep does not re-derive them.
+- **"Nothing to read" and "nothing new" are different verdicts, and only the second one may
+  Trash.** The `gmail-alerts` source has two queries. `query` is mail we parse, and an email is
+  Trashed once we have its postings. `discard_query` is mail we have decided never to read
+  because everything in it reaches the funnel by another route, and it is Trashed **unread** —
+  Adzuna (already an API source, and the alert host is in `BLOCKED_HOSTS`), WeWorkRemotely
+  (already RSS), `info@glassdoor.com` (marketing, while `noreply@glassdoor.com` is the parsed
+  alert address), and getmatch.ru, whose weekly digest repeats what the human has already seen
+  in the Telegram bot the same subscription feeds (human, 2026-08-17 — its parser was written
+  and deleted the same day; the postings were real, they were just not new). The five
+  unparseable boards above are **not** in `discard_query`: their postings are genuinely new
+  (34 of 47 Totaljobs postings measured were not in the table), and mail nobody can read is
+  still mail a human might want to glance at. Unsubscribing is their fix, and it is his call,
+  not the pipeline's. Both queries answer to the one `GMAIL_TRASH_PARSED_ALERTS` switch, because
+  what needs consent is the `gmail.modify` scope, not each list.
+- **The alert window is 30 days so the pipeline can catch up, and that costs nothing.** With
+  trashing on, an alert is read and Trashed within a run of arriving, so in the steady state
+  there is never anything older than a day in scope. The window only matters after a parser is
+  added or the flag is turned on — both happened on 2026-08-17, when 247 board mails sat in the
+  inbox, 187 of them older than a week, including 27 pracuj and justjoin alerts whose postings
+  the funnel had never seen. The 7-day window it replaced could not have reached one of them.
 - **A reply is correlated on words, and a weak match never moves a status.**
   `replies/match.py` compares whole words (folded for diacritics, legal forms dropped), not
   slugs inside a run-together string: `profil` sits inside "profile" and matched a Toptal
