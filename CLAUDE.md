@@ -367,6 +367,20 @@ docker compose run --rm --build app uv run funnel run-funnel
   gameplay/UE line so a hybrid posting ("Unreal dev with backend experience") still surfaces.
   `gameplay.md`/`techdesign.md` are dormant (refreshed from the CVs, consumed by nothing) so
   multi-profile can be revived if shipped game work appears. See `PLAN.md` §4.
+- **One identity per thing, folded once — and a per-source transaction dies quietly.**
+  `adapters/ats.py` keyed "have we probed this company?" on the raw name and the `!miss:` row
+  that occupies the unique slug on the casefolded one. `Flohealth` and `flohealth` were both in
+  the table (two boards, two spellings), so they were two companies to the first test and one to
+  the second: the second spelling was re-probed every run and every run re-inserted a row that
+  already existed. `_probe_key`/`probe_marker` are now the single fold, and the miss insert is
+  checked against the slugs already loaded — belt as well as braces, because the cost of being
+  wrong is not a duplicate row. **The IntegrityError rolled back the whole adapter's
+  transaction**, discarding every board polled and every posting fetched, so all five ATS
+  sources returned zero for **8 consecutive runs (2026-08-15 to 08-18)** while the journal said
+  only "duplicate key" on one line per source. Nothing else noticed: `ingest` catches per-source
+  errors so one bad source cannot stop the rest, which is right, and means a source can be dead
+  for days in plain sight. If a source-health check ever gets built (`funnel doctor` is the
+  place), "produced nothing for N consecutive runs" is the signal that would have caught this.
 - **Invariants are tested.** `tests/test_invariants.py` guards the boundaries above (no
   torch, no LLM outside `drafting/`+`replies/`, Gmail scope read-only, no Django, no
   hardcoded secrets). A failure there means a boundary was broken, not that the test is wrong.

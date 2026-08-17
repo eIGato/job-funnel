@@ -229,7 +229,7 @@ def test_the_probe_window_advances_between_runs() -> None:
     reads correctly and does the opposite — a tried company keeps its rank, keeps its slot, and
     the next run probes nothing. The exclusion has to happen before the limit.
     """
-    from funnel.adapters.ats import _BY_NAME, _companies_worth_probing
+    from funnel.adapters.ats import _companies_worth_probing, probe_marker
 
     class _Session:
         def __init__(self, rows: list[tuple[str, str]]) -> None:
@@ -247,11 +247,61 @@ def test_the_probe_window_advances_between_runs() -> None:
     first = _companies_worth_probing(session, 3, set())  # type: ignore[arg-type]
     assert [c for c, _ in first] == ["Company 0", "Company 1", "Company 2"]
 
-    tried = {f"{_BY_NAME}{c}" for c, _ in first}
+    tried = {probe_marker(c) for c, _ in first}
     second = _companies_worth_probing(session, 3, tried)  # type: ignore[arg-type]
     assert [c for c, _ in second] == ["Company 3", "Company 4", "Company 5"], (
         "the window must move on, not return the same companies for the caller to skip"
     )
+
+
+def test_two_spellings_of_one_company_are_one_probe() -> None:
+    """Regression: the crash that silenced all five ATS adapters for 8 runs from 2026-08-15.
+
+    The "already tried" marker folded one way and the `!miss:` slug another, so `Flohealth` and
+    `flohealth` — both really in the jobs table, from two different boards — were two companies
+    to the first test and one to the second. The second spelling was re-probed every run and
+    every run tried to insert a `!miss:` row that was already there; the IntegrityError rolled
+    back the adapter's whole transaction, postings and all.
+    """
+    from funnel.adapters.ats import _companies_worth_probing, _miss_slug, probe_marker
+
+    class _Session:
+        def __init__(self, rows: list[tuple[str, str]]) -> None:
+            self._rows = rows
+
+        def execute(self, _statement: object) -> _Session:
+            return self
+
+        def all(self) -> list[tuple[str, str]]:
+            return self._rows
+
+    # Exactly the three collisions the live table held.
+    session = _Session(
+        [
+            ("Flohealth", "Backend Engineer"),
+            ("flohealth", "Platform Engineer"),
+            ("Reddit", "Senior Backend Engineer"),
+            ("reddit", "Staff Engineer"),
+            ("Connectis ", "Python Developer"),
+            ("Connectis", "Data Engineer"),
+        ]
+    )
+
+    picked = _companies_worth_probing(session, 10, set())  # type: ignore[arg-type]
+
+    assert len(picked) == 3, "one company, however it is capitalized, is one probe"
+    # The two keys agree, which is the actual fix: same marker, same miss slug.
+    assert probe_marker("Flohealth") == probe_marker("flohealth")
+    assert _miss_slug("Connectis ") == _miss_slug("Connectis")
+    # Both spellings' titles reach `board_confirms`, so folding costs no evidence.
+    titles = dict(picked)["Flohealth"]
+    assert sorted(titles) == ["Backend Engineer", "Platform Engineer"]
+    # And a marker stored under either spelling excludes the company from the next run.
+    assert _companies_worth_probing(session, 10, {probe_marker("FLOHEALTH")}) != picked  # type: ignore[arg-type]
+    assert [c for c, _ in _companies_worth_probing(session, 10, {probe_marker("FLOHEALTH")})] == [  # type: ignore[arg-type]
+        "Reddit",
+        "Connectis ",
+    ]
 
 
 def test_a_remembered_miss_is_unique_per_company() -> None:
