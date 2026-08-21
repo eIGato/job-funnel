@@ -73,18 +73,51 @@ def test_wellfound_reads_the_plaintext_body_not_the_opaque_html_links() -> None:
     # Wellfound's HTML wraps each posting in a link-less tracking redirect; the real URL and id
     # live only in text/plain. Parsing must come from there.
     jobs = _jobs("wellfound")
+    assert len(jobs) == 3
+    first = jobs[0]
+    assert first.title == "Senior Python Engineer"
+    # Title and company share a line in this layout, separated by nothing but two spaces.
+    assert first.company == "Nimbus Labs"
+    assert first.is_remote is True
+    assert first.location == "Berlin, Lisbon, Remote"  # "Remote only, " prefix stripped
+    assert str(first.url) == "https://wellfound.com/jobs/4468480-senior-python-engineer"
+    assert first.external_id == "4468480"
+    # The per-recipient `?utm_content=` tracking is cut off rather than stored.
+    assert "utm_content" not in str(first.url)
+    # A single-city, non-remote posting keeps its city and is not flagged remote. Its pay is
+    # quoted in rupees and its equity as a percentage; neither may leak into the location, and
+    # neither may Wellfound's "Our take" blurb, which sits in the same card.
+    assert jobs[1].company == "Orbital Freight"
+    assert jobs[1].location == "Amsterdam"
+    assert jobs[1].is_remote is False
+    # A card with no location at all yields none, rather than the years-of-experience segment.
+    assert jobs[2].company == "District Cyber"
+    assert jobs[2].location is None
+    # The slug names the posting this one was cloned from and disagrees with the title on the
+    # card. It is kept as sent: the page resolves on the id, and guessing a slug is worse.
+    assert str(jobs[2].url) == "https://wellfound.com/jobs/4507438-senior-ml-engineer-clone"
+    assert jobs[2].external_id == "4507438"
+
+
+def test_wellfound_still_reads_the_layout_it_used_before_august_2026() -> None:
+    """Both templates are in circulation from the same address, interleaved by date.
+
+    Wellfound began rolling the new one out on 2026-08-05 and was still sending the old one on
+    08-19. The parser read only the old shape until 2026-08-22, so nine alerts back to 07-23
+    yielded nothing; this pins the old shape down so fixing that did not trade one for the other.
+    """
+    jobs = _jobs("wellfound_legacy")
     assert len(jobs) == 2
     first = jobs[0]
     assert first.title == "Senior Python Engineer"
     assert first.company == "Nimbus Labs"  # taken from the "Company / N Employees" line
     assert first.is_remote is True
-    assert first.location == "Berlin, Lisbon, Remote"  # "Remote only, " prefix stripped
+    assert first.location == "Berlin, Lisbon, Remote"
     assert (
         str(first.url)
         == "https://wellfound.com/jobs?job_listing_slug=4468480-senior-python-engineer"
     )
     assert first.external_id == "4468480"
-    # A single-city, non-remote posting keeps its city and is not flagged remote.
     assert jobs[1].company == "Orbital Freight"
     assert jobs[1].location == "Amsterdam"
     assert jobs[1].is_remote is False
@@ -229,6 +262,7 @@ def test_content_hashes_are_distinct_within_a_message() -> None:
         "habr",
         "linkedin",
         "wellfound",
+        "wellfound_legacy",
         "glassdoor",
         "indeed",
         "landing.jobs",

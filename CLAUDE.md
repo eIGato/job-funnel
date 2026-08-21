@@ -247,6 +247,19 @@ docker compose run --rm --build app uv run funnel run-funnel
   Adzuna `se=` bug again. Resolving the redirect means an HTTP call per posting inside the alert
   parser; the one Reed link tried landed on a 404 under "Appcast Enterprise", an ad network.
   Reasons are in the `adapters/gmail.py` docstring so the next sweep does not re-derive them.
+- **A parser goes quiet one board at a time, and the source still looks healthy.** Wellfound
+  began rolling out a new alert template on 2026-08-05 and kept sending the old one from the
+  same address, interleaved by date. `_parse_wellfound` read only the old shape, so nine alerts
+  back to 07-23 (11 postings from 11 companies) yielded nothing — while `gmail-alerts`
+  went on reporting hundreds of new rows a run, because one source holds ten parsers and
+  `ingest` reports per source. The per-source "produced nothing for N runs" signal that would
+  catch a dead adapter cannot see this; the one that would is per **sender**. Two things make
+  it cheap to find by hand: which layout an email is in is decided by the **link shape**, never
+  by a date or a subject (`/jobs?job_listing_slug=<id>` against `/jobs/<id>-<slug>`, mutually
+  exclusive, so both parsers can stand side by side), and an unparsed alert is still in the
+  inbox, because `GMAIL_TRASH_PARSED_ALERTS` only Trashes what yielded a posting. **The unread
+  pile is the backlog of parser bugs, not junk** — that is the other half of why mail that
+  parsed to nothing is left alone. Re-running the parsers over `in:inbox` is the check.
 - **"Nothing to read" and "nothing new" are different verdicts, and only the second one may
   Trash.** The `gmail-alerts` source has two queries. `query` is mail we parse, and an email is
   Trashed once we have its postings. `discard_query` is mail we have decided never to read

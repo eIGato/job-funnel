@@ -64,6 +64,7 @@ from __future__ import annotations
 import base64
 import re
 import stat
+import unicodedata
 from email import message_from_bytes, policy
 from email.message import EmailMessage
 from html.parser import HTMLParser
@@ -426,17 +427,21 @@ def _parse_linkedin(alert: _Alert) -> list[NormalizedJob]:
     return jobs
 
 
-def _blocks(text: str) -> list[list[str]]:
-    """Blank-line-separated blocks of a plain-text body, each a list of collapsed lines.
+def _blocks(text: str, *, collapse: bool = True) -> list[list[str]]:
+    """Blank-line-separated blocks of a plain-text body, each a list of lines.
 
     The blank line is the one piece of structure a text/plain alert always has. What a block
     means differs per board: for Indeed it is one whole posting card (so the lines matter,
     below), for Wellfound one field of a card (so the lines are joined back up).
+
+    `collapse` squeezes runs of whitespace inside a line, which is what a reader wants from a
+    field. Wellfound's current layout is the one caller that must say no: there the run of two
+    spaces *is* the boundary between the job title and the company name, which share a line.
     """
     blocks: list[list[str]] = []
     buffer: list[str] = []
     for line in text.splitlines():
-        stripped = " ".join(line.split())
+        stripped = " ".join(line.split()) if collapse else line.strip()
         if stripped:
             buffer.append(stripped)
         elif buffer:
@@ -447,32 +452,103 @@ def _blocks(text: str) -> list[list[str]]:
     return blocks
 
 
-def _paragraphs(text: str) -> list[str]:
+def _paragraphs(text: str, *, collapse: bool = True) -> list[str]:
     """Blank-line-separated paragraphs, each with its soft-wrapped lines joined into one.
 
     A plain-text alert wraps a field (Wellfound's location can be a 60-city list) across many
     physical lines but separates real fields with a blank line. Collapsing to paragraphs turns
     those wraps back into one logical value per field.
     """
-    return [" ".join(block) for block in _blocks(text)]
+    return [" ".join(block) for block in _blocks(text, collapse=collapse)]
 
 
-#: A Wellfound card's "Company / 11-50 Employees" line — the structural anchor of each posting.
+#: A Wellfound card's "Company / 11-50 Employees" line — the anchor of each posting in the
+#: layout Wellfound used until August 2026, where every field was its own paragraph.
 _WF_COMPANY = re.compile(r"^(?P<name>.+?) / .+ Employees$")
-#: The real posting link, present only in the text/plain body (the HTML link is opaque).
+#: The posting link in that layout, present only in the text/plain body (the HTML link is opaque).
 _WF_JOB = re.compile(r"wellfound\.com/jobs\?job_listing_slug=(\d+)-[^\s>|]*")
+#: The posting link in the current layout: the id moved out of the query string and into the path,
+#: so the two shapes cannot match each other's mail. Everything after `?` is per-recipient
+#: tracking (`email_uid`) and is cut off here rather than stored.
+_WF_JOB_PATH = re.compile(r"wellfound\.com/jobs/(\d+)-[^\s>?|]*")
+#: Title, company and headcount, run together in one line of that card:
+#: "Senior Backend Engineer  District Cyber  / 11-50 Employees  $175k - $220k | Berlin | ...".
+#: Two spaces separate title from company, which is the only boundary Wellfound gives us.
+_WF_HEAD = re.compile(
+    r"(?P<title>\S.*?)\s\s+(?P<company>[^/]+?)\s+/\s+[\d,+\u2013-]+\s+Employees\s+(?P<meta>.*)"
+)
+#: Where the "salary | location | exp" run ends and Wellfound's own editorializing begins.
+_WF_BADGES = re.compile(r"\bActively Hiring\b|\bOur take\b|\bLearn more\b")
+#: URLs are angle-bracketed in a text/plain alert; they sit inside the card and must come out
+#: before the head is read, or the company link would be parsed as the title.
+_WF_ANGLE_URL = re.compile(r"<https?://[^>]*>")
 #: Non-place segments of the "salary | location | exp | type" line.
 _WF_JOBTYPE = frozenset({"Full-time", "Part-time", "Contract", "Internship"})
+#: Equity, which Wellfound quotes in the same run as the city ("0.0% - 2.0%", "No equity").
+_WF_EQUITY = re.compile(r"\d\s*%|No equity", re.IGNORECASE)
 
 
-def _parse_wellfound(alert: _Alert) -> list[NormalizedJob]:
-    """Wellfound alerts, from the text/plain body: title, "Company / size", "… location …".
+def _is_pay(segment: str) -> bool:
+    """True for a pay or equity segment, so it can be kept out of the location.
 
-    Each posting is a run of paragraphs anchored on its "Company / N Employees" line: the
-    paragraph before it is the title, the one after is the "salary | location | exp | type"
-    line, and the next `job_listing_slug` URL is the posting's stable link and id.
+    Any Unicode currency symbol counts, rather than a list of them. Wellfound quotes whatever
+    the employer pays in — the list that started as `$€£` let a naira range through into a
+    location field ("<naira>1500-2500k, Onsite or remote, Lagos, ...", measured 2026-08-21), and an
+    enumeration is a bug waiting for the next currency.
     """
-    paras = _paragraphs(alert.text)
+    return any(unicodedata.category(ch) == "Sc" for ch in segment) or bool(
+        _WF_EQUITY.search(segment)
+    )
+
+
+def _wellfound_place(line: str) -> tuple[str | None, bool]:
+    """Reduce a "salary | location | exp | type" run to a location and a remote flag."""
+    segments = [seg.strip() for seg in line.split("|")]
+    remote = any("remote" in seg.lower() for seg in segments)
+    places = [
+        seg
+        for seg in segments
+        if seg and not _is_pay(seg) and "years of exp" not in seg and seg not in _WF_JOBTYPE
+    ]
+    return re.sub(r"^Remote only,?\s*", "", ", ".join(places)).strip() or None, remote
+
+
+def _wellfound_card(para: str) -> NormalizedJob | None:
+    """One posting out of a card paragraph in the current Wellfound layout.
+
+    The whole card — company link, title, company, size, pay, location, badges and the "Learn
+    more" link — is a single blank-line-delimited paragraph, so it is read as one string rather
+    than by counting paragraphs around an anchor.
+    """
+    job_match = _WF_JOB_PATH.search(para)
+    if job_match is None:
+        return None
+    head = _WF_HEAD.search(_WF_ANGLE_URL.sub(" ", para))
+    if head is None:
+        return None
+    meta = head.group("meta")
+    badge = _WF_BADGES.search(meta)
+    location, remote = _wellfound_place(meta[: badge.start()] if badge else meta)
+    return NormalizedJob(
+        # Kept with its slug rather than rebuilt from the id alone. The slug is sometimes the
+        # name of the posting this one was cloned from and disagrees with the title on the card
+        # (measured 2026-08-21) — but it is the slug Wellfound's own link carries, and the page
+        # resolves on the id, so it is theirs to be wrong about, not ours to guess at.
+        url="https://" + job_match.group(0),
+        company=head.group("company").strip(),
+        title=head.group("title").strip(),
+        location=location,
+        is_remote=remote,
+        external_id=job_match.group(1),
+    )
+
+
+def _wellfound_legacy(paras: list[str]) -> list[NormalizedJob]:
+    """The pre-August-2026 layout: one field per paragraph, anchored on "Company / N Employees".
+
+    The paragraph before the anchor is the title, the one after is the "salary | location | exp
+    | type" line, and the next `job_listing_slug` URL is the posting's stable link and id.
+    """
     jobs: list[NormalizedJob] = []
     for i, para in enumerate(paras):
         company_match = _WF_COMPANY.match(para)
@@ -481,15 +557,7 @@ def _parse_wellfound(alert: _Alert) -> list[NormalizedJob]:
         job_match = next((m for p in paras[i + 1 :] if (m := _WF_JOB.search(p))), None)
         if job_match is None:
             continue
-        location_line = paras[i + 1] if i + 1 < len(paras) else ""
-        segments = [seg.strip() for seg in location_line.split("|")]
-        remote = any("remote" in seg.lower() for seg in segments)
-        places = [
-            seg
-            for seg in segments
-            if seg and seg[0] not in "$€£" and "years of exp" not in seg and seg not in _WF_JOBTYPE
-        ]
-        location = re.sub(r"^Remote only,?\s*", "", ", ".join(places)).strip() or None
+        location, remote = _wellfound_place(paras[i + 1] if i + 1 < len(paras) else "")
         jobs.append(
             NormalizedJob(
                 url="https://" + job_match.group(0),
@@ -501,6 +569,29 @@ def _parse_wellfound(alert: _Alert) -> list[NormalizedJob]:
             )
         )
     return jobs
+
+
+def _parse_wellfound(alert: _Alert) -> list[NormalizedJob]:
+    """Wellfound alerts, from the text/plain body — the HTML links are opaque redirects.
+
+    **Two layouts, both live.** Wellfound began rolling out a new alert template on 2026-08-05
+    and still sends the old one from the same address: of the twelve alerts on record on
+    2026-08-21, nine were new and three old, interleaved by date (08-19 old, 08-20 new). The
+    old layout gave every field its own paragraph; the new one puts the whole card in one. The
+    parser read only the old shape, so those nine — back to 07-23, 11 postings — yielded
+    nothing and sat in the inbox unparsed while the other three were read and Trashed.
+
+    Which layout an email is in is decided by the link shape, not by a date or a subject, and
+    the two shapes are mutually exclusive (`/jobs?job_listing_slug=<id>` against
+    `/jobs/<id>-<slug>`), so an email only ever answers to one of them. `_wellfound_legacy`
+    can go once no old-layout mail has arrived for a month.
+    """
+    current = [
+        job
+        for para in _paragraphs(alert.text, collapse=False)
+        if (job := _wellfound_card(para)) is not None
+    ]
+    return current or _wellfound_legacy(_paragraphs(alert.text))
 
 
 #: Each Glassdoor posting is one <a> wrapping the whole card; the id rides in the href.
