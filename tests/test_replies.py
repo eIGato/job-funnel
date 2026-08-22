@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from pydantic_ai.models.test import TestModel
@@ -400,6 +401,48 @@ def test_the_alert_query_names_habrs_alert_address_not_its_domain() -> None:
     query = next(s for s in DEFAULT_SOURCES if s.name == "gmail-alerts").config["query"]
     assert "from:subscribe@career.habr.com" in query
     assert "from:career.habr.com" not in query
+
+
+def test_the_reply_scan_excludes_alert_addresses_not_whole_board_domains() -> None:
+    """A board's bulk mail is excluded; the address it writes the human from is not.
+
+    Both halves of this have been wrong in production. `-from:career.habr.com` threw away four
+    per-application acknowledgements (2026-08-13) and `-from:indeed.com` threw away the
+    Indeed Apply receipt along with the alerts (2026-08-22). The scan costs nothing on a mail
+    it decides is bulk — `is_board_sender` short-circuits before any classification call — so
+    the narrow exclusion is the cheap side of the trade in both directions.
+    """
+    captured: dict[str, str] = {}
+
+    class _Messages:
+        def list(self, *, userId: str, q: str, maxResults: int) -> Any:  # noqa: N803
+            captured["q"] = q
+            return self
+
+        def execute(self) -> dict[str, object]:
+            return {}
+
+    class _Service:
+        def users(self) -> Any:
+            return self
+
+        def messages(self) -> Any:
+            return _Messages()
+
+    assert inbox.fetch_recent(_Service(), days=14) == []
+    query = captured["q"]
+    for alert_address in (
+        "subscribe@career.habr.com",
+        "jobalert.indeed.com",
+        "match.indeed.com",
+        "jobs@hello.justjoin.it",
+        "rekomendacje@wysylka.pracuj.pl",
+    ):
+        assert f"-from:{alert_address}" in query
+    # The apex of a board that has a separate alert address is never excluded whole: that is
+    # where the mail about one application comes from.
+    for personal_domain in ("career.habr.com", "indeed.com", "justjoin.it", "pracuj.pl"):
+        assert f"-from:{personal_domain} " not in f"{query} "
 
 
 def test_a_run_together_company_name_matches_its_written_out_form() -> None:

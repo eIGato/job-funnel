@@ -125,11 +125,22 @@ def fetch_recent(service: Any, *, days: int, max_results: int = 100) -> list[Inc
     `no-reply@justjoin.it` is the same case as hh and is deliberately **not** excluded: it sends
     the daily alert *and* the "You applied for X" receipt, and the receipt is worth a
     classification. Its sibling `jobs@hello.justjoin.it` only ever digests, so that one is out.
+
+    Indeed is split by subdomain rather than by mailbox: `jobalert.` is the alert address and
+    `match.` is an ad network selling one advertiser's inventory (8 mails in a year, all on one
+    day, all DataAnnotation), while the apex sends the human personally. **The apex is worth
+    reading even though its receipt names no employer.** `indeedapply@indeed.com` confirms only
+    the role ("Bewerbung über Indeed: Software Developer", 2026-08-11), so it can never match on
+    a company and must not go in `_BOARD_ADDRESS_EXCEPTIONS` — `indeed.com` stays in
+    `_BOARD_DOMAINS`, which costs no classification call and lets the message match by thread.
+    What the narrower exclusion buys is that a mail Indeed sends *about an application* is in
+    scope at all, here and for whatever address it invents next.
     """
     query = (
         f"newer_than:{days}d in:inbox -category:promotions "
         "-from:linkedin.com -from:hh.ru -from:subscribe@career.habr.com "
-        "-from:wellfound.com -from:glassdoor.com -from:indeed.com "
+        "-from:wellfound.com -from:glassdoor.com "
+        "-from:jobalert.indeed.com -from:match.indeed.com "
         "-from:landing.jobs -from:jobs@hello.justjoin.it "
         "-from:rekomendacje@wysylka.pracuj.pl -from:gmate@getmatch.ru"
     )

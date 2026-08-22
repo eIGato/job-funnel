@@ -228,7 +228,15 @@ docker compose run --rm --build app uv run funnel run-funnel
   split is an exception list (`_BOARD_ADDRESS_EXCEPTIONS`) rather than a promotion of the alert
   address, so an address the board invents next is still treated as bulk: a missed match costs a
   human glance, a wrong one stamps a rejection onto the wrong application. pracuj.pl is the same
-  shape (`rekomendacje@wysylka.` vs `noreply@aplikacje.`, added 2026-08-17). **justjoin.it needs
+  shape (`rekomendacje@wysylka.` vs `noreply@aplikacje.`, added 2026-08-17). **Indeed splits by
+  subdomain**, not by mailbox: `jobalert.` is the alert address and `match.` is an ad network (8
+  mails in a year, all on one day, all one advertiser), while the apex mails the human. Its
+  receipt is the weak case kept anyway — `indeedapply@indeed.com` confirms only the role
+  ("Bewerbung uber Indeed: Software Developer", 2026-08-11) and never the employer, so it can
+  match by thread and nothing else and must **not** join `_BOARD_ADDRESS_EXCEPTIONS`. Narrowing
+  the exclusion in `inbox.fetch_recent` still pays: the mail is in scope, it costs no
+  classification call while `indeed.com` stays in `_BOARD_DOMAINS`, and the address Indeed
+  invents next is in scope by default. **justjoin.it needs
   a third split, by subject**, and it is the weakest one: `no-reply@justjoin.it` sends both the
   alert and the "You applied for X" receipt, and unlike hh's the receipt is *not* harmless to
   parse — it carries a "similar offers" block in the identical card markup, so the parser reads
