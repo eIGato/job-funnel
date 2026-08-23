@@ -177,6 +177,14 @@ class ApplicationStatus(enum.StrEnum):
     # more precise goes in `notes`. Terminal like the rest, so `shortlist` treats the role as
     # handled and `check-replies` never scans it.
     CLOSED = "closed"
+    # The posting was not a real job: an ad placed to collect passports, fees or documents.
+    # Its own value because it is the one terminal status that says nothing about fit and may
+    # sit on either side of the send. `sent_at` is kept when a letter did go out — that is what
+    # happened, and it is the part worth being able to count (application 166, sent 2026-08-11,
+    # a Berlin "Software Developer" that wanted a passport; `filters._is_relocation_scam` now
+    # drops that shape before it can be drafted). Recording it as DECLINED said we judged the
+    # fit and never applied, which was wrong in both halves.
+    SCAM = "scam"
     SENT = "sent"
     REJECTED = "rejected"
     INTERVIEW = "interview"
@@ -188,6 +196,12 @@ class ApplicationStatus(enum.StrEnum):
 #: here. Matching a reply to an application that was never sent is a mismatch by construction,
 #: and it has already happened: a justjoin.it *job alert* was linked to a never-sent row that had
 #: been filed as REJECTED, because the fallback matches on the sender's domain.
+#:
+#: SCAM is the one status a letter *may* have gone out for that is still kept out of the set.
+#: A scam answers — that is the whole point of it — and every answer would be a classification
+#: call whose verdict `replies/link.py` writes straight back onto the status, so
+#: "we would like to schedule an interview" from the people who wanted the passport would move
+#: the row to INTERVIEW. Terminal means terminal.
 REPLYABLE_STATUSES = frozenset(
     {ApplicationStatus.SENT, ApplicationStatus.INTERVIEW, ApplicationStatus.REJECTED}
 )

@@ -337,9 +337,10 @@ docker compose run --rm --build app uv run funnel run-funnel
   applications go through a web form. So a conclusive match writes `message.thread_id` back
   onto the Application, and the oldest-first order means an acknowledgement teaches the thread
   before the answer to it is looked at in the same batch.
-- **Not applying has three different statuses, and they stay apart.** `DECLINED` is the screen's
+- **Not applying has four different statuses, and they stay apart.** `DECLINED` is the screen's
   verdict on fit, `CLOSED` is a posting that stopped taking applications before the human got
-  there, `REJECTED` is them declining us — which presupposes a letter went out. `REJECTED` was
+  there, `SCAM` is a posting that was never a job, `REJECTED` is them declining us — which
+  presupposes a letter went out. `REJECTED` was
   doing all three jobs until 2026-08-06: 16 of the 18 rejections on record had `sent_at IS NULL`
   and a `reply_at` invented at noon of the day the closure was noticed, so any sent-to-reply rate
   counted refusals against applications that never existed, and `check-replies` kept scanning
@@ -347,6 +348,19 @@ docker compose run --rm --build app uv run funnel run-funnel
   `sent_at`/`reply_at`/`reply_type` NULL; `updated_at` is when it was found closed. **Never write
   a timestamp into a reply field to make a row look consistent** — an empty column is readable,
   a fabricated one is not.
+- **`SCAM` is the one terminal status that says nothing about fit, and it keeps its `sent_at`.**
+  A fraudulent posting can be caught on either side of the send, and application 166 was caught
+  after: the letter and CV went to job 4257 on 2026-08-11 (added 2026-08-23, migration
+  `b6e4a90c17d2`, the only row in the table). Filed as `DECLINED` it claimed two untrue things
+  at once — that the screen judged the fit, and that nothing went out — and the only record of
+  what happened was the free-text note "Scam". The timestamp stays because the letter really
+  did go out; being able to count that separately is the point. It is deliberately **not** in
+  `REPLYABLE_STATUSES` even though a letter went out, which no other member of that exclusion
+  can say: a scam answers — that is what it is for — and `replies/link.py` writes a
+  classifier's verdict straight onto the status, so "we would like to schedule an interview"
+  from the people who wanted the passport would move the row to `INTERVIEW`. The status is the
+  bookkeeping half of `filters._is_relocation_scam`, which now keeps that shape out of the
+  shortlist in the first place.
 - **Storage is UTC; the admin speaks `ADMIN_TIMEZONE`.** Every writer in the pipeline writes UTC
   and that does not change. The admin form used to render UTC and parse what was typed back as
   UTC, so a human entering the time off his own watch recorded an instant two hours ahead — all
