@@ -33,7 +33,11 @@ Junk postings:
   - So is a row whose *body* is prose that never mentions hiring at all — a nav menu, a cookie
     notice, a blog post. RemoteOK republishes whatever its crawler found, under a real company
     name and a title no list can anticipate ("UNC", "Danny", "The Ledbury").
-  Both are only the "not a job posting" judgment; deciding that a real posting is the wrong
+  - So is an ad written to collect passports rather than to fill a role: a relocation offer,
+    a demand for the applicant's travel document, and a requirements list that names four
+    unrelated languages instead of a stack. All three together, never one alone (see
+    `_is_relocation_scam`) — real relocation offers say two of these things.
+  All three are only the "not a job posting" judgment; deciding that a real posting is the wrong
   *kind* of job belongs to the screening step.
 """
 
@@ -269,6 +273,57 @@ _PROSE = re.compile(r"[.!?]")
 _MIN_JUDGEABLE_BODY = 100
 
 
+#: A posting that asks to see a passport while promising a visa. The three regexes below are
+#: one rule and only fire together: a relocation offer, a demand for the applicant's travel
+#: document, and a technical section that names no actual stack. Job 4257 ("Software Developer",
+#: "Brahmandnayak Group Of Companies", Berlin, from a Glassdoor alert) had all three, ranked at
+#: the 95.8th percentile, and the human sent it a real letter with his CV on 2026-08-11 before
+#: recognizing it — which is the cost this filter exists to avoid, and it is not a wasted
+#: screening call: it is personal data handed to whoever placed the ad.
+#:
+#: Each signal alone is ordinary. Measured over all 18,856 rows on 2026-08-23: "visa
+#: sponsorship" 1,549 rows, a relocation offer 553, a "or similar technologies" hedge 139,
+#: boilerplate duties 71, a run of four unrelated languages 14, a passport demand 3. The
+#: conjunction is what is rare — 4257 is the only row in the table that matches, and the three
+#: rows that come closest (three signals, none of them the passport) are all one real Munich/SF
+#: startup with a genuine relocation offer. Keep the conjunction: a real relocation offer says
+#: two of these things too, and the honest ones name the stack they hire for.
+#:
+#: A salary-spread rule was considered here and is not implementable: `Job` stores no salary
+#: (only a few adapters even carry one, inside the body text), and this posting quotes no
+#: number at all — it says "Competitive salary", which is the tell it shares with the boilerplate
+#: rather than a range to measure.
+_PASSPORT_REQUIRED = re.compile(
+    r"\bvalid\s+(?:international\s+)?passport\b|\bpassport\s+(?:is\s+)?required\b"
+    r"|\binternational\s+passport\b|загранпаспорт|заграничн\w+\s+паспорт",
+    re.IGNORECASE,
+)
+#: The bait. Legitimate on its own — the funnel wants relocation offers, and 1,549 rows mention
+#: sponsorship.
+_RELOCATION_OFFER = re.compile(
+    r"visa sponsorship|sponsor\w*\s+(?:your\s+)?(?:work\s+)?visa|work permit sponsor"
+    r"|willing(?:ness)?\s+to\s+relocate|ready to relocate"
+    r"|relocation\s+(?:support|package|assistance)|релокац",
+    re.IGNORECASE,
+)
+#: A requirements section that names no team's actual stack: four unrelated languages in a row,
+#: usually hedged with "or similar technologies". No real team hires one engineer for Java AND
+#: .NET AND C# AND JavaScript; an ad that lists them is not describing work it has.
+_LANGUAGE_SOUP = re.compile(
+    r"(?:\b(?:java|python|\.\s?net|c#|c\+\+|javascript|typescript|php|ruby|golang|kotlin"
+    r"|swift|scala)\b[\s,/]+){3,}(?:(?:and|or)\s+)?"
+    r"\b(?:java|python|\.\s?net|c#|c\+\+|javascript|typescript|php|ruby|golang|kotlin"
+    r"|swift|scala|similar)\b",
+    re.IGNORECASE,
+)
+#: ...or duties written from the idea of programming rather than from a product.
+_BOILERPLATE_DUTIES = re.compile(
+    r"write clean(?:,?\s+(?:and\s+)?(?:efficient|readable|maintainable))?\s+code"
+    r"|develop,?\s+test,?\s+and maintain software",
+    re.IGNORECASE,
+)
+
+
 #: A location field a board never filled in. Telegram/teletype postings routinely have none and
 #: put the office in the first line of the body instead ("OFFICE MINSK | ЛЕСТА ИГРЫ"), which is
 #: how a Minsk posting reached the drafting step on 2026-08-03 — past a hard stop the human
@@ -316,6 +371,22 @@ def _is_junk(job: _Filterable) -> bool:
     return _normalized_title(job.title) in _JUNK_TITLES or _unwritten_body(job)
 
 
+def _is_relocation_scam(job: _Filterable) -> bool:
+    """True when the ad wants the applicant's passport more than his code.
+
+    The other kind of "not a real posting": posting-shaped, grammatical, and placed to collect
+    documents and fees from people who want to move. `_is_junk` cannot see it — this body says
+    every hiring word there is — and the screen must not be asked to, because the tell is made
+    of visas and relocation, which is geography and therefore this module's business.
+    """
+    body = f"{job.title}\n{job.description}"
+    return bool(
+        _PASSPORT_REQUIRED.search(body)
+        and _RELOCATION_OFFER.search(body)
+        and (_LANGUAGE_SOUP.search(body) or _BOILERPLATE_DUTIES.search(body))
+    )
+
+
 def _below_middle(title: str) -> bool:
     return bool(_JUNIOR_TITLE.search(title)) and not _MIDDLE_PLUS_TITLE.search(title)
 
@@ -326,7 +397,7 @@ def _ml_training_primary(title: str) -> bool:
 
 def passes_hard_filters(job: _Filterable) -> bool:
     """True when the posting is worth embedding. Pure: no I/O, no model calls."""
-    if _is_junk(job):
+    if _is_junk(job) or _is_relocation_scam(job):
         return False
     if _RU_BY_LOCATION.search(job.location or "") or _RU_BY_LOCATION.search(_heading_location(job)):
         return False

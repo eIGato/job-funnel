@@ -526,3 +526,97 @@ def test_the_heading_rule_reads_a_header_not_prose(job: NormalizedJob) -> None:
         update={"location": "Berlin", "description": "Москва\nWe hire in Berlin. Experience: ..."}
     )
     assert passes_hard_filters(labelled) is True
+
+
+#: Job 4257, verbatim but trimmed — the ad the human sent a real letter and a real CV to on
+#: 2026-08-11 before recognizing it (application 166, now DECLINED with the note "Scam").
+_SCAM_BODY = """Responsibilities:
+* Develop, test, and maintain software applications.
+* Write clean and efficient code.
+* Collaborate with developers, testers, and project managers.
+Requirements:
+* Bachelor's degree in Computer Science, IT, or a related field.
+* Experience with Java, Python, . NET, C#, JavaScript, or similar technologies.
+* Good English communication skills.
+* Valid passport.
+* Willingness to relocate to Germany.
+Benefits:
+* Competitive salary
+* Work visa sponsorship
+"""
+
+
+def test_a_posting_that_wants_a_passport_and_promises_a_visa_is_dropped(
+    job: NormalizedJob,
+) -> None:
+    """The other kind of "not a job posting": posting-shaped, and placed to collect documents.
+
+    Nothing upstream could see it — every hiring word is present, the company name is real
+    enough, and it embedded at the 95.8th percentile, above most of the genuine backend roles
+    in the table.
+    """
+    scam = job.model_copy(
+        update={
+            "title": "Software Developer",
+            "company": "Brahmandnayak Group Of Companies",
+            "description": _SCAM_BODY,
+            "location": "Berlin",
+            "is_remote": False,
+        }
+    )
+    assert passes_hard_filters(scam) is False
+
+
+def test_a_real_relocation_offer_survives(job: NormalizedJob) -> None:
+    """Two of the three signals is the ordinary case, and the funnel wants those postings.
+
+    1,549 rows in the table mention visa sponsorship and 553 offer relocation. What none of
+    the real ones do is ask for the passport itself while declining to name a stack.
+    """
+    real = job.model_copy(
+        update={
+            "title": "Senior Backend Engineer",
+            "description": (
+                "You will own our billing services in Python and Go, on Postgres and Kafka. "
+                "We offer visa sponsorship and a relocation package to Berlin, and we will "
+                "help with the paperwork once you sign."
+            ),
+            "location": "Berlin",
+            "is_remote": False,
+        }
+    )
+    assert passes_hard_filters(real) is True
+
+
+def test_a_passport_a_travel_role_really_needs_is_not_the_scam_signal(job: NormalizedJob) -> None:
+    """A role that flies to customers says this honestly, and names the work around it."""
+    travel = job.model_copy(
+        update={
+            "title": "Senior Solutions Engineer",
+            "description": (
+                "Willing to travel significantly (70%), some travel internationally. "
+                "Must have a valid Passport and Clean Driving License. 8+ years experience "
+                "architecting deployments for enterprise customers."
+            ),
+        }
+    )
+    assert passes_hard_filters(travel) is True
+
+
+def test_a_long_technology_list_alone_is_not_the_scam_signal(job: NormalizedJob) -> None:
+    """A consultancy or a platform vendor genuinely does span several stacks.
+
+    Four rows in the table list four or more languages in a run; three of them are ordinary
+    postings from real companies, and the rule must not reach them.
+    """
+    consultancy = job.model_copy(
+        update={
+            "title": "Test Automation Engineer",
+            "description": (
+                "Our clients build on Java, Python, C#, JavaScript or similar technologies, "
+                "and you will write the test harnesses that cover them. Requirements: five "
+                "years of automation experience and a relocation-ready mindset."
+            ),
+        }
+    )
+    assert passes_hard_filters(consultancy) is True

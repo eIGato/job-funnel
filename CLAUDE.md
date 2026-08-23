@@ -175,6 +175,24 @@ docker compose run --rm --build app uv run funnel run-funnel
   clear geography/seniority?" in pure code. `drafting/screen.py` decides "is it the right *kind*
   of job?" in one cheap model call before drafting. Keep them apart: a regex judging emphasis is
   whack-a-mole, and a model re-judging geography overrules a decision the human already made.
+- **An ad that wants a passport is not a posting.** Job 4257 ("Software Developer",
+  "Brahmandnayak Group Of Companies", Berlin, off a Glassdoor alert) promised visa sponsorship
+  and relocation, required a "Valid passport", and named its stack as "Java, Python, . NET, C#,
+  JavaScript, or similar technologies". It ranked at the 95.8th percentile, passed every filter
+  and the screen, and the human sent it a letter and a CV on 2026-08-11 (application 166, now
+  DECLINED, note "Scam"). The cost of that miss is not a wasted call — it is personal data
+  handed to whoever placed the ad, so `filters._is_relocation_scam` drops it before embedding,
+  in the same "not a job posting" category as scraped page furniture. **The three signals only
+  fire together.** Measured over all 18,856 rows (2026-08-23): visa sponsorship 1,549, a
+  relocation offer 553, an "or similar technologies" hedge 139, boilerplate duties 71, four
+  unrelated languages in a run 14, a passport demand 3 — and the conjunction exactly one, 4257,
+  with no other verdict in the table changed. The three rows that come closest hold three
+  signals and no passport, and are all one real Munich/SF startup. A real relocation offer says
+  two of these things too; what it also does is name the stack it hires for. It belongs here
+  and not in the screen because the tell is made of visas and relocation, i.e. geography, which
+  the screen must never judge. **The salary-spread heuristic suggested alongside this one was
+  not built**: `Job` stores no salary at all (only some adapters carry one, inside the body
+  text), and this ad quotes no number — "Competitive salary" is the tell, not a range.
 - **A link nobody can apply through is not a candidate.** `matching/apply_route.py` lists the
   hosts that are dead ends for this human — `adzuna.com`/`adzuna.ca` answer 403 from where he
   lives, RemoteOK's apply button is behind its paid tier — and `match` flags every row against
