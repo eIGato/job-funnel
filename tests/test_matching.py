@@ -147,6 +147,72 @@ def test_onsite_geo_requirement_is_kept_not_rejected(job: NormalizedJob) -> None
     assert passes_hard_filters(kept) is True
 
 
+def test_onsite_refusal_to_sponsor_is_rejected(job: NormalizedJob) -> None:
+    """Job 15486 (clera, San Francisco): the reason on-site postings are kept is that a company
+    stating a requirement often sponsors on request, and this posting has answered that."""
+    dead_end = job.model_copy(
+        update={
+            "is_remote": False,
+            "location": "San Francisco",
+            "title": "Founding Engineer & Head of Engineering",
+            "description": (
+                "Own the agent infrastructure and full stack.\n"
+                "Location & Work Arrangement\n"
+                "On-site in San Francisco, CA — remote work is not available for this role.\n"
+                "Visa sponsorship: not available."
+            ),
+        }
+    )
+    assert passes_hard_filters(dead_end) is False
+
+
+def test_an_onsite_offer_of_sponsorship_is_not_read_as_a_refusal(job: NormalizedJob) -> None:
+    """Job 10437 (Munich): "remote work is not available" and "Visa sponsorship is available" are
+    adjacent lines, and a negation that may cross a sentence turns the offer into a refusal."""
+    kept = job.model_copy(
+        update={
+            "is_remote": False,
+            "location": "Munich",
+            "description": (
+                "Munich, Germany — on-site\n"
+                "This is a full-time, in-person role; remote work is not available\n"
+                "Visa sponsorship is available"
+            ),
+        }
+    )
+    assert passes_hard_filters(kept) is True
+
+
+def test_a_refusal_to_sponsor_where_the_human_already_works_is_kept(job: NormalizedJob) -> None:
+    # Montenegro on-site is a standing keep; a posting there refusing to sponsor is talking to
+    # somebody else.
+    kept = job.model_copy(
+        update={
+            "is_remote": False,
+            "location": "Tivat, Montenegro",
+            "description": "On-site. Visa sponsorship is not available.",
+        }
+    )
+    assert passes_hard_filters(kept) is True
+
+
+def test_a_remote_refusal_to_sponsor_still_opens_to_a_contractor(job: NormalizedJob) -> None:
+    # On the remote branch a refusal is one more way of saying "be authorized here already",
+    # and the existing escapes answer it — unlike on-site, where nothing does.
+    kept = job.model_copy(
+        update={
+            "is_remote": True,
+            "description": "Remote. We do not offer visa sponsorship. Open to B2B contractors.",
+        }
+    )
+    assert passes_hard_filters(kept) is True
+
+    locked = kept.model_copy(
+        update={"description": "Remote from our New York office. We do not offer visa sponsorship."}
+    )
+    assert passes_hard_filters(locked) is False
+
+
 def test_cosine_of_identical_vectors_is_one() -> None:
     vector = np.array([1.0, 2.0, 3.0], dtype=np.float32)
     scores = cosine_similarity(vector.reshape(1, -1), vector)

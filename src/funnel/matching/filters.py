@@ -9,8 +9,12 @@ Answered geography rules (PLAN.md section 7):
   - A *remote* posting locked to a geography we cannot satisfy ("US only", "must be authorized
     to work in the UK"): reject — unless it explicitly welcomes a contractor / B2B arrangement,
     which the human can serve through a Georgian entity.
-  - On-site / hybrid without explicit sponsorship: KEPT (companies sponsor on request without
-    saying so); it merely ranks below remote, and ranking is a sort, not this predicate.
+  - On-site / hybrid that is merely *silent* about sponsorship: KEPT (companies sponsor on
+    request without saying so); it merely ranks below remote, and ranking is a sort, not this
+    predicate.
+  - On-site / hybrid that *refuses* to sponsor in so many words: reject. That is the same
+    statement the remote branch already rejects, and the "they might sponsor on request"
+    assumption above is exactly the question it has answered (see `_NO_SPONSORSHIP`).
   - Timezone: not filtered at all.
   - Montenegro on-site: deliberately NOT filtered (decided 2026-07-24). The local IT market is
     a fraction of a percent of the input stream, and the human would take a cheap local gig, so
@@ -146,6 +150,47 @@ _REGION_AS_REQUIREMENT = re.compile(
 #: saying there is none. Kept tight — "all/any" must sit next to the authorization phrase, not
 #: merely somewhere in the posting, because "AWS preferred" elsewhere in a body is not consent.
 _AUTHORIZATION_OPEN = re.compile(r"\b(?:all|any)\b[\w\s,]{0,30}?work authoriz", re.IGNORECASE)
+
+#: A posting that says outright it will not sponsor. This is a different statement from
+#: `_GEO_LOCKED`'s "must be authorized to work in the US", and it is why on-site postings are no
+#: longer kept unconditionally: the standing reason for keeping them is that a company stating a
+#: requirement will often sponsor on request, and this sentence has already answered that. The
+#: human is a Montenegrin resident on a Russian passport — every workplace but Montenegro needs
+#: someone to file the permit, and this posting says nobody will.
+#:
+#: Job 15486 ("Founding Engineer & Head of Engineering", clera, San Francisco, off the Ashby
+#: source) is the measured case: "On-site in San Francisco, CA — remote work is not available for
+#: this role. Visa sponsorship: not available", said twice, in a body that also passed the screen
+#: — which cannot help here, because it is forbidden to judge geography (`drafting/screen.py`).
+#: It ranked at the 90.1st percentile and took a shortlist slot and a cover letter on 2026-08-24
+#: (application 773, drafted, never sent).
+#:
+#: Measured over all 20,752 rows (2026-08-26): 1,257 rows carry one of 47 distinct phrasings,
+#: 1,137 of them on-site. 28 sit above the shortlist floor — 24 on-site, and of those two had
+#: been drafted for (15486 and 9047, a Berlin SDK role), two had a letter sent and rejected, and
+#: the rest the human had declined by hand or had yet to reach.
+#:
+#: **The gap between the negation and the word cannot cross a sentence.** With `[\s\S]` there,
+#: job 10437 (Munich) matched on "remote work is not available\nVisa sponsorship is available" —
+#: a posting that offers sponsorship, read as refusing it. A refusal and its negation live in one
+#: sentence; `[^\n.;!?]` is what keeps them there.
+_NO_SPONSORSHIP = re.compile(
+    r"\b(?:no|not|without|cannot|can't|unable|won't)\b[^\n.;!?]{0,40}?\bsponsor\w*"
+    r"|\bsponsor\w*\b[^\n.;!?]{0,25}?"
+    r"\b(?:not available|not offered|not provided|not possible|unavailable)\b",
+    re.IGNORECASE,
+)
+
+#: ...unless the workplace is the one the human can take without anyone's permission. Montenegro
+#: on-site is a standing keep (see the header), and a Montenegrin posting saying "no visa
+#: sponsorship" is talking to somebody else. Read from the location field only — this is a
+#: statement about where the work is, the same field `_RU_BY_LOCATION` reads, not about a country
+#: named somewhere in the prose.
+_LOCAL_WORKPLACE = re.compile(
+    r"montenegro|crna gora|podgoric|budva|tivat|kotor|herceg[- ]novi|nik[sš]i[cć]"
+    r"|черногор|подгориц|будв|тиват|котор",
+    re.IGNORECASE,
+)
 
 #: Unconditional stops: clearances a RU citizen cannot obtain.
 STOP_PHRASES: frozenset[str] = frozenset({"security clearance"})
@@ -387,6 +432,18 @@ def _is_relocation_scam(job: _Filterable) -> bool:
     )
 
 
+def _sponsorship_refused(job: _Filterable, haystack: str) -> bool:
+    """True when the posting refuses to sponsor and the human would need it to work there.
+
+    Kept out of `_GEO_LOCKED` because the two are applied to different postings: a *requirement*
+    is only a lock on a remote posting, while a *refusal* is a lock on any posting the human
+    cannot already work in — which, on-site, is everywhere but Montenegro.
+    """
+    if not _NO_SPONSORSHIP.search(haystack):
+        return False
+    return not _LOCAL_WORKPLACE.search(job.location or "")
+
+
 def _below_middle(title: str) -> bool:
     return bool(_JUNIOR_TITLE.search(title)) and not _MIDDLE_PLUS_TITLE.search(title)
 
@@ -408,11 +465,17 @@ def passes_hard_filters(job: _Filterable) -> bool:
     # Seniority and the one hard stop-stack item read the title only (its priority signal).
     if _below_middle(job.title) or _ml_training_primary(job.title):
         return False
+    # An on-site posting that refuses to sponsor is a door with no handle: none of the escapes
+    # below can open it, because a B2B contract and a Europe-wide welcome still do not put the
+    # human in the office. The remote branch keeps them — there, a refusal to sponsor is one more
+    # way of saying "you must already be authorized here", which a contractor arrangement or a
+    # genuinely global posting answers.
+    if not job.is_remote:
+        return not _sponsorship_refused(job, haystack)
     # A remote posting locked to a geography we cannot satisfy, with no contractor door and no
     # Europe/worldwide admission, is out.
     return not (
-        job.is_remote
-        and bool(_GEO_LOCKED.search(haystack))
+        (bool(_GEO_LOCKED.search(haystack)) or _sponsorship_refused(job, haystack))
         and not _CONTRACTOR_OK.search(haystack)
         and not _REGION_OK.search(_REGION_AS_REQUIREMENT.sub(" ", haystack))
         and not _AUTHORIZATION_OPEN.search(haystack)

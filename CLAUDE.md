@@ -193,6 +193,24 @@ docker compose run --rm --build app uv run funnel run-funnel
   the screen must never judge. **The salary-spread heuristic suggested alongside this one was
   not built**: `Job` stores no salary at all (only some adapters carry one, inside the body
   text), and this ad quotes no number — "Competitive salary" is the tell, not a range.
+- **"We will not sponsor" is a geography, and it is the answer to the question that kept on-site
+  postings.** On-site/hybrid rows are kept unfiltered because a company that merely *states* an
+  authorization requirement will often sponsor on request — but a posting that says outright it
+  will not is that question already answered, and the human is a Montenegrin resident who needs
+  someone to file the permit everywhere but Montenegro. `filters._NO_SPONSORSHIP` therefore drops
+  a non-remote posting that refuses, and joins `_GEO_LOCKED` on the remote branch (where the
+  contractor/region/authorization-open escapes still apply — a B2B contract answers "be
+  authorized here already", and cannot put a body in a San Francisco office). Job 15486
+  ("Founding Engineer & Head of Engineering", clera, San Francisco, Ashby) is the measured case:
+  "On-site in San Francisco, CA — remote work is not available for this role. Visa sponsorship:
+  not available", said twice, ranked at the 90.1st percentile, took a shortlist slot and a cover
+  letter on 2026-08-24 (application 773, drafted, never sent). **The screen cannot catch this** —
+  it is forbidden to judge geography, and rightly. Measured over all 20,752 rows (2026-08-26):
+  1,257 carry one of 47 distinct phrasings, 1,137 of them on-site; 26 sat above the shortlist
+  floor and none of the ~18.9k rows that passed before now pass differently in the other
+  direction. **The negation may not cross a sentence** — with a permissive gap, job 10437
+  (Munich) matched across "remote work is not available\nVisa sponsorship is available" and read
+  an offer as a refusal, so the gap is `[^\n.;!?]` and the inversion is pinned by a test.
 - **A link nobody can apply through is not a candidate.** `matching/apply_route.py` lists the
   hosts that are dead ends for this human — `adzuna.com`/`adzuna.ca` answer 403 from where he
   lives, RemoteOK's apply button is behind its paid tier — and `match` flags every row against
