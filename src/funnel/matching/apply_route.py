@@ -48,6 +48,12 @@ from urllib.parse import urlparse
 #: Hosts where a posting cannot be applied to, whatever it says. Registrable domains: the test
 #: below covers their subdomains too. Extend as the human hits another wall — and delete an
 #: entry the moment a site lets them in again, since every entry costs real postings.
+#:
+#: "As the human hits another wall" now has a record instead of a memory:
+#: `ApplicationStatus.UNREACHABLE` is what he marks the row, and `funnel doctor` groups those
+#: rows by host. One row is a dead posting; a host that keeps coming back is the next entry
+#: here. The report never edits this list — deciding that a whole site is closed to him is a
+#: judgment about his region and his accounts, which is his to make (invariant 8).
 BLOCKED_HOSTS: frozenset[str] = frozenset({"adzuna.com", "adzuna.ca", "remoteok.com"})
 
 

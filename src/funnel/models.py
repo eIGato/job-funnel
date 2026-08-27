@@ -177,6 +177,28 @@ class ApplicationStatus(enum.StrEnum):
     # more precise goes in `notes`. Terminal like the rest, so `shortlist` treats the role as
     # handled and `check-replies` never scans it.
     CLOSED = "closed"
+    # The human went to apply and there was no way to submit: the site answers 403 from his
+    # region, the apply button is behind a paid tier, the form demands an account he will not
+    # open, the link 404s or lands on a board's front page. Not CLOSED — the employer is still
+    # hiring, and saying otherwise misreads a wall of ours as a decision of theirs. Not DECLINED
+    # either: nobody judged the fit, and DECLINED is what the screen writes.
+    #
+    # Its point is that it is a defect signal about the *funnel*, not bookkeeping about a role.
+    # `apply_route.BLOCKED_HOSTS` already keeps whole hosts out of the shortlist, and both of its
+    # entries were found by the human hitting a wall and mentioning it once — when they were
+    # found, they held 131 of the ~640 rows above the floor. This status is that report's input:
+    # `funnel doctor` groups these rows by host, and a host that keeps appearing is the next
+    # entry. Which wall it was goes in `notes`; nothing in `src/` branches on it, so it stays
+    # free text rather than an enum column.
+    #
+    # No letter went out, so `sent_at`/`reply_at`/`reply_type` stay NULL and it is absent from
+    # REPLYABLE_STATUSES, on the same contract as CLOSED. `updated_at` is when the wall was hit.
+    #
+    # It arrives with no data migration on purpose. The 29 CLOSED rows carry no record of what
+    # happened — every one of their `notes` holds the drafter's own "Leans on:" audit trail, so
+    # which of them were really unreachable is not knowable, and inventing an answer is the
+    # habit that produced the fabricated `reply_at` values migration a1c7e35f9b04 had to undo.
+    UNREACHABLE = "unreachable"
     # The posting was not a real job: an ad placed to collect passports, fees or documents.
     # Its own value because it is the one terminal status that says nothing about fit and may
     # sit on either side of the send. `sent_at` is kept when a letter did go out — that is what
@@ -192,8 +214,8 @@ class ApplicationStatus(enum.StrEnum):
 
 
 #: The statuses `check-replies` scans, i.e. the ones where an incoming email could be an answer
-#: to us. Membership means a letter actually went out — which is why CLOSED and DECLINED are not
-#: here. Matching a reply to an application that was never sent is a mismatch by construction,
+#: to us. Membership means a letter actually went out — which is why CLOSED, UNREACHABLE and
+#: DECLINED are not here. Matching a reply to an application that was never sent is a mismatch by construction,
 #: and it has already happened: a justjoin.it *job alert* was linked to a never-sent row that had
 #: been filed as REJECTED, because the fallback matches on the sender's domain.
 #:

@@ -273,3 +273,48 @@ def test_the_company_cap_is_configurable() -> None:
         )
     )
     assert "company_rank <= 1" in sql
+
+
+class _UrlsOnly:
+    """A session stub that answers one `select(Job.url)` — the suite never touches Postgres."""
+
+    def __init__(self, urls: list[str]) -> None:
+        self._urls = urls
+
+    def execute(self, _statement: object) -> _UrlsOnly:
+        return self
+
+    def scalars(self) -> list[str]:
+        return self._urls
+
+
+def test_unreachable_rows_are_reported_by_host_commonest_first() -> None:
+    """The report is the input side of `BLOCKED_HOSTS`: one wall is a dead posting, a host that
+    keeps coming back is a dead site, and only the count tells them apart."""
+    session = _UrlsOnly(
+        [
+            "https://www.example-board.com/jobs/1",
+            "https://EXAMPLE-BOARD.com/jobs/2",
+            "https://jobs.example-board.com/3",
+            "https://other.test/x",
+        ]
+    )
+    hosts = cli._unreachable_hosts(session)  # type: ignore[arg-type]
+
+    assert hosts[0][:2] == ("example-board.com", 2), "www. and case must fold to one host"
+    assert ("jobs.example-board.com", 1, False) in hosts, "a subdomain is its own host to count"
+    assert [count for _, count, _ in hosts] == sorted(
+        (count for _, count, _ in hosts), reverse=True
+    )
+
+
+def test_a_host_already_blocked_is_reported_as_such_not_hidden() -> None:
+    """Its rows are the evidence the entry still earns its place — and `BLOCKED_HOSTS` says to
+    delete an entry the moment the site lets the human in again."""
+    session = _UrlsOnly(["https://www.adzuna.com/details/1", "https://untouched.test/2"])
+
+    reported = cli._unreachable_hosts(session)  # type: ignore[arg-type]
+    hosts = {host: already for host, _, already in reported}
+
+    assert hosts["adzuna.com"] is True
+    assert hosts["untouched.test"] is False

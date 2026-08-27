@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import typer
 from sqlalchemy import case, func, select
@@ -863,6 +864,36 @@ def init_db() -> None:
     typer.echo("Schema is managed by Alembic only:\n  uv run alembic upgrade head")
 
 
+def _unreachable_hosts(session: Session) -> list[tuple[str, int, bool]]:
+    """Hosts the human has marked UNREACHABLE, commonest first, with `already listed` alongside.
+
+    The input side of `apply_route.BLOCKED_HOSTS`, which is hand-maintained and whose two
+    entries were each found by the human walking into a wall and mentioning it once. A host that
+    keeps turning up here is the next entry; a host that turned up once is a dead posting, not a
+    dead site, and the count is what tells them apart — so this reports and never edits the list.
+    Hosts already in it are listed too rather than filtered out: their rows are the evidence the
+    entry is still earning its place, and `BLOCKED_HOSTS` says to delete an entry the moment a
+    site lets the human in again.
+    """
+    from funnel.matching.apply_route import is_blocked
+    from funnel.models import Application, ApplicationStatus
+
+    rows = session.execute(
+        select(Job.url)
+        .join(Application, Application.job_id == Job.id)
+        .where(Application.status == ApplicationStatus.UNREACHABLE)
+    ).scalars()
+    counts: dict[str, int] = {}
+    listed: dict[str, bool] = {}
+    for url in rows:
+        host = (urlparse(url.strip()).hostname or "").lower().removeprefix("www.")
+        if not host:
+            continue
+        counts[host] = counts.get(host, 0) + 1
+        listed[host] = is_blocked(url)
+    return [(host, n, listed[host]) for host, n in sorted(counts.items(), key=lambda kv: -kv[1])]
+
+
 @app.command()
 def doctor() -> None:
     """Check the environment: config, database, adapter registry, CV."""
@@ -897,6 +928,21 @@ def doctor() -> None:
             "gmail token     : missing (run `uv run funnel auth-gmail`)",
             fg=typer.colors.YELLOW,
         )
+
+    try:
+        with session_scope() as session:
+            hosts = _unreachable_hosts(session)
+    except Exception:  # the database line above already reported why
+        hosts = []
+    if hosts:
+        total = sum(count for _, count, _ in hosts)
+        typer.echo(f"apply routes    : {total} unreachable row(s) the human could not apply to")
+        for host, count, already in hosts:
+            note = "already in BLOCKED_HOSTS" if already else "candidate for BLOCKED_HOSTS"
+            colour = typer.colors.GREEN if already else typer.colors.YELLOW
+            typer.secho(f"                  {count:>3}x {host} - {note}", fg=colour)
+    else:
+        typer.echo("apply routes    : nothing marked unreachable")
 
     profile: Path = settings.profiles_dir / f"{settings.active_profile}.md"
     if profile.is_file():

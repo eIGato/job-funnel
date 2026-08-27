@@ -355,10 +355,10 @@ docker compose run --rm --build app uv run funnel run-funnel
   applications go through a web form. So a conclusive match writes `message.thread_id` back
   onto the Application, and the oldest-first order means an acknowledgement teaches the thread
   before the answer to it is looked at in the same batch.
-- **Not applying has four different statuses, and they stay apart.** `DECLINED` is the screen's
+- **Not applying has five different statuses, and they stay apart.** `DECLINED` is the screen's
   verdict on fit, `CLOSED` is a posting that stopped taking applications before the human got
-  there, `SCAM` is a posting that was never a job, `REJECTED` is them declining us — which
-  presupposes a letter went out. `REJECTED` was
+  there, `UNREACHABLE` is a posting he could not apply to at all, `SCAM` is a posting that was
+  never a job, `REJECTED` is them declining us — which presupposes a letter went out. `REJECTED` was
   doing all three jobs until 2026-08-06: 16 of the 18 rejections on record had `sent_at IS NULL`
   and a `reply_at` invented at noon of the day the closure was noticed, so any sent-to-reply rate
   counted refusals against applications that never existed, and `check-replies` kept scanning
@@ -366,6 +366,29 @@ docker compose run --rm --build app uv run funnel run-funnel
   `sent_at`/`reply_at`/`reply_type` NULL; `updated_at` is when it was found closed. **Never write
   a timestamp into a reply field to make a row look consistent** — an empty column is readable,
   a fabricated one is not.
+- **A wall of ours is not a decision of theirs, and it is a defect signal about the funnel.**
+  `UNREACHABLE` (added 2026-08-27) is a posting the human went to apply to and could not: the
+  site answers 403 from his region, the apply button is behind a paid tier, the form wants an
+  account he will not open, the link 404s or lands on a board's front page. Filed as `CLOSED` it
+  says the employer stopped hiring, which is a claim about them made out of a fact about us;
+  filed as `DECLINED` it says the screen judged the fit, which nobody did. Same NULL contract as
+  `CLOSED` (`sent_at`/`reply_at`/`reply_type` empty, `updated_at` is when the wall was hit) and
+  the same absence from `REPLYABLE_STATUSES`. **Its point is the report, not the bookkeeping.**
+  `apply_route.BLOCKED_HOSTS` is hand-maintained and both entries were found by the human hitting
+  a wall and mentioning it once — and when they were found they held 131 of the ~640 rows above
+  the floor. `funnel doctor` now groups `UNREACHABLE` rows by host: one row is a dead posting, a
+  host that keeps coming back is the next entry, and the count is the only thing that tells them
+  apart. It reports and never edits — which site is closed to him is a fact about his region and
+  his accounts (invariant 8). **The reason stays free text in `notes`** and is deliberately not
+  an enum column: nothing in `src/` branches on which wall it was, and the split that would have
+  earned one (a dead *link* should let the role return from another source, a dead *site* should
+  not) was measured and is worth ~nothing — of the 131 blocked rows above the floor, exactly 1
+  had a twin from another source. **It arrived with no data migration**, and could not have had
+  one: all 29 existing `CLOSED` rows carry the drafter's own "Leans on:" text in `notes` and no
+  record of what happened, so which of them were really unreachable is not knowable. Guessing is
+  how the fabricated `reply_at` values in `a1c7e35f9b04` happened. Adding the value cost no DDL —
+  the column is `VARCHAR(11)` with no CHECK and `UNREACHABLE` is exactly 11 characters, which
+  `tests/test_models.py` pins.
 - **`SCAM` is the one terminal status that says nothing about fit, and it keeps its `sent_at`.**
   A fraudulent posting can be caught on either side of the send, and application 166 was caught
   after: the letter and CV went to job 4257 on 2026-08-11 (added 2026-08-23, migration
