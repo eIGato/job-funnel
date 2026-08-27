@@ -46,6 +46,7 @@ def test_only_sent_statuses_are_scanned_for_replies() -> None:
         ApplicationStatus.DECLINED,
         ApplicationStatus.CLOSED,
         ApplicationStatus.UNREACHABLE,
+        ApplicationStatus.INELIGIBLE,
     }
     assert never_sent.isdisjoint(REPLYABLE_STATUSES)
     assert ApplicationStatus.SENT in REPLYABLE_STATUSES

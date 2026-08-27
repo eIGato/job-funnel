@@ -318,3 +318,36 @@ def test_a_host_already_blocked_is_reported_as_such_not_hidden() -> None:
 
     assert hosts["adzuna.com"] is True
     assert hosts["untouched.test"] is False
+
+
+class _CountThenNotes:
+    """A session stub answering the two statements `_ineligible_requirements` issues, in order."""
+
+    def __init__(self, total: int, notes: list[str | None]) -> None:
+        self._answers: list[object] = [total, notes]
+
+    def execute(self, _statement: object) -> _CountThenNotes:
+        return self
+
+    def scalar_one(self) -> object:
+        return self._answers.pop(0)
+
+    def scalars(self) -> object:
+        return self._answers.pop()
+
+
+def test_the_filter_backlog_prints_requirements_not_a_count() -> None:
+    """The note is meant to hold the posting's own sentence, so it can be grepped over the whole
+    table to size a filter before writing one. A count alone cannot be grepped."""
+    session = _CountThenNotes(2, ["Fluent  German\nrequired", None])
+
+    total, requirements = cli._ineligible_requirements(session)  # type: ignore[arg-type]
+
+    assert total == 2
+    assert requirements == ["Fluent German required"], "whitespace folds, an empty note is skipped"
+
+
+def test_the_filter_backlog_is_quiet_when_there_is_nothing_to_read() -> None:
+    session = _CountThenNotes(0, [])
+
+    assert cli._ineligible_requirements(session) == (0, [])  # type: ignore[arg-type]

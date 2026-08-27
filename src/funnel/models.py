@@ -169,6 +169,28 @@ class ApplicationStatus(enum.StrEnum):
     # fit on the soft stop-stack (PLAN.md section 7). Distinct from REJECTED, which is *them*
     # declining *us*. Kept off the plain-draft path so it is never re-drafted by the timer.
     DECLINED = "declined"
+    # The posting carries a mandatory requirement the human does not meet and cannot acquire:
+    # a language he does not speak, a work authorization nobody will file for him, a licence or
+    # a clearance he does not hold. The mirror image of DECLINED — that one is "we do not want
+    # this role", this one is "they cannot take us" — and mixing them made both unreadable.
+    #
+    # It exists for the same reason UNREACHABLE does: it is the input to a hand-maintained list.
+    # Every row here is a hard filter that does not exist yet, and it cost a screening call and
+    # a letter to discover. Measured on 2026-08-27, before the status existed: of 547 DECLINED
+    # rows, 502 were the screen's own verdict (its notes say so) and 45 were the human changing
+    # the status by hand after reading the posting — 36 of those after a letter had already been
+    # written for it. Re-running today's filters over those 45 explains 5. The other 40 are
+    # unreadable: their `notes` hold the drafter's "Leans on:" audit trail and no reason at all.
+    #
+    # **Put the requirement's own words in `notes`.** Not a paraphrase — the posting's sentence.
+    # That is what makes the next filter measurable before it is written: `_NO_SPONSORSHIP` was
+    # built by grepping the whole table for the phrasing of three such notes and finding 1,257
+    # rows carrying 47 variants of it. A paraphrase greps nothing.
+    #
+    # Terminal, nothing was sent, so the same NULL contract as CLOSED and absent from
+    # REPLYABLE_STATUSES. Geography is deliberately included here even though `filters.py` owns
+    # it: the human is recording what he found, not deciding where a rule belongs.
+    INELIGIBLE = "ineligible"
     # The posting was closed by the time the human went to apply — no letter ever went out.
     # Neither them declining us (REJECTED) nor us judging the fit (DECLINED), so it gets its own
     # value: recording it as REJECTED counted a refusal against an application that was never
@@ -214,8 +236,8 @@ class ApplicationStatus(enum.StrEnum):
 
 
 #: The statuses `check-replies` scans, i.e. the ones where an incoming email could be an answer
-#: to us. Membership means a letter actually went out — which is why CLOSED, UNREACHABLE and
-#: DECLINED are not here. Matching a reply to an application that was never sent is a mismatch by construction,
+#: to us. Membership means a letter actually went out — which is why CLOSED, UNREACHABLE,
+#: INELIGIBLE and DECLINED are not here. Matching a reply to an application that was never sent is a mismatch by construction,
 #: and it has already happened: a justjoin.it *job alert* was linked to a never-sent row that had
 #: been filed as REJECTED, because the fallback matches on the sender's domain.
 #:

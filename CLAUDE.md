@@ -355,10 +355,11 @@ docker compose run --rm --build app uv run funnel run-funnel
   applications go through a web form. So a conclusive match writes `message.thread_id` back
   onto the Application, and the oldest-first order means an acknowledgement teaches the thread
   before the answer to it is looked at in the same batch.
-- **Not applying has five different statuses, and they stay apart.** `DECLINED` is the screen's
-  verdict on fit, `CLOSED` is a posting that stopped taking applications before the human got
-  there, `UNREACHABLE` is a posting he could not apply to at all, `SCAM` is a posting that was
-  never a job, `REJECTED` is them declining us — which presupposes a letter went out. `REJECTED` was
+- **Not applying has six different statuses, and they stay apart.** `DECLINED` is the screen's
+  verdict on fit, `INELIGIBLE` is a requirement the human cannot meet, `CLOSED` is a posting that
+  stopped taking applications before he got there, `UNREACHABLE` is a posting he could not apply
+  to at all, `SCAM` is a posting that was never a job, `REJECTED` is them declining us — which
+  presupposes a letter went out. `REJECTED` was
   doing all three jobs until 2026-08-06: 16 of the 18 rejections on record had `sent_at IS NULL`
   and a `reply_at` invented at noon of the day the closure was noticed, so any sent-to-reply rate
   counted refusals against applications that never existed, and `check-replies` kept scanning
@@ -366,6 +367,24 @@ docker compose run --rm --build app uv run funnel run-funnel
   `sent_at`/`reply_at`/`reply_type` NULL; `updated_at` is when it was found closed. **Never write
   a timestamp into a reply field to make a row look consistent** — an empty column is readable,
   a fabricated one is not.
+- **"We do not want them" and "they cannot take us" are different measurements.** `INELIGIBLE`
+  (added 2026-08-27, migration `d3f6b81c04ae`) is a mandatory requirement the human does not meet
+  and cannot acquire — a language he does not speak, a work authorization nobody will file, a
+  licence he does not hold. `DECLINED` is the screen's verdict on the *kind* of work, and it was
+  carrying both: of 547 DECLINED rows, 502 were the screen's own (its notes say so) and **45 were
+  the human changing the status by hand, 36 of them after a letter had already been written**.
+  The two grade different things — DECLINED grades the screen and the profile, `INELIGIBLE`
+  grades the coverage of `matching/filters.py`, because every row in it is a hard filter that
+  does not exist yet. **Put the requirement's own words in `notes`, not a paraphrase.** That is
+  what makes the next filter measurable before it is written: `_NO_SPONSORSHIP` was built by
+  grepping the table for the phrasing of three such notes and finding 1,257 rows carrying 47
+  variants — a paraphrase greps nothing. `funnel doctor` prints the notes (newest first, capped)
+  rather than a count, for the same reason. The migration moved **4 rows and no more**: only
+  hand-written notes are read, because a drafter's "Leans on:" audit trail can quote a posting's
+  visa sentence while the human declined it for something else. The other **40 hand-declined rows
+  are unreadable** — drafted for, then declined, with the drafter's text where the reason should
+  be — and re-running today's filters over the 45 explains only 5. That gap is the thing the
+  status exists to stop growing, and `doctor` prints its size once so it is not re-derived.
 - **A wall of ours is not a decision of theirs, and it is a defect signal about the funnel.**
   `UNREACHABLE` (added 2026-08-27) is a posting the human went to apply to and could not: the
   site answers 403 from his region, the apply button is behind a paid tier, the form wants an

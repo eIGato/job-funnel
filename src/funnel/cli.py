@@ -864,6 +864,37 @@ def init_db() -> None:
     typer.echo("Schema is managed by Alembic only:\n  uv run alembic upgrade head")
 
 
+def _ineligible_requirements(session: Session, limit: int = 8) -> tuple[int, list[str]]:
+    """The requirements the human was found not to meet: the backlog of `matching/filters.py`.
+
+    Every one of these rows is a hard filter that does not exist yet, and it cost a screening
+    call and a cover letter to find — 36 of the 45 hand-declined rows measured on 2026-08-27 had
+    a letter written before the human read far enough. Printing the notes rather than a count is
+    the point: the note is meant to hold the posting's own sentence, so it can be grepped over
+    the whole table to size a filter before writing one (`_NO_SPONSORSHIP` was built that way).
+
+    Newest first and capped: this is a reading list, not a report to scroll.
+    """
+    from funnel.models import Application, ApplicationStatus
+
+    total = session.execute(
+        select(func.count())
+        .select_from(Application)
+        .where(Application.status == ApplicationStatus.INELIGIBLE)
+    ).scalar_one()
+    notes = session.execute(
+        select(Application.notes)
+        .where(
+            Application.status == ApplicationStatus.INELIGIBLE,
+            Application.notes.isnot(None),
+            func.length(func.trim(Application.notes)) > 0,
+        )
+        .order_by(Application.updated_at.desc())
+        .limit(limit)
+    ).scalars()
+    return total, [" ".join(note.split())[:70] for note in notes if note]
+
+
 def _unreachable_hosts(session: Session) -> list[tuple[str, int, bool]]:
     """Hosts the human has marked UNREACHABLE, commonest first, with `already listed` alongside.
 
@@ -943,6 +974,22 @@ def doctor() -> None:
             typer.secho(f"                  {count:>3}x {host} - {note}", fg=colour)
     else:
         typer.echo("apply routes    : nothing marked unreachable")
+
+    try:
+        with session_scope() as session:
+            ineligible, requirements = _ineligible_requirements(session)
+    except Exception:  # the database line above already reported why
+        ineligible, requirements = 0, []
+    if ineligible:
+        typer.echo(
+            f"filter backlog  : {ineligible} posting(s) with a requirement the human cannot meet"
+        )
+        for requirement in requirements:
+            typer.secho(f"                  - {requirement}", fg=typer.colors.YELLOW)
+        if len(requirements) < ineligible:
+            typer.echo(f"                  ... and {ineligible - len(requirements)} more")
+    else:
+        typer.echo("filter backlog  : nothing marked ineligible")
 
     profile: Path = settings.profiles_dir / f"{settings.active_profile}.md"
     if profile.is_file():
