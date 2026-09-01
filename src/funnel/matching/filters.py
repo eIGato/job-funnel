@@ -31,6 +31,16 @@ Answered seniority / stop-stack (PLAN.md section 7, decided 2026-07-24):
     screening step (`drafting/screen.py`), which every drafting path runs, not forced into a
     regex here.
 
+Requirements the human cannot acquire (added 2026-09-01, from the INELIGIBLE backlog):
+  - A working language that is not English or Russian, stated as a requirement rather than as a
+    plus and not offered as an alternative to English: reject (`_FOREIGN_LANGUAGE_REQUIRED`).
+  - A vetting clearance in any of its spellings — SC, DV, TS/SCI, BPSS, Public Trust — not just
+    the phrase "security clearance" (`_CLEARANCE_REQUIRED`).
+  Both are facts about the human, like a visa, which is why they are here and not in the screen.
+  Neither reaches the case that motivated it when the board only gave us a teaser: 9 of the 11
+  rows the human marked INELIGIBLE are 500-character Adzuna teasers whose stored body never
+  reaches the requirements section, and no filter over `description` can see what is not in it.
+
 Junk postings:
   - A row whose title is scraped page furniture ("Job Details", "Couldn't pick up that page") or
     a placeholder ("This is a test job") is not a posting and is dropped.
@@ -192,8 +202,115 @@ _LOCAL_WORKPLACE = re.compile(
     re.IGNORECASE,
 )
 
-#: Unconditional stops: clearances a RU citizen cannot obtain.
-STOP_PHRASES: frozenset[str] = frozenset({"security clearance"})
+#: Unconditional stops: a vetting clearance a RU citizen living outside the country cannot get.
+#:
+#: This was the literal substring "security clearance" until 2026-09-01, which is one phrasing
+#: out of many: a UK posting writes "SC Clearance or the ability to obtain SC (and later DV)"
+#: and a US one writes "Active TS/SCI w/ FS Poly required" or "eligibility for a U.S. government
+#: secret clearance". Measured over all 23,745 rows: 53 carry a variant the substring missed,
+#: one of them above the shortlist floor — job 21031, "Python Full Stack Developer (TS/SCI
+#: clearance)", 95.8th percentile. All 18 sampled by hand were real vetting requirements; the
+#: named prefixes are what keep the word out of its other senses ("clearance from the design
+#: team"), so extend the prefix list rather than loosening it to a bare "clearance".
+#:
+#: A clearance belongs here and not in `drafting/screen.py` for the same reason a visa does: it
+#: is a fact about the human, not a judgment about the kind of work.
+#:
+#: Note what it still cannot reach. Application 764 (Didcot, "Hard blocker in Required Skills:
+#: SC Clearance or the ability to obtain SC (and later DV)") is the recorded INELIGIBLE case,
+#: and its stored body is a 500-character Adzuna teaser that never reaches the requirements —
+#: the sentence the human read is on the board, not in the table (see `_FOREIGN_LANGUAGE`).
+_CLEARANCE_REQUIRED = re.compile(
+    r"\bsecurity clearance\b"
+    r"|\b(?:sc|dv|ts/sci|ts-sci|bpss|nppv|ctc|nato|dod|doe|public trust)\s+clearance\b"
+    r"|\b(?:secret|top secret)\s+clearance\b"
+    r"|\bactive\s+(?:ts|sci|secret|top secret)\b"
+    r"|\bclearance\s*(?:level)?\s*:?\s*(?:required|eligible|active)\b",
+    re.IGNORECASE,
+)
+
+#: A working language the human does not have. English and Russian are his and are therefore
+#: absent from this list: a posting demanding either is not a wall, and neither is one that
+#: offers a foreign language as an *alternative* to English ("German or English; the team uses
+#: both", job 11244).
+#:
+#: This is the same kind of statement as a visa requirement — a checkable fact about the human
+#: rather than a judgment about the role — so it lives here and not in `drafting/screen.py`,
+#: which grades the *kind* of work. It is the one of the three rules proposed on 2026-09-01
+#: that the table justified: measured over all 23,745 rows, 3,990 fire and 3,537 of them were
+#: passing before, 7 of those above the shortlist floor (among them job 14708, "Python
+#: Developer | German-speaking", 99.7th percentile, which the human had already marked
+#: INELIGIBLE by hand with the note "I don't speak German"). The bulk sits below the floor and
+#: is arbeitnow's German-language market: 3,349 of the 3,537.
+#:
+#: **Dropping that many rows moves every score**, because `match_score` is centered on the mean
+#: posting vector and the percentile is a rank within the population (see `matching/embed.py`).
+#: Simulated on the stored embeddings before this shipped: the pool above the 90th percentile
+#: goes from 879 draftable rows to 699 — 7 because this rule drops them and 175 because the
+#: rank moved under them. That is not a loss of candidates (the floor only binds when the pool
+#: is thin, and 699 is far past `shortlist_limit`), but it is why the numbers in older notes
+#: here do not reproduce after this commit.
+#:
+#: The three *other* rules proposed the same day were measured and not built. A "must-have
+#: residency" rule is `_GEO_LOCKED` again, and half the above-floor rows it would newly catch
+#: say "must be located in NYC **or willing to relocate**", which is an invitation and not a
+#: lock; extending it to on-site postings would also reverse the standing "they sponsor on
+#: request" decision (see `_NO_SPONSORSHIP`). A "degree from a named university" rule fires on
+#: 17 rows table-wide, 2 of them above the floor (one posting, listed twice) and 7 of them
+#: "Nice to Have: degree from a top CS programme" — a filter that cannot be shown to catch the
+#: thing it is aimed at does not earn its false positives.
+_FOREIGN_LANGUAGES = (
+    r"german|deutsch\w*|polish|polski\w*|polskiego|french|fran[cç]ais|spanish|espa[nñ]ol|"
+    r"dutch|nederlands|italian|italiano|portuguese|portugu[eê]s|czech|swedish|norwegian|"
+    r"danish|finnish|hebrew|turkish|japanese|mandarin|chinese|korean|arabic|hungarian|"
+    r"romanian|greek|ukrainian|franz[oö]sisch\w*|spanisch\w*|niederl[aä]ndisch\w*|niemieck\w*"
+)
+
+#: The requirement itself: a fluency word next to the language, a level ("Polish C1"), the
+#: language next to "required", or the German/Polish idioms that say it in one word. The gaps
+#: are `[^\n.;!?•]` for the same reason `_NO_SPONSORSHIP`'s is — a requirement and the language
+#: it is about live in one clause.
+_FOREIGN_LANGUAGE_REQUIRED = re.compile(
+    rf"\b(?:fluent(?:ly)?|native|proficien\w+|business[- ]level|excellent|very good|sehr gute?|"
+    rf"flie[sß]end\w*|verhandlungssicher\w*|ausgezeichnete?|bardzo dobra)\b"
+    rf"[^\n.;!?•]{{0,30}}\b(?:{_FOREIGN_LANGUAGES})\b"
+    rf"|\b(?:{_FOREIGN_LANGUAGES})\b[^\n.;!?•]{{0,25}}"
+    rf"\b(?:required|mandatory|is a must|a must|essential|erforderlich|vorausgesetzt|"
+    rf"wymagany|wymagana)\b"
+    rf"|\b(?:{_FOREIGN_LANGUAGES})\s*(?:language\s*)?(?:skills?\s*)?(?:level\s*)?\(?[abc][12]\b"
+    rf"|\bmust\s+(?:speak|be fluent in)\b[^\n.;!?•]{{0,25}}\b(?:{_FOREIGN_LANGUAGES})\b"
+    rf"|\b(?:{_FOREIGN_LANGUAGES})[-\s]speaking\b(?!\s+(?:market|clients?|customers?|countries))"
+    rf"|\b(?:{_FOREIGN_LANGUAGES})kenntnisse\b"
+    rf"|znajomo\w*\s+j[eę]zyka\s+(?:polskiego|niemieckiego)",
+    re.IGNORECASE,
+)
+
+#: ...and the same clause taking it back. A language that is a plus, or that English answers,
+#: is not a wall — job 11244 ("Working proficiency in German or English; the team uses both")
+#: is what the `or english` term is for.
+#:
+#: **The softener has to sit in the same clause as the requirement**, which is what
+#: `_LANGUAGE_CLAUSES` is for. Measured both ways over the table: the two scopings disagree on
+#: 962 rows, and every one sampled is a real requirement that a "von Vorteil" or "is a plus"
+#: about something else, elsewhere in the same posting, would have cancelled — job 12589's
+#: "Sehr gute Deutschkenntnisse auf muttersprachlichem Niveau setzen wir voraus" is softened by
+#: a "von Vorteil" that is talking about a certification. Reading the whole body is the shape
+#: `_NO_SPONSORSHIP` already learned not to use.
+_LANGUAGE_OPTIONAL = re.compile(
+    r"\b(?:is|are|would be|as)\s+(?:a\s+)?(?:plus|bonus|advantage|nice[- ]to[- ]have|beneficial|"
+    r"welcome|appreciated|desirable|helpful|optional)\b"
+    r"|\bnot\s+(?:required|mandatory|necessary|a must)\b"
+    r"|von vorteil|w[uü]nschenswert|keine voraussetzung|mile widziane"
+    r"|\bor\s+english\b|\benglish\s+or\b|oder englisch",
+    re.IGNORECASE,
+)
+
+#: Clause boundaries: a newline, a bullet, or a full stop between a lowercase word and a
+#: capitalised one. Deliberately not `str.split(".")` — "MindPal Sp. z o. o." would become four
+#: clauses — and a requirements list is newline- or bullet-separated anyway, which is the case
+#: that actually carries these sentences.
+_LANGUAGE_CLAUSES = re.compile(r"[\n•;!?]|(?<=[a-z0-9)])\.(?=\s+[A-ZÄÖÜ])")
+
 
 #: A level below the Middle floor, read from the TITLE only — level is a title thing, and this
 #: keeps "we mentor junior engineers" in a senior role's body from tripping the filter.
@@ -432,6 +549,20 @@ def _is_relocation_scam(job: _Filterable) -> bool:
     )
 
 
+def _foreign_language_required(job: _Filterable) -> bool:
+    """True when the posting requires a working language the human does not have.
+
+    Clause by clause, because the requirement and the sentence that softens it have to be the
+    same sentence — see `_LANGUAGE_OPTIONAL`. Reads title and body only: a language is a
+    requirement a posting states, not a property of the place it names.
+    """
+    text = f"{job.title}\n{job.description}"
+    return any(
+        _FOREIGN_LANGUAGE_REQUIRED.search(clause) and not _LANGUAGE_OPTIONAL.search(clause)
+        for clause in _LANGUAGE_CLAUSES.split(text)
+    )
+
+
 def _sponsorship_refused(job: _Filterable, haystack: str) -> bool:
     """True when the posting refuses to sponsor and the human would need it to work there.
 
@@ -459,8 +590,7 @@ def passes_hard_filters(job: _Filterable) -> bool:
     if _RU_BY_LOCATION.search(job.location or "") or _RU_BY_LOCATION.search(_heading_location(job)):
         return False
     haystack = f"{job.title}\n{job.description}\n{job.location or ''}"
-    folded = haystack.casefold()
-    if any(phrase in folded for phrase in STOP_PHRASES):
+    if _CLEARANCE_REQUIRED.search(haystack) or _foreign_language_required(job):
         return False
     # Seniority and the one hard stop-stack item read the title only (its priority signal).
     if _below_middle(job.title) or _ml_training_primary(job.title):

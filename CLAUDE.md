@@ -211,6 +211,40 @@ docker compose run --rm --build app uv run funnel run-funnel
   direction. **The negation may not cross a sentence** — with a permissive gap, job 10437
   (Munich) matched across "remote work is not available\nVisa sponsorship is available" and read
   an offer as a refusal, so the gap is `[^\n.;!?]` and the inversion is pinned by a test.
+- **A language he does not speak is a wall, and it is the only one of three proposed rules the
+  table justified.** `filters._FOREIGN_LANGUAGE_REQUIRED` drops a posting that requires a working
+  language other than English or Russian — a fluency word next to the language, a level ("Polish
+  C1"), or the German/Polish one-word idioms — and `_LANGUAGE_OPTIONAL` keeps the ones that call
+  it a plus or offer English instead ("German or English; the team uses both", job 11244). It
+  belongs in filters and not the screen for the same reason a visa does: it is a fact about the
+  human, not a judgment about the kind of work. **The softener must sit in the same clause as the
+  requirement** — the two scopings disagree on 962 rows, every sampled one a real requirement that
+  a "von Vorteil" about a certification elsewhere in the posting would have cancelled.
+  Measured over all 23,745 rows (2026-09-01): 3,990 fire, 3,537 were passing before, **7 of them
+  above the shortlist floor** — among them job 14708 ("Python Developer | German-speaking", 99.7th
+  percentile), which the human had already marked INELIGIBLE by hand. 3,349 of the 3,537 are
+  arbeitnow's German-language market, below the floor. **Dropping 17% of the population moves
+  every score**, because the centre is a corpus property and the percentile is a rank in it:
+  simulated on the stored embeddings, the pool above the 90th percentile goes 879 → 699 draftable
+  rows, 7 by the rule and 175 by the rank moving under them. Not a loss (the floor only binds when
+  the pool is thin), but older row counts in these notes will not reproduce. Shipped alongside
+  `_CLEARANCE_REQUIRED`, which replaced the literal substring "security clearance" with its
+  spellings — SC, DV, TS/SCI, BPSS, Public Trust, "Active Top Secret" — 53 rows the substring
+  missed, 1 above the floor (job 21031). **The other two rules proposed the same day were measured
+  and not built**: a "must-have residency" rule is `_GEO_LOCKED` again, and half the above-floor
+  rows it would newly catch say "must be located in NYC **or willing to relocate**", which is an
+  invitation, not a lock; a "degree from a named university" rule fires on 17 rows table-wide, 2
+  above the floor (one posting listed twice) and 7 of them "Nice to Have".
+- **A filter cannot read what the board did not send, and that is where the dead applications come
+  from.** Of the 11 rows the human marked `INELIGIBLE`, the three rules above would have caught
+  **one** (14708). Nine are 500-character Adzuna teasers whose stored body stops before the
+  requirements section — the Polish C1, the SC clearance, the Northern Ireland residency and the
+  Russell Group degree are all on the board, not in the table — and the tenth blocker arrived in a
+  recruiter's email, not in the posting at all. Adzuna is 216 of the 665 applicable rows above the
+  floor (209 of them teasers), and it produced 63 of 81 `CLOSED` and 9 of 11 `INELIGIBLE`. So the
+  lever on dead applications is not another regex over `description`: it is fetching the real
+  description for a teaser before it takes a shortlist slot, or treating a truncated body the way
+  `cli.MIN_DRAFTABLE_BODY` treats a short one. Neither is built (2026-09-01).
 - **A link nobody can apply through is not a candidate.** `matching/apply_route.py` lists the
   hosts that are dead ends for this human — `adzuna.com`/`adzuna.ca` answer 403 from where he
   lives, RemoteOK's apply button is behind its paid tier — and `match` flags every row against

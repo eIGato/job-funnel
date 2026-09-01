@@ -686,3 +686,106 @@ def test_a_long_technology_list_alone_is_not_the_scam_signal(job: NormalizedJob)
         }
     )
     assert passes_hard_filters(consultancy) is True
+
+
+def test_a_required_foreign_language_is_a_wall(job: NormalizedJob) -> None:
+    """The requirement the human cannot acquire, in the spellings the boards actually use.
+
+    Job 14708 ("Python Developer | German-speaking", 99.7th percentile) is the recorded case:
+    the human marked it INELIGIBLE by hand with the note "I don't speak German".
+
+    nofluffjobs' "Must have: Python, Polish" (application 806) is deliberately absent: that
+    sentence is on the board, not in the row, and an arm for it was measured at 3 rows in the
+    whole table — one of which is "Must have valid German work rights", which is a visa.
+    """
+    for requirement in (
+        "🐍 Python Developer | German-speaking 🇩🇪",
+        "Fluent, professional German. You'll run workshops with client engineers.",
+        "Sehr gute Deutschkenntnisse (C1) in Wort und Schrift",
+        "Wymagania: Python, znajomość języka polskiego",
+        "Polish C1 alongside English B2",
+    ):
+        blocked = job.model_copy(update={"description": requirement})
+        assert passes_hard_filters(blocked) is False, requirement
+
+
+def test_english_and_russian_are_not_foreign(job: NormalizedJob) -> None:
+    """The two languages the human has. A posting demanding either is not a wall."""
+    for requirement in (
+        "Fluent English is required for this role.",
+        "Свободный русский язык обязателен",
+        "Excellent written and spoken English",
+    ):
+        kept = job.model_copy(update={"description": requirement})
+        assert passes_hard_filters(kept) is True, requirement
+
+
+def test_an_optional_language_is_not_a_wall(job: NormalizedJob) -> None:
+    """A plus is not a requirement, and neither is a language English answers (job 11244)."""
+    for optional in (
+        "Working proficiency in German or English; the team uses both.",
+        "Professional English. German is helpful, but not required.",
+        "Fluent English required, French is a plus",
+        "Sehr gute Englischkenntnisse, Deutschkenntnisse von Vorteil",
+        "Znajomość języka polskiego mile widziane",
+    ):
+        kept = job.model_copy(update={"description": optional})
+        assert passes_hard_filters(kept) is True, optional
+
+
+def test_the_language_softener_must_be_in_the_same_clause(job: NormalizedJob) -> None:
+    """Job 12589's shape, and the reason the rule reads clauses rather than the whole body.
+
+    962 rows in the table state a real language requirement and separately call something else
+    a plus. Scoping the softener to the body would keep every one of them.
+    """
+    blocked = job.model_copy(
+        update={
+            "description": (
+                "Sehr gute Deutschkenntnisse auf muttersprachlichem Niveau setzen wir voraus.\n"
+                "Eine ITIL-Zertifizierung ist von Vorteil.\n"
+                "Kubernetes experience is a plus."
+            )
+        }
+    )
+    assert passes_hard_filters(blocked) is False
+
+
+def test_a_language_spoken_by_the_market_is_not_a_requirement_of_the_role(
+    job: NormalizedJob,
+) -> None:
+    """ "German-speaking market" describes the customers, not the person being hired."""
+    kept = job.model_copy(
+        update={"description": "You will own our growth in the German-speaking market."}
+    )
+    assert passes_hard_filters(kept) is True
+
+
+def test_clearance_variants_are_stopped(job: NormalizedJob) -> None:
+    """ "security clearance" is one phrasing of many; 53 rows in the table use another.
+
+    Job 21031 ("Python Full Stack Developer (TS/SCI clearance)", 95.8th percentile) is the one
+    that sat above the shortlist floor.
+    """
+    for requirement in (
+        "Must hold an active security clearance.",
+        "UK assignments require BPSS screening and may require SC or DV clearance.",
+        "Clearance: Active TS/SCI w/ FS Poly required",
+        "Candidates must be able to obtain and maintain a Public Trust clearance.",
+        "Active Top Secret clearance. 2+ years of application security experience.",
+    ):
+        blocked = job.model_copy(update={"description": requirement})
+        assert passes_hard_filters(blocked) is False, requirement
+
+
+def test_clearance_in_its_other_senses_is_not_a_stop(job: NormalizedJob) -> None:
+    """The named prefixes are what keep the word out of ordinary prose."""
+    kept = job.model_copy(
+        update={
+            "description": (
+                "You will get design clearance from the product team before shipping, "
+                "and own the release checklist."
+            )
+        }
+    )
+    assert passes_hard_filters(kept) is True

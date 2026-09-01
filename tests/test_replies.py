@@ -7,7 +7,7 @@ these tests care as much about the refusals (ambiguous -> None) as about the hit
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -285,8 +285,10 @@ def test_two_roles_at_one_company_are_a_tie_broken_by_send_time() -> None:
 
 
 def test_an_application_sent_after_the_email_arrived_never_wins_the_tie() -> None:
-    before = _application("Reddit", app_id=1, sent_at=datetime(2026, 7, 1, tzinfo=UTC))
-    after = _application("Reddit", app_id=2, sent_at=datetime(2026, 9, 1, tzinfo=UTC))
+    # Relative to the message, which `_message` stamps with `now`: a literal date here is a
+    # test that passes until the calendar reaches it (2026-09-01 did).
+    before = _application("Reddit", app_id=1, sent_at=datetime.now(tz=UTC) - timedelta(days=60))
+    after = _application("Reddit", app_id=2, sent_at=datetime.now(tz=UTC) + timedelta(days=30))
     message = _message(subject="Thank you for your interest in Reddit")
     found = match_reply(message, [before, after])
     assert found is not None and found.application is before
