@@ -78,3 +78,30 @@ def test_every_registered_view_speaks_local_time() -> None:
     assert admin_module.admin.views
     for view in admin_module.admin.views:
         assert isinstance(view, LocalTimeView), f"{type(view).__name__} is not a LocalTimeView"
+
+
+@pytest.mark.parametrize(
+    "typed",
+    [
+        "2026-08-06 21:00",  # typed by hand, no seconds
+        "2026-08-06 21:00 CEST",  # pasted from the detail view
+        "2026-08-06T21:00",  # the HTML datetime-local shape
+        " 2026-08-06 21:00:00 ",
+    ],
+)
+def test_a_wall_clock_without_seconds_is_accepted(typed: str) -> None:
+    """The detail view drops seconds; what it shows must survive a trip back through the form."""
+    assert _typed(typed) == datetime(2026, 8, 6, 19, 0, tzinfo=UTC)
+
+
+def test_what_the_detail_view_shows_parses_back_to_the_same_minute() -> None:
+    stored = datetime(2026, 12, 6, 19, 0, tzinfo=UTC)
+    assert _typed(_local_datetime(stored)) == stored
+
+
+def test_a_zone_that_contradicts_the_date_is_refused() -> None:
+    """CET in August is a typo; guessing which half was meant is how sent_at went wrong before."""
+    form = _Form(formdata=_FormData({"sent_at": "2026-08-06 21:00 CET"}))
+    assert form.sent_at.data is None
+    assert not form.validate()
+    assert "CEST" in form.sent_at.errors[0]

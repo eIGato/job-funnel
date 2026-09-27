@@ -88,10 +88,41 @@ class LocalDateTimeField(DateTimeField):
             value = _to_local(value).replace(tzinfo=None)
         super().process_data(value)
 
+    # The first format is what the form renders; the rest are what a human types or pastes.
+    # The detail view prints "%Y-%m-%d %H:%M %Z" — no seconds — and a value copied from there
+    # into the edit form used to fail as "Not a valid datetime value", which reads like a save
+    # until you notice the form came back.
+    _FORMATS: ClassVar[list[str]] = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+    ]
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("format", self._FORMATS)
+        super().__init__(*args, **kwargs)
+
     def process_formdata(self, valuelist: Any) -> None:
+        # The zone abbreviation the detail view appends is accepted only when it is the one
+        # that wall clock really has here; "CET" on an August date is a typo, not a hint.
+        abbreviation = None
+        if valuelist:
+            text = " ".join(valuelist).strip()
+            head, _, tail = text.rpartition(" ")
+            if head and tail.isalpha():
+                abbreviation, text = tail, head
+            valuelist = [text]
         super().process_formdata(valuelist)
         if isinstance(self.data, datetime) and self.data.tzinfo is None:
-            self.data = self.data.replace(tzinfo=admin_zone()).astimezone(UTC)
+            local = self.data.replace(tzinfo=admin_zone())
+            if abbreviation is not None and abbreviation != local.tzname():
+                self.data = None
+                raise ValueError(
+                    f"{abbreviation} is not the zone of that time in {admin_zone().key}"
+                    f" ({local.tzname()}); drop it or fix it."
+                )
+            self.data = local.astimezone(UTC)
 
 
 class LocalTimeConverter(ModelConverter):
