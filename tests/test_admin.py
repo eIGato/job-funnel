@@ -105,3 +105,15 @@ def test_a_zone_that_contradicts_the_date_is_refused() -> None:
     assert form.sent_at.data is None
     assert not form.validate()
     assert "CEST" in form.sent_at.errors[0]
+
+
+def test_the_form_offers_a_now_button_in_the_admin_zone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The button fills the zone the form parses, not whatever zone the browser is in."""
+    monkeypatch.setattr(
+        admin_module, "get_settings", lambda: type("S", (), {"admin_timezone": ZONE.key})()
+    )
+    html = str(_Form().sent_at())
+    assert ">Now</button>" in html
+    assert 'data-role="datetimepicker"' in html
+    assert "&#34;Europe/Podgorica&#34;" in html
+    assert ">Now</button>" not in str(_Form().sent_at(readonly=True))

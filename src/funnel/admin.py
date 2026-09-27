@@ -15,6 +15,7 @@ the body in, instead of spending a shortlist slot on a letter about a title.
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, ClassVar, cast
@@ -26,6 +27,7 @@ from sqladmin.fields import DateTimeField
 from sqladmin.filters import BooleanFilter, ForeignKeyFilter, StaticValuesFilter
 from sqladmin.formatters import BASE_FORMATTERS
 from sqladmin.forms import ModelConverter, ModelConverterBase, converts
+from sqladmin.widgets import DateTimePickerWidget
 from starlette.applications import Starlette
 from starlette.responses import RedirectResponse
 
@@ -62,6 +64,35 @@ def _to_local(value: datetime) -> datetime:
     return aware.astimezone(admin_zone())
 
 
+# Fills the input with the current wall clock in the admin's zone — not the browser's, which
+# can differ, and the form parses what it is given as `ADMIN_TIMEZONE`. Goes through
+# flatpickr when the picker is attached, so its calendar agrees with the text.
+_NOW_SCRIPT = """\
+var i = this.parentNode.querySelector("input");
+var p = {};
+new Intl.DateTimeFormat("en-CA", {timeZone: %s, hourCycle: "h23",
+  year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", second: "2-digit"})
+  .formatToParts(new Date()).forEach(function (x) { p[x.type] = x.value; });
+var v = p.year + "-" + p.month + "-" + p.day + " " + p.hour + ":" + p.minute + ":" + p.second;
+if (i._flatpickr) { i._flatpickr.setDate(v, true); } else { i.value = v; }"""
+
+
+class NowButtonWidget(DateTimePickerWidget):
+    """sqladmin's date-time picker with a "Now" button beside it (none on a read-only field)."""
+
+    def __call__(self, field: Any, **kwargs: Any) -> Markup:
+        rendered = Markup(super().__call__(field, **kwargs))
+        if kwargs.get("readonly") or (field.render_kw or {}).get("readonly"):
+            return rendered
+        script = _NOW_SCRIPT % json.dumps(get_settings().admin_timezone)
+        return Markup(
+            '<div class="input-group">{}'
+            '<button type="button" class="btn" title="Now in {}" onclick="{}">Now</button>'
+            "</div>"
+        ).format(rendered, get_settings().admin_timezone, script)
+
+
 class LocalDateTimeField(DateTimeField):
     """A datetime field that reads and writes the human's local wall clock.
 
@@ -92,6 +123,8 @@ class LocalDateTimeField(DateTimeField):
     # The detail view prints "%Y-%m-%d %H:%M %Z" — no seconds — and a value copied from there
     # into the edit form used to fail as "Not a valid datetime value", which reads like a save
     # until you notice the form came back.
+    widget = NowButtonWidget()
+
     _FORMATS: ClassVar[list[str]] = [
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M",
