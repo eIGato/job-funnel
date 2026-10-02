@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 from funnel.config import get_settings
 from funnel.models import Application, ApplicationStatus, Job, Reply, ReplyType, Source, SourceKind
 from funnel.replies.inbox import IncomingMessage
-from funnel.replies.match import match_reply
+from funnel.replies.match import Match, match_reply
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -51,6 +51,20 @@ def apply_verdict(application: Application, reply: Reply) -> bool:
         else ApplicationStatus.REJECTED
     )
     return True
+
+
+def is_unrelated(job_related: bool, match: Match | None) -> bool:
+    """Whether an email is thrown away instead of stored as a Reply.
+
+    Only when the classifier says it has nothing to do with a job search **and** it did not
+    arrive in the thread of an application. A thread is the one piece of evidence that outranks
+    the model: a message in a conversation we already had with an employer is part of that
+    conversation, whatever it looks like. A match by sender domain or by a name in the body is
+    not — it is exactly how a ChatGPT newsletter got linked to an OpenAI application.
+    """
+    if job_related:
+        return False
+    return match is None or match.strategy != "thread"
 
 
 def as_message(reply: Reply) -> IncomingMessage:
@@ -204,6 +218,7 @@ __all__ = [
     "MANUAL_SOURCE",
     "apply_verdict",
     "as_message",
+    "is_unrelated",
     "link",
     "record_as_application",
     "relink_stored",

@@ -32,6 +32,13 @@ _INSTRUCTIONS = (
     "- 'rejection': they declined, closed the role, or filled it.\n"
     "- 'no_reply': anything that is not an answer about this candidacy — an automated "
     "acknowledgement of receipt, a newsletter, a job alert, an out-of-office bounce.\n\n"
+    "Also say whether the email has anything to do with the reader's job search at all "
+    "(job_related). False is for mail that plainly does not: shopping and delivery notices, "
+    "bank and telecom statements, subscriptions and renewals, games, a product's newsletter, a "
+    "login code for a service that is not hiring. Anything a recruiter, an employer, an "
+    "applicant tracking system or a job board sent — including an interview calendar invite, a "
+    "cold message and a job alert — is job_related. When unsure, answer true: a false here "
+    "throws the email away unread.\n\n"
     "Set confidence honestly. Use a value below 0.7 whenever the email is ambiguous, is in a "
     "language you are unsure of, or could plausibly be two of the classes: a human reviews "
     "everything under that mark, and an over-confident wrong label does far more damage than "
@@ -66,6 +73,12 @@ class ReplyClassification(BaseModel):
     )
     role: str | None = Field(
         default=None, description="The job title this email is about, if it names one."
+    )
+    #: False throws the email away (see `funnel.models.SkippedMessage`). Defaults to True so a
+    #: model that leaves it out keeps everything, which is the safe direction.
+    job_related: bool = Field(
+        default=True,
+        description="False only when the email has nothing to do with a job search.",
     )
 
 

@@ -481,3 +481,23 @@ class Reply(Base):
 
     def __str__(self) -> str:
         return f"{self.from_address}: {self.subject[:60]}"
+
+
+class SkippedMessage(Base):
+    """An incoming email `check-replies` read, judged to have nothing to do with a job search,
+    and threw away. Only the id is kept — no sender, subject or body.
+
+    The id is what keeps the scan idempotent: without it, every run would re-fetch and re-bill a
+    classification for the same Steam sale. Storing those as `Reply` rows did the same job and
+    cost two others: over half of `replies` was shopping, banking and product newsletters
+    (measured 2026-10-02: ~200 of 491), and the matcher kept linking some of them to
+    applications — a ChatGPT newsletter to OpenAI by sender domain, a Cloudflare "Connect"
+    invitation to Connectis by a thread it had wrongly taught. Mail that is never stored can
+    never be relinked. The email itself is still in Gmail.
+    """
+
+    __tablename__ = "skipped_messages"
+
+    gmail_message_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

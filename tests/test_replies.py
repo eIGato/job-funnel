@@ -16,7 +16,7 @@ from pydantic_ai.models.test import TestModel
 from funnel.models import Application, ApplicationStatus, Job, Reply, Source, SourceKind
 from funnel.replies import inbox
 from funnel.replies.classify import ReplyClassification, classify_reply, make_agent
-from funnel.replies.link import MANUAL_SOURCE, record_as_application
+from funnel.replies.link import MANUAL_SOURCE, is_unrelated, record_as_application
 from funnel.replies.match import (
     company_slug,
     display_name,
@@ -188,6 +188,40 @@ def test_classify_reply_returns_structured_output_offline() -> None:
     )
     assert isinstance(verdict, ReplyClassification)
     assert 0.0 <= verdict.confidence <= 1.0
+
+
+def test_a_verdict_that_omits_job_related_keeps_the_email() -> None:
+    """The field defaults to True: a model that never fills it in throws nothing away."""
+    verdict = ReplyClassification.model_validate(
+        {"reply_type": "no_reply", "confidence": 0.9, "reasoning": "ack"}
+    )
+    assert verdict.job_related is True
+
+
+def test_job_related_mail_is_always_stored() -> None:
+    assert not is_unrelated(True, None)
+
+
+def test_unrelated_mail_that_matched_nothing_is_skipped() -> None:
+    assert is_unrelated(False, None)
+
+
+def test_unrelated_mail_matched_by_domain_is_still_skipped() -> None:
+    """The ChatGPT newsletter: openai.com is the employer's domain, and that proves nothing."""
+    openai = _application("OpenAI")
+    match = match_reply(
+        _message(subject="Introducing ChatGPT Work", sender="ChatGPT <noreply@email.openai.com>"),
+        [openai],
+    )
+    assert match is not None and match.strategy != "thread"
+    assert is_unrelated(False, match)
+
+
+def test_mail_in_an_applications_thread_is_kept_whatever_the_model_says() -> None:
+    acme = _application("Acme", thread_id="t1")
+    match = match_reply(_message(subject="Re: hello", sender="x@y.test", thread_id="t1"), [acme])
+    assert match is not None and match.strategy == "thread"
+    assert not is_unrelated(False, match)
 
 
 def test_matching_stays_pure() -> None:

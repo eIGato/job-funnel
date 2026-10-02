@@ -384,6 +384,15 @@ docker compose run --rm --build app uv run funnel run-funnel
   applied to an action rather than to sending. No employer named, no row: a row named after a
   guess is worse than none. `replies/link.py` owns this and every other write a reply causes,
   so the scan and the admin cannot drift.
+- **Mail unrelated to the job search is not stored, only its id.** The classifier also returns
+  `job_related` (same call, no extra tokens, defaults to True); `link.is_unrelated` throws an email
+  away when it is False **and** the email did not arrive in an application's thread — a domain or
+  body match proves nothing (a ChatGPT newsletter matched OpenAI by domain). Only the id goes into
+  `skipped_messages`, which is what keeps the scan from re-billing it. On 2026-10-02, 68 of 491
+  stored replies were moved there by hand, and a hand re-match of the rest found ~60 replies the
+  matcher had missed (board receipts naming the employer only in the body, ATS slugs like
+  `Wehrtyou` for HRT) and 5 `manual` rows that duplicated funnel rows under another spelling
+  (`record_as_application` looks a company up by exact name).
 - **`check-replies` reads oldest first, and learns threads from incoming mail.** Pass 1 finds
   a Sent message for almost nothing (1 of 36 applications had a thread) because most
   applications go through a web form. So a conclusive match writes `message.thread_id` back

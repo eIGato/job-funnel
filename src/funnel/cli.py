@@ -623,15 +623,20 @@ def check_replies(
     over half of everything the mailbox turns up (95 of 166 on 2026-08-12) and it is never an
     answer to anything, so paying a model to call it `no_reply` bought nothing. The row is
     still written, which keeps it visible in the admin and keeps the scan idempotent.
+
+    Mail the classifier calls unrelated to a job search (shopping, banking, newsletters) is not
+    stored at all, unless it arrived in an application's thread: only its id goes into
+    `skipped_messages`, so it is never fetched or billed again. See `link.is_unrelated`.
     """
     from funnel.models import (
         REPLYABLE_STATUSES,
         Application,
         Reply,
+        SkippedMessage,
     )
     from funnel.replies.classify import classify_reply
     from funnel.replies.inbox import build_service, fetch_recent, find_sent_thread
-    from funnel.replies.link import link, relink_stored
+    from funnel.replies.link import is_unrelated, link, relink_stored
     from funnel.replies.match import is_board_sender, match_reply
 
     settings = get_settings()
@@ -667,12 +672,15 @@ def check_replies(
 
         # 2. Fetch what is new.
         messages = fetch_recent(service, days=lookback)
+        ids = [m.gmail_message_id for m in messages] or [""]
         seen = set(
+            session.scalars(select(Reply.gmail_message_id).where(Reply.gmail_message_id.in_(ids)))
+        ) | set(
             session.scalars(
-                select(Reply.gmail_message_id).where(
-                    Reply.gmail_message_id.in_([m.gmail_message_id for m in messages] or [""])
+                select(SkippedMessage.gmail_message_id).where(
+                    SkippedMessage.gmail_message_id.in_(ids)
                 )
-            ).all()
+            )
         )
         # Oldest first, so an acknowledgement matched in this very batch has already taught us
         # its thread by the time the answer to it is looked at.
@@ -682,7 +690,7 @@ def check_replies(
         )
 
         # 3. Match, classify, apply.
-        applied = unmatched = uncertain = weak = bulk = 0
+        applied = unmatched = uncertain = weak = bulk = skipped = 0
         for message in fresh:
             match = match_reply(message, sent)
 
@@ -697,6 +705,16 @@ def check_replies(
                 )
             except Exception as exc:  # one bad message must not sink the batch
                 typer.secho(f"  {message.subject[:40]}: ERROR {exc}", fg=typer.colors.RED)
+                continue
+
+            if is_unrelated(verdict.job_related, match):
+                session.add(
+                    SkippedMessage(
+                        gmail_message_id=message.gmail_message_id,
+                        received_at=message.received_at,
+                    )
+                )
+                skipped += 1
                 continue
 
             row = _reply_row(message, match.application if match else None)
@@ -740,7 +758,8 @@ def check_replies(
         typer.secho(
             f"check-replies: {len(fresh)} new, {applied + relinked_applied} applied, "
             f"{uncertain} below threshold, {weak} linked without a status, {unmatched} "
-            f"unmatched, {bulk} board alerts unclassified, {linked} threads linked, "
+            f"unmatched, {bulk} board alerts unclassified, {skipped} unrelated skipped, "
+            f"{linked} threads linked, "
             f"{relinked} stored replies relinked",
             fg=typer.colors.GREEN,
         )
