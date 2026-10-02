@@ -16,7 +16,14 @@ from pydantic_ai.models.test import TestModel
 from funnel.models import Application, ApplicationStatus, Job, Reply, Source, SourceKind
 from funnel.replies import inbox
 from funnel.replies.classify import ReplyClassification, classify_reply, make_agent
-from funnel.replies.link import MANUAL_SOURCE, is_unrelated, record_as_application
+from funnel.replies.link import (
+    MANUAL_SOURCE,
+    company_reason,
+    is_unrelated,
+    record_as_application,
+    role_words,
+    same_company,
+)
 from funnel.replies.match import (
     company_slug,
     display_name,
@@ -222,6 +229,42 @@ def test_mail_in_an_applications_thread_is_kept_whatever_the_model_says() -> Non
     match = match_reply(_message(subject="Re: hello", sender="x@y.test", thread_id="t1"), [acme])
     assert match is not None and match.strategy == "thread"
     assert not is_unrelated(False, match)
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        # The five twins `record_as_application` minted by exact-name lookup (2026-10-02).
+        ("Octopus Energy", "Octopus Energy Group jobs"),
+        ("Source Group International", "SGI"),
+        ("Polskie Sieci Elektroenergetyczne S.A.", "PSE S.A."),
+        # An ATS slug against the written-out name.
+        ("Moon Active", "moonactive"),
+        ("lemon.markets", "Lemon Markets"),
+    ],
+)
+def test_one_employer_spelled_two_ways(a: str, b: str) -> None:
+    assert same_company(a, b)
+    assert same_company(b, a)
+
+
+@pytest.mark.parametrize(
+    ("a", "b"), [("Avito", "Avenga"), ("Reddit", "Remedy Logic"), ("AI", "Acme Inc")]
+)
+def test_different_employers_stay_apart(a: str, b: str) -> None:
+    assert not same_company(a, b)
+
+
+def test_an_aggregator_that_names_the_employer_in_its_title() -> None:
+    teletype = _application("Teletype (courierus)", title="Senior Backend Developer (Matrix)")
+    assert company_reason("Matrix", teletype) == "employer named in the title"
+    assert company_reason("Acclaim", teletype) is None
+
+
+def test_role_words_ignore_gender_markers() -> None:
+    assert role_words("Forward Deployed Engineer (m/f/d)") == role_words(
+        "Forward Deployed Engineer"
+    )
 
 
 def test_matching_stays_pure() -> None:

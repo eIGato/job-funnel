@@ -392,7 +392,10 @@ docker compose run --rm --build app uv run funnel run-funnel
   stored replies were moved there by hand, and a hand re-match of the rest found ~60 replies the
   matcher had missed (board receipts naming the employer only in the body, ATS slugs like
   `Wehrtyou` for HRT) and 5 `manual` rows that duplicated funnel rows under another spelling
-  (`record_as_application` looks a company up by exact name).
+  (`record_as_application` looks a company up by exact name). The admin button therefore asks
+  first: a reply with `link.similar_applications` (same employer under another spelling, the
+  employer named in another posting's title, or the one same-role application sent that week)
+  goes to a review page where the human links it or confirms it is new.
 - **`check-replies` reads oldest first, and learns threads from incoming mail.** Pass 1 finds
   a Sent message for almost nothing (1 of 36 applications had a thread) because most
   applications go through a web form. So a conclusive match writes `message.thread_id` back

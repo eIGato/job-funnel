@@ -9,6 +9,7 @@ Nothing here sends anything or contacts anything: no Gmail, no model, no network
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from sqlalchemy import func, select
@@ -16,7 +17,14 @@ from sqlalchemy import func, select
 from funnel.config import get_settings
 from funnel.models import Application, ApplicationStatus, Job, Reply, ReplyType, Source, SourceKind
 from funnel.replies.inbox import IncomingMessage
-from funnel.replies.match import Match, match_reply
+from funnel.replies.match import (
+    Match,
+    company_slug,
+    company_words,
+    match_reply,
+    names_company,
+    words,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -119,6 +127,100 @@ def relink_stored(session: Session, applications: Sequence[Application]) -> tupl
     return linked, applied
 
 
+#: How close in time an application with the same role must have gone out to be offered on the
+#: role alone. The Smalt/Blueocean twin was two days apart.
+_SAME_ROLE_WINDOW = timedelta(days=7)
+#: Words a role title carries that say nothing about which role it is.
+_ROLE_NOISE = frozenset({"m", "f", "d", "w", "x", "k", "n", "all", "genders", "gender", "remote"})
+
+
+def _initials(company: str) -> str:
+    return "".join(word[0] for word in words(company))
+
+
+def same_company(a: str, b: str) -> bool:
+    """Could these two names be one employer, spelled by two different sources?
+
+    Looser than `match.names_company` on purpose: this only *proposes* a candidate to a human,
+    and every rule is one of the ways the same employer reached the table twice (2026-10-02): a
+    suffix the board appends ("Octopus Energy" / "Octopus Energy Group jobs"), an initialism
+    ("SGI" / "Source Group International", "PSE S.A." / "Polskie Sieci Elektroenergetyczne
+    S.A."), and the slug an ATS uses for the written-out name ("moonactive" / "Moon Active").
+    """
+    wa, wb = set(company_words(a)), set(company_words(b))
+    if not wa or not wb:
+        return False
+    if wa <= wb or wb <= wa:
+        return True
+    slug_a, slug_b = company_slug(a), company_slug(b)
+    if len(slug_a) >= 3 and slug_a == slug_b:
+        return True
+    return any(
+        len(short) >= 3 and short == _initials(long) for short, long in ((slug_a, b), (slug_b, a))
+    )
+
+
+def role_words(title: str) -> frozenset[str]:
+    """A role title as a set of words, without the gender and remote markers boards append."""
+    return frozenset(w for w in words(title) if w not in _ROLE_NOISE)
+
+
+def company_reason(company: str, application: Application) -> str | None:
+    """Why this application might be the employer an email names, or None. Pure; no session.
+
+    Either the names look like one employer (`same_company`), or the employer is named in the
+    other posting's *title*, because an aggregator posted it under its own name ("Teletype
+    (courierus)" / "Senior Backend Developer (Matrix)").
+    """
+    job = application.job
+    if same_company(company, job.company):
+        return "same employer"
+    if names_company(job.title, company):
+        return "employer named in the title"
+    return None
+
+
+def similar_applications(session: Session, reply: Reply) -> list[tuple[Application, str]]:
+    """Applications a human should look at before `record_as_application` makes a new one.
+
+    The exact-name lookup inside `record_as_application` is what minted the five twins found on
+    2026-10-02: it reuses a row only when company and title are equal, and a board, an ATS and
+    an email rarely spell an employer the same way. Only applications that actually went out
+    are offered — a draft never sent is not what an acknowledgement answers.
+
+    The role alone is a weak reason and is offered only when it is unambiguous: the *one*
+    application with exactly that role that went out within a week of the email. A product and
+    the company behind it go by different names ("Smalt" / "Blueocean Technologies", both
+    "Forward Deployed Engineer (m/f/d)"), and nothing but the role connects them — but on the
+    days applications go out in batches, "Senior Backend Engineer" is a dozen companies, and
+    offering all of them is noise that teaches the human to stop reading the list.
+    """
+    company = (reply.detected_company or "").strip()
+    if not company:
+        return []
+    sent = session.scalars(
+        select(Application).where(Application.sent_at.is_not(None)).order_by(Application.id)
+    ).all()
+    found: list[tuple[Application, str]] = []
+    for application in sent:
+        reason = company_reason(company, application)
+        if reason:
+            found.append((application, reason))
+
+    role = role_words(reply.detected_role or "")
+    if role and reply.received_at is not None:
+        same_role = [
+            a
+            for a in sent
+            if a.sent_at is not None
+            and role_words(a.job.title) == role
+            and abs(reply.received_at - a.sent_at) <= _SAME_ROLE_WINDOW
+        ]
+        if len(same_role) == 1 and all(a is not same_role[0] for a, _ in found):
+            found.append((same_role[0], "same role, sent the same week"))
+    return found
+
+
 def _manual_source(session: Session) -> Source:
     """The disabled Source that owns hand-recorded rows, created on first use."""
     source = session.scalar(select(Source).where(Source.name == MANUAL_SOURCE))
@@ -218,8 +320,12 @@ __all__ = [
     "MANUAL_SOURCE",
     "apply_verdict",
     "as_message",
+    "company_reason",
     "is_unrelated",
     "link",
     "record_as_application",
     "relink_stored",
+    "role_words",
+    "same_company",
+    "similar_applications",
 ]

@@ -18,11 +18,12 @@ from __future__ import annotations
 import json
 from collections import Counter
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 from zoneinfo import ZoneInfo
 
 from markupsafe import Markup, escape
-from sqladmin import Admin, ModelView, action
+from sqladmin import Admin, ModelView, action, expose
 from sqladmin.fields import DateTimeField
 from sqladmin.filters import BooleanFilter, ForeignKeyFilter, StaticValuesFilter
 from sqladmin.formatters import BASE_FORMATTERS
@@ -48,7 +49,7 @@ if TYPE_CHECKING:
     from enum import StrEnum
 
     from sqlalchemy import Select
-    from sqlalchemy.orm import ColumnProperty, InstrumentedAttribute
+    from sqlalchemy.orm import ColumnProperty, InstrumentedAttribute, Session
     from starlette.requests import Request
     from wtforms.fields.core import UnboundField
 
@@ -504,8 +505,9 @@ class ReplyAdmin(LocalTimeView, ModelView, model=Reply):
         label="Record as sent application",
         confirmation_message=(
             "Create a sent application for each of these, from the employer and role the "
-            "classifier read out of the email? Nothing is sent; this only records what "
-            "already happened."
+            "classifier read out of the email? Where the funnel may already have that "
+            "application under another spelling, you will be asked first. Nothing is sent; "
+            "this only records what already happened."
         ),
     )
     async def record_as_application_action(self, request: Request) -> RedirectResponse:
@@ -518,48 +520,141 @@ class ReplyAdmin(LocalTimeView, ModelView, model=Reply):
         denominator.
 
         The email is the only record of that application, so the row is built from it
-        (`replies.link.record_as_application`) and the reply is linked to it. Afterwards the
-        backlog is re-matched, because the sibling acknowledgement filed last week is now
-        matchable by the company it names — which is the same pass `check-replies` ends with.
+        (`replies.link.record_as_application`) and the reply is linked to it — **unless the
+        funnel may already have it**. That lookup is by exact company and title, and five of the
+        rows this button made were twins of a funnel row spelled another way ("SGI" / "Source
+        Group International", found 2026-10-02). So a reply with `similar_applications` is not
+        recorded here: it goes to a page where the human links it to one of them or confirms it
+        is new. Replies with no candidates are recorded straight away, as before.
 
         Review-only (invariant 6) is about not acting on the human's behalf: this acts on their
         press, from the row they selected, and it sends nothing (invariant 2). The classifier
         only ever *proposed* the names, on a call already paid for.
         """
-        from sqlalchemy import select
-
         from funnel.db import session_scope
-        from funnel.models import REPLYABLE_STATUSES
-        from funnel.replies.link import record_as_application, relink_stored
+        from funnel.replies.link import record_as_application, similar_applications
 
         ids = [int(pk) for pk in request.query_params.get("pks", "").split(",") if pk]
         created = skipped = 0
+        to_review: list[int] = []
         with session_scope() as session:
             for reply_id in ids:
                 reply = session.get(Reply, reply_id)
+                if (
+                    reply is not None
+                    and reply.application_id is None
+                    and similar_applications(session, reply)
+                ):
+                    to_review.append(reply_id)
+                    continue
                 if reply is None or record_as_application(session, reply) is None:
                     skipped += 1  # already linked, or the model would not name an employer
                     continue
                 created += 1
-
-            session.flush()
-            applications = list(
-                session.scalars(
-                    select(Application).where(Application.status.in_(REPLYABLE_STATUSES))
-                ).all()
-            )
-            relinked, _ = relink_stored(session, applications)
+            relinked = _relink_backlog(session) if created else 0
 
         summary = f"{created} recorded, {skipped} skipped, {relinked} other replies relinked"
+        if to_review:
+            return RedirectResponse(
+                request.url_for("admin:view-reply-record_review").include_query_params(
+                    pks=",".join(map(str, to_review)), recorded=summary
+                )
+            )
         return RedirectResponse(
             request.url_for("admin:list", identity=self.identity).include_query_params(
                 recorded=summary
             )
         )
 
+    @expose("/record-review", methods=["GET"])
+    async def record_review(self, request: Request) -> Any:
+        """The replies the button held back, each with the applications it might belong to."""
+        from funnel.db import session_scope
+        from funnel.replies.link import similar_applications
+
+        ids = [int(pk) for pk in request.query_params.get("pks", "").split(",") if pk]
+        with session_scope() as session:
+            items = []
+            for reply_id in ids:
+                reply = session.get(Reply, reply_id)
+                if reply is None or reply.application_id is not None:
+                    continue  # decided already, by this page or by a relink
+                items.append({"reply": reply, "candidates": similar_applications(session, reply)})
+            # Rendered inside the session: the template walks application.job.
+            return await self.templates.TemplateResponse(
+                request,
+                "record_review.html",
+                {
+                    "title": "Record as sent application",
+                    "items": items,
+                    "recorded": request.query_params.get("recorded"),
+                },
+            )
+
+    @expose("/record-review", methods=["POST"])
+    async def record_review_submit(self, request: Request) -> RedirectResponse:
+        """Apply the human's pick for one reply, then show the rest of the queue.
+
+        Linking is conclusive: the human chose this application with the email in front of
+        them, which is stronger evidence than anything `replies.match` has — so the thread is
+        learned and an answer moves the status, exactly as a conclusive automatic match would.
+        """
+        from funnel.db import session_scope
+        from funnel.models import Application
+        from funnel.replies.link import link, record_as_application
+
+        form = await request.form()
+        reply_id = int(str(form["reply_id"]))
+        choice = str(form["choice"])
+        with session_scope() as session:
+            reply = session.get(Reply, reply_id)
+            if reply is not None and reply.application_id is None:
+                if choice == "new":
+                    record_as_application(session, reply)
+                else:
+                    application = session.get(Application, int(choice))
+                    if application is not None:
+                        link(reply, application, conclusive=True)
+                session.flush()
+                _relink_backlog(session)
+
+        remaining = [
+            pk
+            for pk in request.query_params.get("pks", "").split(",")
+            if pk and pk != str(reply_id)
+        ]
+        target = request.url_for("admin:view-reply-record_review")
+        if remaining:
+            return RedirectResponse(
+                target.include_query_params(pks=",".join(remaining)), status_code=303
+            )
+        return RedirectResponse(
+            request.url_for("admin:list", identity=self.identity), status_code=303
+        )
+
+
+def _relink_backlog(session: Session) -> int:
+    """Re-match the orphan replies: an application that exists only now may claim some."""
+    from sqlalchemy import select
+
+    from funnel.models import REPLYABLE_STATUSES
+    from funnel.replies.link import relink_stored
+
+    session.flush()
+    applications = list(
+        session.scalars(select(Application).where(Application.status.in_(REPLYABLE_STATUSES)))
+    )
+    relinked, _ = relink_stored(session, applications)
+    return relinked
+
 
 app = Starlette()
-admin = Admin(app, get_engine(), title="Job Funnel")
+admin = Admin(
+    app,
+    get_engine(),
+    title="Job Funnel",
+    templates_dir=str(Path(__file__).parent / "templates"),
+)
 admin.add_view(SourceAdmin)
 admin.add_view(JobAdmin)
 admin.add_view(ApplicationAdmin)
