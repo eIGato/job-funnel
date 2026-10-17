@@ -605,7 +605,7 @@ def test_a_stuck_id_does_not_keep_the_others_in_the_inbox(
     note = asyncio.run(adapter.on_committed())
 
     assert fake_gmail.trashed == ["alert-1"]
-    assert note is not None and "failed" in note
+    assert note is not None and "1 failed (RuntimeError: 503 x1)" in note
 
 
 def test_a_token_missing_the_new_scope_is_refused(
@@ -642,3 +642,19 @@ def test_a_token_missing_the_new_scope_is_refused(
 
     with pytest.raises(RuntimeError, match="auth-gmail"):
         gmail.get_credentials(interactive=False)
+
+
+def test_trash_failures_are_grouped_by_cause_not_by_message() -> None:
+    """An HttpError's text embeds the URL, and so the message id; the note must not."""
+    import httplib2
+    from googleapiclient.errors import HttpError
+
+    from funnel.adapters.gmail import failure_reason
+
+    def _error(message_id: str) -> HttpError:
+        resp = httplib2.Response({"status": "400"})
+        body = b'{"error": {"code": 400, "message": "Precondition check failed."}}'
+        return HttpError(resp, body, uri=f"https://gmail.googleapis.com/m/{message_id}/trash")
+
+    assert failure_reason(_error("a")) == failure_reason(_error("b"))
+    assert failure_reason(_error("a")) == "HTTP 400 Precondition check failed."

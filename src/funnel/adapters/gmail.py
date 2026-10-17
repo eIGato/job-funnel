@@ -65,6 +65,7 @@ import base64
 import re
 import stat
 import unicodedata
+from collections import Counter
 from email import message_from_bytes, policy
 from email.message import EmailMessage
 from html.parser import HTMLParser
@@ -93,6 +94,31 @@ if TYPE_CHECKING:
 #: an email is recoverable: `modify` cannot delete permanently.
 GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 GMAIL_MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
+
+
+def failure_reason(exc: Exception) -> str:
+    """One Gmail call's failure, short enough to group: the status and Google's own reason.
+
+    The `str()` of an `HttpError` embeds the request URL, which carries the message id, so
+    grouping on it would print one line per message instead of one line per cause.
+    """
+    status = getattr(exc, "status_code", None)
+    reason = getattr(exc, "reason", None)
+    if status is not None:
+        return f"HTTP {status} {reason or ''}".strip()
+    return f"{type(exc).__name__}: {exc}"[:200]
+
+
+def _failures_note(failures: Counter[str]) -> str:
+    """`, 42 failed (HTTP 400 Precondition check failed. x42)`, or nothing.
+
+    The count alone hid a broken trash for a month (2026-09-18 to 10-17): every run said "N
+    failed" and nothing said why, so the alerts piled up in the inbox in plain sight.
+    """
+    if not failures:
+        return ""
+    causes = "; ".join(f"{cause} x{n}" for cause, n in failures.most_common())
+    return f", {failures.total()} failed ({causes})"
 
 
 def gmail_scopes(*, allow_trash: bool | None = None) -> list[str]:
@@ -977,12 +1003,13 @@ class GmailAlertsAdapter(BaseAdapter):
         if not self.parsed_message_ids and not discarded_ids:
             return None
 
-        trashed = failed = 0
+        trashed = 0
+        failures: Counter[str] = Counter()
         for message_id in [*self.parsed_message_ids, *discarded_ids]:
             try:
                 messages.trash(userId="me", id=message_id).execute()
-            except Exception:
-                failed += 1
+            except Exception as exc:
+                failures[failure_reason(exc)] += 1
             else:
                 trashed += 1
         # Reported apart: "we read these" and "we will never read these" are different claims,
@@ -991,4 +1018,4 @@ class GmailAlertsAdapter(BaseAdapter):
         if discarded_ids:
             summary += f", {len(discarded_ids)} discarded unread"
         self.parsed_message_ids = []
-        return summary + ")" + (f", {failed} failed" if failed else "")
+        return summary + ")" + _failures_note(failures)
