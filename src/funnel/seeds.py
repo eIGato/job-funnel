@@ -114,6 +114,12 @@ DEFAULT_SOURCES: list[SourceConfig] = [
     # resting that on a parser is resting it on the wrong thing. hh.ru mails both from
     # `noreply@hh.ru`, so it cannot be split this way and stays a whole domain.
     #
+    # **LinkedIn's `jobs-noreply@` is split by subject too.** It sends single-posting "apply to X
+    # at Y" recommendations in the same card markup the alert parser reads (2 in the 90 days to
+    # 2026-10-19, never read until then because only `jobalerts-noreply@` was in the query), and
+    # it also sends the "your application was sent to X" receipt, which the card parser would
+    # read as a posting and the Trash would then take.
+    #
     # **justjoin.it needs a third split: by subject.** `no-reply@justjoin.it` sends both the
     # daily "New jobs for you" alert and the "You applied for X" receipt, and unlike hh's the
     # receipt is *not* harmless to parse — it carries a "similar offers" block in the identical
@@ -130,6 +136,7 @@ DEFAULT_SOURCES: list[SourceConfig] = [
             "query": (
                 f"newer_than:30d ((from:hh.ru {_HH_NOTICES}) OR from:subscribe@career.habr.com "
                 "OR from:jobalerts-noreply@linkedin.com "
+                'OR (from:jobs-noreply@linkedin.com -subject:"your application") '
                 "OR from:wellfound.com OR from:noreply@glassdoor.com "
                 "OR from:jobalert.indeed.com OR from:landing.jobs "
                 "OR from:jobs@hello.justjoin.it "
