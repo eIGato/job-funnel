@@ -123,6 +123,18 @@ class Settings(BaseSettings):
             "invariant 2 holds — and needs `funnel auth-gmail` re-run to mint a token for it."
         ),
     )
+    gmail_trash_rejections: bool = Field(
+        default=False,
+        description=(
+            "After `check-replies` commits, move the incoming mail of every conversation that "
+            "ended in a rejection into Gmail's Trash: each message the human did not write in "
+            "the threads of an application now REJECTED (the acknowledgement, the rejection, "
+            "anything between). His own sent letter stays in Sent, and a thread that also "
+            "belongs to an application still in play is never touched. A separate switch from "
+            "the alerts one because this is correspondence, not bulk mail; either one widens "
+            "the scope to gmail.modify."
+        ),
+    )
 
     # --- Matching ---
     match_top_k: int = Field(default=25, ge=1, description="Shortlist size after ranking.")

@@ -631,6 +631,7 @@ def check_replies(
     from funnel.models import (
         REPLYABLE_STATUSES,
         Application,
+        ApplicationStatus,
         Reply,
         SkippedMessage,
     )
@@ -657,6 +658,9 @@ def check_replies(
                 select(Application).where(Application.status.in_(REPLYABLE_STATUSES))
             ).all()
         )
+        rejected_before = {a.id for a in sent if a.status is ApplicationStatus.REJECTED}
+        #: Applications that drew a reply in this scan, for the Trash step after the commit.
+        answered: set[int] = set()
 
         # 1. Link applications to their Gmail thread.
         linked = 0
@@ -718,6 +722,8 @@ def check_replies(
                 continue
 
             row = _reply_row(message, match.application if match else None)
+            if match is not None:
+                answered.add(match.application.id)
             row.reply_type = verdict.reply_type
             row.confidence = verdict.confidence
             row.reasoning = verdict.reasoning
@@ -765,6 +771,129 @@ def check_replies(
         )
         if unmatched or uncertain:
             typer.echo("  Review them in the admin under Replies (unmatched have no Application).")
+        rejected_now = {a.id for a in sent if a.status is ApplicationStatus.REJECTED}
+        to_clear = (rejected_now - rejected_before) | (answered & rejected_now)
+
+    # After the commit and outside it, like the alert Trash in `ingest`: a status is in the
+    # database before the mail that justified it leaves the inbox, and no transaction is held
+    # open across Gmail calls. A failure here loses nothing — `tidy-mailbox` picks it up.
+    if settings.gmail_trash_rejections and to_clear:
+        try:
+            typer.echo(f"  {_clear_rejected_mail(to_clear, apply=True)}")
+        except Exception as exc:
+            typer.secho(f"  rejected mail: ERROR {exc}", fg=typer.colors.RED)
+
+
+def _clear_rejected_mail(application_ids: set[int] | None, *, apply: bool) -> str:
+    """Trash the incoming mail of rejected applications' threads, or say what would go.
+
+    `application_ids=None` is every REJECTED application (the backlog). The threads are read
+    in one snapshot (`link.rejection_threads` excludes any thread an application still in
+    play also owns, and that takes two statements that must agree); Gmail is only called
+    once that read-only transaction is over. A status flipped back in the admin between the
+    two is the one race left, and it costs a message recoverable from Trash for 30 days.
+    """
+    from funnel.adapters.gmail import failures_note, trash_messages
+    from funnel.db import snapshot_scope
+    from funnel.replies.inbox import build_service, incoming_in_threads
+    from funnel.replies.link import rejection_threads
+
+    with snapshot_scope() as session:
+        threads = sorted(rejection_threads(session, application_ids))
+    if not threads:
+        return "rejected mail: nothing to clear"
+    service = build_service()
+    ids = incoming_in_threads(service, threads)
+    if not apply:
+        return f"rejected mail: would trash {len(ids)} messages in {len(threads)} threads"
+    trashed, failures = trash_messages(service.users().messages(), ids)
+    return f"rejected mail: trashed {trashed} messages in {len(threads)} threads" + failures_note(
+        failures
+    )
+
+
+def _clear_alert_backlog(*, apply: bool) -> list[str]:
+    """Trash every alert in the inbox whose postings are all in the table already.
+
+    The same promise as `GmailAlertsAdapter.on_committed` — an email goes only once what it
+    carried is in the database — kept by checking instead of ingesting: these are the alerts
+    beyond the 30-day window, and putting month-old postings into the table now would hand
+    expired roles to the shortlist and buy letters for them. An alert with even one posting
+    the table lacks is kept and counted, as is one that parsed into nothing (the parser-bug
+    backlog, see CLAUDE.md).
+    """
+    from funnel.adapters.gmail import (
+        alert_backlog,
+        failures_note,
+        gmail_service,
+        trash_messages,
+    )
+    from funnel.db import snapshot_scope
+    from funnel.models import SourceKind
+
+    with snapshot_scope() as session:
+        sources = [
+            (s.id, s.name, dict(s.config))
+            for s in session.scalars(
+                select(Source).where(Source.kind == SourceKind.GMAIL, Source.enabled.is_(True))
+            )
+        ]
+
+    lines = []
+    for source_id, name, config in sources:
+        parsed = [
+            (message_id, {job.content_hash_for(source_id) for job in jobs})
+            for message_id, jobs in alert_backlog(config)
+        ]
+        wanted = set().union(*(hashes for _, hashes in parsed))
+        with snapshot_scope() as session:
+            known = set(
+                session.scalars(select(Job.content_hash).where(Job.content_hash.in_(wanted)))
+            )
+        done = [message_id for message_id, hashes in parsed if hashes and hashes <= known]
+        unknown = [hashes - known for _, hashes in parsed if hashes - known]
+        empty = sum(1 for _, hashes in parsed if not hashes)
+        kept = (
+            f"kept {len(unknown)} with {sum(map(len, unknown))} postings not in the table, "
+            f"{empty} that parsed into nothing"
+        )
+        if not apply:
+            lines.append(f"{name}: would trash {len(done)} of {len(parsed)} alerts, {kept}")
+            continue
+        trashed, failures = trash_messages(gmail_service().users().messages(), done)
+        lines.append(
+            f"{name}: trashed {trashed} of {len(parsed)} alerts, {kept}" + failures_note(failures)
+        )
+    return lines
+
+
+@app.command(name="tidy-mailbox")
+def tidy_mailbox(
+    apply: bool = typer.Option(
+        False, "--apply", help="Move the messages to Trash. Without it, only count them."
+    ),
+) -> None:
+    """Clear the mail backlog the per-run cleanup never reaches. A dry run unless --apply.
+
+    Two backlogs, each behind its own consent switch: alerts in the inbox whose postings are
+    all in the table (`GMAIL_TRASH_PARSED_ALERTS`; `ingest` only reads the last 30 days), and
+    the incoming mail of every application already REJECTED (`GMAIL_TRASH_REJECTIONS`;
+    `check-replies` only clears the ones it moves itself, so a status set by hand in the admin
+    lands here). Trash only, never delete: everything is recoverable for 30 days. Safe to
+    re-run — what is already in Trash is not listed again.
+    """
+    settings = get_settings()
+    if settings.gmail_trash_parsed_alerts:
+        for line in _clear_alert_backlog(apply=apply):
+            typer.echo(f"  {line}")
+    else:
+        typer.echo("  alerts: GMAIL_TRASH_PARSED_ALERTS is off, skipped")
+    if settings.gmail_trash_rejections:
+        typer.echo(f"  {_clear_rejected_mail(None, apply=apply)}")
+    else:
+        typer.echo("  rejected mail: GMAIL_TRASH_REJECTIONS is off, skipped")
+    if not apply:
+        typer.secho("tidy-mailbox: dry run, nothing moved (pass --apply)", fg=typer.colors.YELLOW)
 
 
 @app.command(name="relink-replies")

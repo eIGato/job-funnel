@@ -1,14 +1,16 @@
 """Reading replies out of the mailbox (Phase 6). Gmail I/O only — no LLM here.
 
 Reuses the alert adapter's OAuth (`adapters.gmail.get_credentials`), so there is one token and
-one **read-only** scope for the whole system. Nothing in this module can send: the scope does
-not allow it, and invariant 2 says it never will.
+one scope for the whole system (read-only unless trashing is on). Nothing in this module can
+send: the scope does not allow it, and invariant 2 says it never will.
 
-Two directions:
+Three directions:
 - `find_sent_thread` looks *backwards* at Sent mail to learn which thread an application the
   human sent by hand actually lives in. The read-only scope covers Sent, which is what makes
   reliable threading possible without the system ever touching the outbox.
 - `fetch_recent` reads incoming mail so it can be matched and classified.
+- `incoming_in_threads` names what to Trash once a conversation has ended in a rejection
+  (`GMAIL_TRASH_REJECTIONS`): incoming messages only, never the human's own.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from funnel.adapters.gmail import execute, gmail_service
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
 
 #: Replies quote the whole history. Everything from the first quote marker on is the human's
 #: own letter coming back, which is noise for the classifier and pure cost in tokens.
@@ -160,3 +162,30 @@ def find_sent_thread(
     threads = {str(payload.get("threadId", "")) for payload in _iter_messages(service, query, 10)}
     threads.discard("")
     return threads.pop() if len(threads) == 1 else None
+
+
+#: Labels that mean the human wrote the message, or that it is already where it is going.
+_NOT_INCOMING = frozenset({"SENT", "DRAFT", "TRASH"})
+
+
+def incoming_in_threads(service: Any, thread_ids: Iterable[str]) -> list[str]:
+    """Ids of the messages in these threads that somebody else wrote and are not in Trash yet.
+
+    What `GMAIL_TRASH_REJECTIONS` clears once a conversation has ended in a no. The human's own
+    letter is labelled `SENT` and stays where it is: it is the record of what went out, and the
+    database only holds the draft it was made from. A thread that has vanished (deleted by
+    hand) is skipped, not an error.
+    """
+    threads = service.users().threads()
+    found: list[str] = []
+    for thread_id in thread_ids:
+        try:
+            thread = execute(threads.get(userId="me", id=thread_id, format="minimal"))
+        except Exception as exc:
+            if getattr(exc, "status_code", None) == 404:
+                continue
+            raise
+        for message in thread.get("messages", []):
+            if not _NOT_INCOMING & set(message.get("labelIds", [])):
+                found.append(str(message["id"]))
+    return found

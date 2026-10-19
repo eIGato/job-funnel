@@ -79,7 +79,7 @@ from funnel.adapters.util import clip, looks_remote, strip_html
 from funnel.schemas import NormalizedJob
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable, Iterator
     from pathlib import Path
 
     from google.oauth2.credentials import Credentials
@@ -111,7 +111,7 @@ def failure_reason(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"[:200]
 
 
-def _failures_note(failures: Counter[str]) -> str:
+def failures_note(failures: Counter[str]) -> str:
     """`, 42 failed (HTTP 400 Precondition check failed. x42)`, or nothing.
 
     The count alone hid a broken trash for a month (2026-09-18 to 10-17): every run said "N
@@ -123,6 +123,25 @@ def _failures_note(failures: Counter[str]) -> str:
     return f", {failures.total()} failed ({causes})"
 
 
+def trash_messages(messages: Any, message_ids: Iterable[str]) -> tuple[int, Counter[str]]:
+    """Move each message to Trash; return how many went and why the rest did not.
+
+    One failure does not stop the rest: the ids are independent, and a message left behind is
+    picked up again by whatever chose it. Trash, never `delete` — the scope could not delete
+    permanently even if this asked, and 30 days is the window in which a mistake is noticed.
+    """
+    trashed = 0
+    failures: Counter[str] = Counter()
+    for message_id in message_ids:
+        try:
+            execute(messages.trash(userId="me", id=message_id))
+        except Exception as exc:
+            failures[failure_reason(exc)] += 1
+        else:
+            trashed += 1
+    return trashed, failures
+
+
 def gmail_scopes(*, allow_trash: bool | None = None) -> list[str]:
     """The OAuth scopes to ask for, which is the least privilege the settings allow.
 
@@ -132,7 +151,8 @@ def gmail_scopes(*, allow_trash: bool | None = None) -> list[str]:
     if allow_trash is None:
         from funnel.config import get_settings
 
-        allow_trash = get_settings().gmail_trash_parsed_alerts
+        settings = get_settings()
+        allow_trash = settings.gmail_trash_parsed_alerts or settings.gmail_trash_rejections
     return [GMAIL_MODIFY_SCOPE] if allow_trash else [GMAIL_READONLY_SCOPE]
 
 
@@ -164,7 +184,7 @@ def get_credentials(*, interactive: bool = False) -> Credentials:
     settings = get_settings()
     creds_path: Path = settings.gmail_credentials_path
     token_path: Path = settings.gmail_token_path
-    scopes = gmail_scopes(allow_trash=settings.gmail_trash_parsed_alerts)
+    scopes = gmail_scopes()
 
     creds: Credentials | None = None
     if token_path.exists():
@@ -959,6 +979,31 @@ def _sender_and_bodies(msg: EmailMessage) -> tuple[str, str, str]:
     return sender, html, text
 
 
+_WINDOW = re.compile(r"\b(?:newer|older)_than:\S+\s*")
+
+
+def alert_backlog(config: dict[str, Any]) -> Iterator[tuple[str, list[NormalizedJob]]]:
+    """Every alert still in the inbox, of any age, with what the parsers make of it.
+
+    The source's own `query` with its time window removed — which senders are alerts is the
+    source's decision, and this must not grow a second list of them. For `funnel tidy-mailbox`,
+    which clears what `on_committed` never reaches: alerts older than the 30-day window, left
+    behind while the Trash was failing on quota (2026-09-18 to 10-19) or from before the switch
+    was turned on. Paged, because the backlog is several hundred messages.
+    """
+    query = "in:inbox " + _WINDOW.sub("", str(config.get("query", ""))).strip()
+    messages = gmail_service().users().messages()
+    page: str | None = None
+    while True:
+        listed = execute(messages.list(userId="me", q=query, maxResults=500, pageToken=page))
+        for meta in listed.get("messages", []):
+            raw = execute(messages.get(userId="me", id=meta["id"], format="raw"))
+            yield str(meta["id"]), parse_raw_email(base64.urlsafe_b64decode(raw["raw"]))
+        page = listed.get("nextPageToken")
+        if not page:
+            return
+
+
 def parse_raw_email(raw: bytes) -> list[NormalizedJob]:
     """Parse one raw RFC-822 message (as Gmail returns with format='raw')."""
     msg = message_from_bytes(raw, policy=policy.default)
@@ -1065,19 +1110,11 @@ class GmailAlertsAdapter(BaseAdapter):
         if not self.parsed_message_ids and not discarded_ids:
             return None
 
-        trashed = 0
-        failures: Counter[str] = Counter()
-        for message_id in [*self.parsed_message_ids, *discarded_ids]:
-            try:
-                execute(messages.trash(userId="me", id=message_id))
-            except Exception as exc:
-                failures[failure_reason(exc)] += 1
-            else:
-                trashed += 1
+        trashed, failures = trash_messages(messages, [*self.parsed_message_ids, *discarded_ids])
         # Reported apart: "we read these" and "we will never read these" are different claims,
         # and a run where the second number is not zero is one to look at.
         summary = f"trashed {trashed} alerts ({len(self.parsed_message_ids)} parsed"
         if discarded_ids:
             summary += f", {len(discarded_ids)} discarded unread"
         self.parsed_message_ids = []
-        return summary + ")" + _failures_note(failures)
+        return summary + ")" + failures_note(failures)

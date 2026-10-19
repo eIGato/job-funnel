@@ -27,7 +27,7 @@ from funnel.replies.match import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Sequence
 
     from sqlalchemy.orm import Session
 
@@ -125,6 +125,54 @@ def relink_stored(session: Session, applications: Sequence[Application]) -> tupl
         linked += 1
         applied += link(reply, match.application, conclusive=match.conclusive)
     return linked, applied
+
+
+def rejection_threads(session: Session, application_ids: Collection[int] | None = None) -> set[str]:
+    """The Gmail threads of conversations that ended in a rejection, safe to clear out.
+
+    Every thread an application now `REJECTED` is known to live in — its own `thread_id` and
+    the thread of each reply linked to it — restricted to `application_ids` when given (the
+    ones `check-replies` just moved), or all of them for the backlog.
+
+    **Minus any thread that also belongs to an application still in play.** A recruiter who
+    writes about two roles in one conversation, or an ATS that threads every candidate mail by
+    subject, puts a rejection and an interview invitation in one thread, and Trashing it for
+    the first would hide the second. A thread counts as anyone's when the application holds it
+    or a reply in it is linked to that application. Orphan replies in the thread are not an
+    owner: they are part of the conversation that ended.
+
+    Two statements that must agree: run it inside `db.snapshot_scope`.
+    """
+    rejected = Application.status == ApplicationStatus.REJECTED
+    scope = rejected if application_ids is None else rejected & Application.id.in_(application_ids)
+    owned = (
+        select(Application.thread_id.label("thread_id"), Application.status)
+        .where(Application.thread_id.is_not(None))
+        .union_all(
+            select(Reply.thread_id, Application.status)
+            .join(Application, Reply.application_id == Application.id)
+            .where(Reply.thread_id.is_not(None))
+        )
+        .subquery()
+    )
+    ours = (
+        select(Application.thread_id)
+        .where(scope, Application.thread_id.is_not(None))
+        .union(
+            select(Reply.thread_id)
+            .join(Application, Reply.application_id == Application.id)
+            .where(scope, Reply.thread_id.is_not(None))
+        )
+    )
+    candidates = {str(t) for t in session.scalars(ours) if t}
+    if not candidates:
+        return set()
+    shared = session.scalars(
+        select(owned.c.thread_id).where(
+            owned.c.thread_id.in_(candidates), owned.c.status != ApplicationStatus.REJECTED
+        )
+    )
+    return candidates - {str(t) for t in shared}
 
 
 #: How close in time an application with the same role must have gone out to be offered on the
@@ -324,6 +372,7 @@ __all__ = [
     "is_unrelated",
     "link",
     "record_as_application",
+    "rejection_threads",
     "relink_stored",
     "role_words",
     "same_company",

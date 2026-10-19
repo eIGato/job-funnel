@@ -27,9 +27,10 @@ and to automate the drudgery of applying. It doubles as a portfolio piece for th
    most it does is put a draft in the database and wait. A human sends it, by hand.
    The OAuth scope is what enforces this, and the scope is **never** `gmail.send`,
    `gmail.compose`, `gmail.insert` or full `https://mail.google.com/`. It is `gmail.readonly`
-   by default and `gmail.modify` when `GMAIL_TRASH_PARSED_ALERTS` is on (human-confirmed
-   2026-08-12) — a write scope that still cannot send and cannot delete permanently, so the
-   worst the system can do to an email is put it in Trash for 30 days.
+   by default and `gmail.modify` when `GMAIL_TRASH_PARSED_ALERTS` (human-confirmed 2026-08-12)
+   or `GMAIL_TRASH_REJECTIONS` (2026-10-19) is on — a write scope that still cannot send and
+   cannot delete permanently, so the worst the system can do to an email is put it in Trash for
+   30 days.
 3. **Embeddings are local, via fastembed (ONNX). No torch.** Not a single token and not a
    single API call for matching or filtering.
 4. **The LLM lives only in `drafting/` and `replies/`.** Cover letters and reply
@@ -134,6 +135,8 @@ uv run funnel match                       # filters + embedding ranking
 uv run funnel draft                       # draft cover letters (DOES NOT SEND)
 uv run funnel run-funnel                  # ingest -> match -> draft, end to end
 uv run funnel doctor                      # check config, database, adapters, CV
+uv run funnel check-replies               # classify replies; Trashes rejected threads if on
+uv run funnel tidy-mailbox [--apply]      # Trash old alerts + rejected mail (dry run by default)
 
 # review admin
 uv run funnel admin                       # serve sqladmin (or uvicorn funnel.admin:app)
@@ -282,6 +285,24 @@ docker compose run --rm --build app uv run funnel run-funnel
   parser could be written against. Keep those three limits together — the hook exists so the
   pipeline can have an irreversible source-side side effect without the pipeline knowing
   which source it is.
+- **A conversation that ended in a no leaves the inbox; the letter that started it does not.**
+  `GMAIL_TRASH_REJECTIONS` (human, 2026-10-19; off by default) makes `check-replies` Trash, after
+  its commit, every incoming message in the threads of an application it moved to `REJECTED` —
+  the acknowledgement, the rejection, anything between. Messages labelled `SENT` or `DRAFT` stay:
+  the human's own letter is the only record of what actually went out (the table holds the draft
+  it was made from). A thread that any application still in play also owns is never touched — a
+  recruiter writing about two roles in one conversation would otherwise lose the interview with
+  the rejection (`link.rejection_threads`, read in one `REPEATABLE READ` snapshot). A status set
+  by hand in the admin is cleared by `funnel tidy-mailbox --apply`, which is also the backlog
+  sweep for alerts older than the 30-day window: it Trashes an alert only if **every** posting in
+  it is already in the table, instead of ingesting month-old postings to make that true.
+- **The Trash was failing on quota for a month, and only the count said so.** From 2026-09-18
+  the alert Trash ran straight after `fetch` had spent the minute's per-user Gmail quota (up to
+  100 messages at 5 units each); all but the first few calls came back `403 Quota exceeded ...
+  'Units per minute per user'`, nothing retried, and the journal said "41 failed". The alerts
+  stayed, and the next run re-read them and spent the quota again. Every Gmail call now goes
+  through `adapters.gmail.execute` (backoff with jitter on quota and 5xx; every call here is
+  idempotent), and a failure is reported by cause.
 - **A board is an address, not a domain.** A board that mails alerts also mails the human about
   a specific application, from a different address on the same domain — so the three places that
   say "this sender is bulk" name the alert address wherever one exists: the `gmail-alerts` query

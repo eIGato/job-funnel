@@ -672,3 +672,69 @@ def test_an_existing_posting_is_reused_rather_than_duplicated() -> None:
     assert application is not None
     assert application.job_id == 6, "a stub was created beside the posting we already had"
     assert not [row for row in session.added if isinstance(row, Job)]
+
+
+# --------------------------------------------------------------------------------------
+# Clearing a rejected conversation (GMAIL_TRASH_REJECTIONS): incoming mail only.
+# --------------------------------------------------------------------------------------
+
+
+class _Request:
+    def __init__(self, result: dict[str, Any] | Exception) -> None:
+        self._result = result
+
+    def execute(self) -> dict[str, Any]:
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
+
+
+class _Threads:
+    def __init__(self, threads: dict[str, list[list[str]] | Exception]) -> None:
+        self._threads = threads
+
+    def get(self, *, id: str, **_kw: object) -> _Request:
+        thread = self._threads[id]
+        if isinstance(thread, Exception):
+            return _Request(thread)
+        return _Request(
+            {
+                "messages": [
+                    {"id": f"{id}-{n}", "labelIds": labels} for n, labels in enumerate(thread)
+                ]
+            }
+        )
+
+
+def _service(threads: dict[str, list[list[str]] | Exception]) -> Any:
+    class _Users:
+        def threads(self) -> _Threads:
+            return _Threads(threads)
+
+    class _Service:
+        def users(self) -> _Users:
+            return _Users()
+
+    return _Service()
+
+
+def test_the_human_s_own_letter_survives_its_rejection() -> None:
+    """His sent letter is the record of what went out; only what came back is cleared."""
+    service = _service(
+        {
+            "t1": [["SENT"], ["INBOX", "UNREAD"], ["INBOX"]],  # letter, ack, rejection
+            "t2": [["INBOX"], ["DRAFT"], ["TRASH"]],  # an unsent reply, one already gone
+        }
+    )
+
+    assert inbox.incoming_in_threads(service, ["t1", "t2"]) == ["t1-1", "t1-2", "t2-0"]
+
+
+def test_a_thread_deleted_by_hand_is_not_an_error() -> None:
+    from googleapiclient.errors import HttpError
+    from httplib2 import Response
+
+    gone = HttpError(Response({"status": "404"}), b'{"error": {"code": 404}}', uri="x")
+    service = _service({"gone": gone, "t1": [["INBOX"]]})
+
+    assert inbox.incoming_in_threads(service, ["gone", "t1"]) == ["t1-0"]

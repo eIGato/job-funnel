@@ -728,3 +728,44 @@ def test_retries_give_up_and_raise() -> None:
     with pytest.raises(HttpError):
         execute(request, attempts=3, sleep=lambda _s: None)
     assert request.calls == 3
+
+
+def test_either_trash_switch_asks_for_the_modify_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    import funnel.config
+    from funnel.adapters.gmail import GMAIL_MODIFY_SCOPE, GMAIL_READONLY_SCOPE, gmail_scopes
+    from funnel.config import Settings
+
+    for alerts, rejections, expected in (
+        (False, False, GMAIL_READONLY_SCOPE),
+        (True, False, GMAIL_MODIFY_SCOPE),
+        (False, True, GMAIL_MODIFY_SCOPE),
+    ):
+        settings = Settings(gmail_trash_parsed_alerts=alerts, gmail_trash_rejections=rejections)
+        monkeypatch.setattr(funnel.config, "get_settings", lambda s=settings: s)
+        assert gmail_scopes() == [expected]
+
+
+def test_the_backlog_drops_the_window_and_reads_every_page(
+    monkeypatch: pytest.MonkeyPatch, fake_gmail: _FakeMessages
+) -> None:
+    """The source's sender list, any age: what the 30-day `fetch` can no longer see."""
+    from funnel.adapters.gmail import alert_backlog
+
+    #: Gmail's parameter is camelCase, so the fake takes it by keyword dict.
+    pages = {
+        None: {"messages": [{"id": "alert-1"}], "nextPageToken": "p2"},
+        "p2": {"messages": [{"id": "junk-1"}]},
+    }
+    asked: list[tuple[object, object]] = []
+
+    def _list(**kw: object) -> _Call:
+        asked.append((kw["q"], kw.get("pageToken")))
+        return _Call(pages[kw.get("pageToken")])  # type: ignore[index]
+
+    monkeypatch.setattr(fake_gmail, "list", _list)
+
+    backlog = list(alert_backlog({"query": "newer_than:30d (from:hh.ru OR from:x.com)"}))
+
+    assert [(m, len(jobs)) for m, jobs in backlog] == [("alert-1", 2), ("junk-1", 0)]
+    query = "in:inbox (from:hh.ru OR from:x.com)"
+    assert asked == [(query, None), (query, "p2")]
