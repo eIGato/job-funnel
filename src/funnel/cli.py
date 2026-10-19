@@ -1189,10 +1189,11 @@ def doctor() -> None:
         from funnel.adapters.gmail import gmail_scopes
 
         scope = gmail_scopes()[0].rsplit("/", 1)[-1]
-        trash = "on" if settings.gmail_trash_parsed_alerts else "off"
+        alerts = "on" if settings.gmail_trash_parsed_alerts else "off"
+        rejections = "on" if settings.gmail_trash_rejections else "off"
         typer.secho(
             f"gmail token     : ok ({settings.gmail_token_path}), scope {scope}, "
-            f"trash parsed alerts {trash}",
+            f"trash parsed alerts {alerts}, trash rejected threads {rejections}",
             fg=typer.colors.GREEN,
         )
     else:
