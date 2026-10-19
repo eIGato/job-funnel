@@ -808,3 +808,33 @@ def test_other_hh_mail_is_not_a_notice() -> None:
     from funnel.replies import hh
 
     assert hh.parse("m4", "t4", _hh_email("Спасибо за ваше резюме!", "<p>hi</p>")) is None
+
+
+def test_an_employer_message_on_hh_is_a_reply_matched_by_vacancy() -> None:
+    from funnel.replies import hh
+
+    html = (
+        "<p>Сообщение от работодателя</p><p>Вакансия: Backend-разработчик</p>"
+        "<p>Компания: CashFactories</p>"
+        '<a href="https://hh.ru/vacancy/137916324?utm_source=email">Перейти к вакансии</a>'
+        "<p>«Рассмотрим ваше резюме.»</p>"
+    )
+    for subject in ("Вам написали по вакансии Backend-разработчик", "Сообщение от работодателя"):
+        notice = hh.parse("m5", "t5", _hh_email(subject, html))
+
+        assert notice is not None and notice.kind is hh.NoticeKind.VACANCY_MESSAGE, subject
+        assert (notice.vacancy_id, notice.company) == ("137916324", "CashFactories")
+
+    chat = hh.parse("m6", "t6", _hh_email("Новое сообщение от работодателя", html))
+    assert chat is not None and chat.kind is hh.NoticeKind.CHAT
+
+
+def test_the_alert_query_never_sees_hh_personal_mail() -> None:
+    """The alert parser reads an employer message's vacancy link as a posting, and a parsed
+    alert is Trashed: five such messages were, two of them on applications still in play."""
+    from funnel.replies import hh
+    from funnel.seeds import DEFAULT_SOURCES
+
+    query = next(s for s in DEFAULT_SOURCES if s.name == "gmail-alerts").config["query"]
+    for subject in hh.SUBJECTS:
+        assert f'-subject:"{subject}"' in query

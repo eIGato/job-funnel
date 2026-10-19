@@ -425,7 +425,14 @@ docker compose run --rm --build app uv run funnel run-funnel
   (55 of 64 matched; 22 moved a status on the first run); a chat notice carries a `chat_id` and
   nothing else, is unmatchable by construction and goes to Trash (the human reads hh chats on the
   site); "вам написали из X" names the employer and is kept when exactly one hh application
-  matches. **An email older than the reply a status rests on never moves it**, and a hand-set
+  matches. "Вам написали по вакансии X" and "Сообщение от работодателя" carry the employer's
+  message *and* the vacancy id: matched by id, classified like any reply, Trashed when no
+  application is on file. **These subjects are negated in the `gmail-alerts` query** (built
+  from `hh.SUBJECTS` in `seeds.py`), because the alert parser reads the vacancy link in an
+  employer's message as a posting, and a parsed alert is Trashed: five were, two on applications
+  still `SENT` and three on applications at `INTERVIEW` (restored 2026-10-19). Same rule as
+  justjoin's receipts — the split lives in the query, never in the parser.
+  **An email older than the reply a status rests on never moves it**, and a hand-set
   `INTERVIEW` with no reply on file counts from its `updated_at` — application 1521, a hand-set
   interview, was moved to `REJECTED` by an hh rejection received 2026-10-17 before that check
   existed; whether the interview was set before or after that date is no longer knowable.

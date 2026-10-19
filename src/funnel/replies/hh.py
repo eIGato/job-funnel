@@ -12,8 +12,12 @@ the 202 hh messages left in the inbox that no parser could read were these:
   carry the chat message and a `chat_id`, and neither the employer nor the vacancy, so nothing
   in the table can be matched to them. The human reads hh chats on the site (and means to
   automate that through the browser), so the email is only a doorbell.
-- **"Вакансия X: вам написали из Y"**, which does name the employer. Matched by company name
-  against hh applications, and kept when one matches.
+- **"Вам написали по вакансии X"** (20 in the inbox on 2026-10-19): the employer's message, the
+  company and the vacancy id. A real reply, matched by vacancy id and classified like any other.
+  The alert parser read one posting out of each — the vacancy link — so before the query
+  excluded these subjects, `GMAIL_TRASH_PARSED_ALERTS` would have Trashed every one of them.
+- **"Вакансия X: вам написали из Y"**, the older shape, which names the employer only. Matched
+  by company name against hh applications, and kept when one matches.
 
 Pure parsing here, plus the one Gmail read; the decisions are in `replies.scan`.
 """
@@ -39,6 +43,8 @@ class NoticeKind(enum.StrEnum):
     REJECTION = "rejection"
     CHAT = "chat"
     MESSAGE_FROM = "message_from"
+    #: "Вам написали по вакансии X": the employer's message *and* the vacancy id. A real reply.
+    VACANCY_MESSAGE = "vacancy_message"
 
 
 class Notice(NamedTuple):
@@ -54,25 +60,34 @@ class Notice(NamedTuple):
     received_at: datetime | None
 
 
-#: The subjects that select these mails, in the Gmail query and in `classify`. A subject is
-#: what tells hh's mail types apart: the sender is one address for all of them.
-_SUBJECTS = {
+#: The subjects that select these mails, here and — negated — in the `gmail-alerts` query in
+#: `seeds.py`, so the alert parser and its Trash never see a personal message. A subject is
+#: what tells hh's mail types apart: the sender is one address for all of them. Order matters:
+#: "Вам написали по вакансии" must be tried before the looser "вам написали из".
+SUBJECTS = {
     "Работодатель не готов пригласить вас": NoticeKind.REJECTION,
     "Новое сообщение от работодателя": NoticeKind.CHAT,
     "Новое сообщение в чате": NoticeKind.CHAT,
+    # After the chat subject it is a substring of. Same layout as "Вам написали по вакансии":
+    # 3 of them, for applications 1519, 1521 and 1523, were Trashed as parsed alerts before
+    # these subjects left the alert query (restored 2026-10-19).
+    "Сообщение от работодателя": NoticeKind.VACANCY_MESSAGE,
+    "Вам написали по вакансии": NoticeKind.VACANCY_MESSAGE,
     "вам написали из": NoticeKind.MESSAGE_FROM,
 }
-QUERY = "in:inbox from:noreply@hh.ru (" + " OR ".join(f'subject:"{s}"' for s in _SUBJECTS) + ")"
+QUERY = "in:inbox from:noreply@hh.ru (" + " OR ".join(f'subject:"{s}"' for s in SUBJECTS) + ")"
+#: The kinds that name their vacancy by id, i.e. that can be matched exactly.
+_BY_VACANCY = frozenset({NoticeKind.REJECTION, NoticeKind.VACANCY_MESSAGE})
 
 _VACANCY = re.compile(r"hh\.ru/vacancy/(\d+)")
-_REJECTION_COMPANY = re.compile(r"^Компании?:\s*(.+)$", re.MULTILINE)
+_COMPANY_LINE = re.compile(r"^Компани[яи]:\s*(.+)$", re.MULTILINE)
 _WROTE_FROM = re.compile(r'вам написали из\s+"?([^"]+)"?\s*$')
 _STYLE = re.compile(r"(?is)<(style|head)\b.*?</\1>")
 _BLANK = re.compile(r"\n\s*\n+")
 
 
 def kind_of(subject: str) -> NoticeKind | None:
-    for marker, kind in _SUBJECTS.items():
+    for marker, kind in SUBJECTS.items():
         if marker.casefold() in subject.casefold():
             return kind
     return None
@@ -96,9 +111,9 @@ def parse(
         return None
     html = _html(msg)
     body = _BLANK.sub("\n", strip_html(_STYLE.sub(" ", html))).strip()
-    vacancy = _VACANCY.search(html) if kind is NoticeKind.REJECTION else None
+    vacancy = _VACANCY.search(html) if kind in _BY_VACANCY else None
     company: str | None = None
-    if (kind is NoticeKind.REJECTION and (found := _REJECTION_COMPANY.search(body))) or (
+    if (kind in _BY_VACANCY and (found := _COMPANY_LINE.search(body))) or (
         kind is NoticeKind.MESSAGE_FROM and (found := _WROTE_FROM.search(subject))
     ):
         company = found.group(1).strip().rstrip(".").strip()
@@ -131,4 +146,4 @@ def fetch(service: Any, *, max_results: int = 200) -> Iterator[Notice]:
             yield notice
 
 
-__all__ = ["QUERY", "Notice", "NoticeKind", "fetch", "kind_of", "parse"]
+__all__ = ["QUERY", "SUBJECTS", "Notice", "NoticeKind", "fetch", "kind_of", "parse"]

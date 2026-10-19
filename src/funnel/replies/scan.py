@@ -288,8 +288,10 @@ class ReplyScan:
         applications: list[Application],
         report: ScanReport,
         answered: set[int],
+        match: Match | None = None,
     ) -> None:
-        match = match_reply(message, applications)
+        """Classify one email and write it. `match` given means the caller already knows."""
+        match = match or match_reply(message, applications)
         if match is None and is_board_sender(message.from_address):
             self._write(_Record(message, None))
             report.bulk += 1
@@ -361,6 +363,19 @@ class ReplyScan:
                     report.hh_rejections += 1
                     report.lines.append(f"rejection: {application.job.company} (hh vacancy id)")
                 answered.add(application.id)
+            elif notice.kind is hh.NoticeKind.VACANCY_MESSAGE:
+                application = by_vacancy.get(notice.vacancy_id or "")
+                if application is None:
+                    report.hh_trash.append((notice.gmail_message_id, "alerts"))
+                    continue
+                report.fresh += 1
+                self._one(
+                    message,
+                    applications,
+                    report,
+                    answered,
+                    match=Match(application, "hh vacancy id", conclusive=True),
+                )
             elif notice.kind is hh.NoticeKind.MESSAGE_FROM and notice.company:
                 named = [a for a in on_hh if names_company(notice.company, a.job.company)]
                 if len(named) != 1:

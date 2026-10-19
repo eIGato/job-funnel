@@ -13,7 +13,14 @@ the Gmail adapter sorts senders out internally.
 from __future__ import annotations
 
 from funnel.models import SourceKind
+from funnel.replies.hh import SUBJECTS as HH_NOTICE_SUBJECTS
 from funnel.schemas import SourceConfig
+
+#: hh.ru's personal mail, which shares `noreply@hh.ru` with its alerts: a rejection, an
+#: employer's message, a chat notice. `check-replies` reads these (`replies/hh.py`); the alert
+#: query must never see them, because the alert parser reads the vacancy link in an employer's
+#: message as a posting, and a parsed alert is Trashed.
+_HH_NOTICES = " ".join(f'-subject:"{subject}"' for subject in HH_NOTICE_SUBJECTS)
 
 DEFAULT_SOURCES: list[SourceConfig] = [
     SourceConfig(
@@ -121,7 +128,7 @@ DEFAULT_SOURCES: list[SourceConfig] = [
         enabled=False,
         config={
             "query": (
-                "newer_than:30d (from:hh.ru OR from:subscribe@career.habr.com "
+                f"newer_than:30d ((from:hh.ru {_HH_NOTICES}) OR from:subscribe@career.habr.com "
                 "OR from:jobalerts-noreply@linkedin.com "
                 "OR from:wellfound.com OR from:noreply@glassdoor.com "
                 "OR from:jobalert.indeed.com OR from:landing.jobs "
