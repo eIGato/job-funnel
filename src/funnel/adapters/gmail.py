@@ -62,8 +62,10 @@ sweep them up forever.
 from __future__ import annotations
 
 import base64
+import random
 import re
 import stat
+import time
 import unicodedata
 from collections import Counter
 from email import message_from_bytes, policy
@@ -224,6 +226,74 @@ def _write_token(token_path: Path, creds: Credentials) -> None:
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_text(creds.to_json(), encoding="utf-8")  # type: ignore[no-untyped-call]
     token_path.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600
+
+
+#: Per HTTP request. A Gmail call that has not answered in this long is not going to, and the
+#: library default is to wait forever — which on a systemd run means until `TimeoutStartSec`.
+GMAIL_TIMEOUT_S = 60
+
+
+def gmail_service() -> Any:
+    """A Gmail API client on the shared credentials, with a socket timeout.
+
+    The one place the client is built, so the alert adapter and the reply scan cannot drift
+    apart on timeout or credentials.
+    """
+    import httplib2
+    from google_auth_httplib2 import AuthorizedHttp
+    from googleapiclient.discovery import build
+
+    http = AuthorizedHttp(
+        get_credentials(interactive=False), http=httplib2.Http(timeout=GMAIL_TIMEOUT_S)
+    )
+    return build("gmail", "v1", http=http, cache_discovery=False)
+
+
+#: Google's reasons for "slow down", as opposed to "you may not". The per-minute quota is the
+#: one this mailbox actually hits: a run reads up to 100 messages at 5 units each and then
+#: Trashes at 5 more apiece, and from 2026-09-18 on the Trash calls landed in the same minute
+#: and came back `403 Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per
+#: minute per user'` — all but the first few, every run, for a month.
+_RATE_LIMIT_REASONS = frozenset({"rateLimitExceeded", "userRateLimitExceeded"})
+
+
+def is_retryable(exc: Exception) -> bool:
+    """A quota or server-side failure, which waiting cures. A 403 for a missing scope is not."""
+    status = getattr(exc, "status_code", None)
+    if status == 429 or (isinstance(status, int) and status >= 500):
+        return True
+    if status != 403:
+        return False
+    details = getattr(exc, "error_details", None)
+    reasons = {d.get("reason") for d in details if isinstance(d, dict)} if details else set()
+    return bool(reasons & _RATE_LIMIT_REASONS) or "Quota exceeded" in str(
+        getattr(exc, "reason", "")
+    )
+
+
+def execute(
+    request: Any,
+    *,
+    attempts: int = 7,
+    base_delay_s: float = 2.0,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Any:
+    """`request.execute()`, retried with exponential backoff and full jitter on quota errors.
+
+    **Only for idempotent calls**, which is every call this system makes: `list`, `get`, and
+    `trash` (Trashing a message already in Trash is a no-op). The delays double from
+    `base_delay_s` and are capped at a minute, because the quota that is hit is a per-minute
+    one — seven attempts outlast it with room to spare, and anything still failing after that
+    is raised for the caller to count.
+    """
+    for attempt in range(attempts):
+        try:
+            return request.execute()
+        except Exception as exc:
+            if attempt == attempts - 1 or not is_retryable(exc):
+                raise
+            sleep(random.uniform(0, min(60.0, base_delay_s * 2**attempt)))
+    raise AssertionError("unreachable")  # pragma: no cover - the loop returns or raises
 
 
 # --------------------------------------------------------------------------------------
@@ -932,20 +1002,16 @@ class GmailAlertsAdapter(BaseAdapter):
         self.parsed_message_ids: list[str] = []
 
     async def fetch(self) -> list[NormalizedJob]:
-        from googleapiclient.discovery import build
-
         query = str(self.config.get("query", ""))
         max_results = int(self.config.get("max_results", 50))
 
-        creds = get_credentials(interactive=False)
-        service = build("gmail", "v1", credentials=creds, cache_discovery=False)
-        messages = service.users().messages()
+        messages = gmail_service().users().messages()
 
-        listed = messages.list(userId="me", q=query, maxResults=max_results).execute()
+        listed = execute(messages.list(userId="me", q=query, maxResults=max_results))
         jobs: list[NormalizedJob] = []
         self.parsed_message_ids = []
         for meta in listed.get("messages", []):
-            raw = messages.get(userId="me", id=meta["id"], format="raw").execute()
+            raw = execute(messages.get(userId="me", id=meta["id"], format="raw"))
             parsed = parse_raw_email(base64.urlsafe_b64decode(raw["raw"]))
             if parsed:
                 self.parsed_message_ids.append(str(meta["id"]))
@@ -966,7 +1032,7 @@ class GmailAlertsAdapter(BaseAdapter):
         if not query:
             return []
         max_results = int(self.config.get("max_results", 50))
-        listed = messages.list(userId="me", q=query, maxResults=max_results).execute()
+        listed = execute(messages.list(userId="me", q=query, maxResults=max_results))
         return [str(meta["id"]) for meta in listed.get("messages", [])]
 
     async def on_committed(self) -> str | None:
@@ -993,11 +1059,7 @@ class GmailAlertsAdapter(BaseAdapter):
         if not get_settings().gmail_trash_parsed_alerts:
             return None
 
-        from googleapiclient.discovery import build
-
-        creds = get_credentials(interactive=False)
-        service = build("gmail", "v1", credentials=creds, cache_discovery=False)
-        messages = service.users().messages()
+        messages = gmail_service().users().messages()
 
         discarded_ids = self._discard_ids(messages)
         if not self.parsed_message_ids and not discarded_ids:
@@ -1007,7 +1069,7 @@ class GmailAlertsAdapter(BaseAdapter):
         failures: Counter[str] = Counter()
         for message_id in [*self.parsed_message_ids, *discarded_ids]:
             try:
-                messages.trash(userId="me", id=message_id).execute()
+                execute(messages.trash(userId="me", id=message_id))
             except Exception as exc:
                 failures[failure_reason(exc)] += 1
             else:

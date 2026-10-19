@@ -20,7 +20,7 @@ from email import message_from_bytes, policy
 from email.message import EmailMessage
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from funnel.adapters.gmail import get_credentials
+from funnel.adapters.gmail import execute, gmail_service
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -53,12 +53,8 @@ class IncomingMessage(NamedTuple):
 
 
 def build_service() -> Any:
-    """A Gmail API client on the shared read-only credentials."""
-    from googleapiclient.discovery import build
-
-    return build(
-        "gmail", "v1", credentials=get_credentials(interactive=False), cache_discovery=False
-    )
+    """A Gmail API client on the shared credentials (`adapters.gmail.gmail_service`)."""
+    return gmail_service()
 
 
 def _plain_text(msg: EmailMessage) -> str:
@@ -104,9 +100,9 @@ def parse_message(payload: dict[str, Any]) -> IncomingMessage:
 
 def _iter_messages(service: Any, query: str, max_results: int) -> Iterator[dict[str, Any]]:
     messages = service.users().messages()
-    listed = messages.list(userId="me", q=query, maxResults=max_results).execute()
+    listed = execute(messages.list(userId="me", q=query, maxResults=max_results))
     for meta in listed.get("messages", []):
-        yield messages.get(userId="me", id=meta["id"], format="raw").execute()
+        yield execute(messages.get(userId="me", id=meta["id"], format="raw"))
 
 
 def fetch_recent(service: Any, *, days: int, max_results: int = 100) -> list[IncomingMessage]:

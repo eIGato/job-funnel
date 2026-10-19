@@ -483,8 +483,7 @@ def fake_gmail(monkeypatch: pytest.MonkeyPatch) -> _FakeMessages:
         def messages() -> _FakeMessages:
             return messages
 
-    monkeypatch.setattr("googleapiclient.discovery.build", lambda *_a, **_kw: _Service())
-    monkeypatch.setattr("funnel.adapters.gmail.get_credentials", lambda **_kw: object())
+    monkeypatch.setattr("funnel.adapters.gmail.gmail_service", lambda: _Service())
     return messages
 
 
@@ -658,3 +657,74 @@ def test_trash_failures_are_grouped_by_cause_not_by_message() -> None:
 
     assert failure_reason(_error("a")) == failure_reason(_error("b"))
     assert failure_reason(_error("a")) == "HTTP 400 Precondition check failed."
+
+
+def _http_error(status: int, message: str, reason: str = "") -> Exception:
+    import httplib2
+    from googleapiclient.errors import HttpError
+
+    errors = f', "errors": [{{"reason": "{reason}"}}]' if reason else ""
+    body = f'{{"error": {{"code": {status}, "message": "{message}"{errors}}}}}'.encode()
+    return HttpError(httplib2.Response({"status": str(status)}), body, uri="https://x/m/1")
+
+
+class _Flaky:
+    """A request object failing with `errors` in turn before it answers."""
+
+    def __init__(self, *errors: Exception) -> None:
+        self._errors = list(errors)
+        self.calls = 0
+
+    def execute(self) -> dict[str, object]:
+        self.calls += 1
+        if self._errors:
+            raise self._errors.pop(0)
+        return {"ok": True}
+
+
+_QUOTA = "Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per minute per user'"
+
+
+def test_the_per_minute_quota_is_waited_out() -> None:
+    """The failure that kept every parsed alert in the inbox from 2026-09-18 to 10-17."""
+    from funnel.adapters.gmail import execute
+
+    request = _Flaky(_http_error(403, _QUOTA), _http_error(429, "Too many requests"))
+    slept: list[float] = []
+
+    assert execute(request, sleep=slept.append) == {"ok": True}
+    assert request.calls == 3
+    assert len(slept) == 2 and all(0 <= s <= 60 for s in slept)
+
+
+def test_a_rate_limit_reason_is_retried_whatever_the_message_says() -> None:
+    from funnel.adapters.gmail import execute
+
+    request = _Flaky(_http_error(403, "Slow down", reason="userRateLimitExceeded"))
+
+    assert execute(request, sleep=lambda _s: None) == {"ok": True}
+
+
+def test_a_forbidden_call_is_not_retried() -> None:
+    """A 403 for a missing scope will be a 403 in a minute too; waiting only hides it."""
+    from googleapiclient.errors import HttpError
+
+    from funnel.adapters.gmail import execute
+
+    request = _Flaky(_http_error(403, "Insufficient Permission", reason="insufficientPermissions"))
+
+    with pytest.raises(HttpError):
+        execute(request, sleep=lambda _s: pytest.fail("must not wait"))
+    assert request.calls == 1
+
+
+def test_retries_give_up_and_raise() -> None:
+    from googleapiclient.errors import HttpError
+
+    from funnel.adapters.gmail import execute
+
+    request = _Flaky(*[_http_error(503, "Backend Error") for _ in range(5)])
+
+    with pytest.raises(HttpError):
+        execute(request, attempts=3, sleep=lambda _s: None)
+    assert request.calls == 3
