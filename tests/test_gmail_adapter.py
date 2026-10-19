@@ -263,6 +263,7 @@ def test_content_hashes_are_distinct_within_a_message() -> None:
         "linkedin",
         "wellfound",
         "wellfound_legacy",
+        "wellfound_wrapped",
         "glassdoor",
         "indeed",
         "landing.jobs",
@@ -769,3 +770,29 @@ def test_the_backlog_drops_the_window_and_reads_every_page(
     assert [(m, len(jobs)) for m, jobs in backlog] == [("alert-1", 2), ("junk-1", 0)]
     query = "in:inbox (from:hh.ru OR from:x.com)"
     assert asked == [(query, None), (query, "p2")]
+
+
+def test_wellfound_reads_a_title_that_wrapped_and_a_company_with_no_headcount() -> None:
+    """Both shapes yielded nothing until 2026-10-19: two of three alerts sat in the inbox.
+
+    The wrapped title comes in both of its encodings — the boundary's spaces left at the end of
+    the line, and the next line opening with one after the decoder stripped the trailing one.
+    """
+    jobs = _jobs("wellfound_wrapped")
+
+    assert [(j.title, j.company) for j in jobs] == [
+        (
+            "Senior FastAPI Backend Developer - Contract Role with Opportunity for Full-Time",
+            "Genie Labs",
+        ),
+        ("Backend Engineer | Remote", "https://crossing.example.com/"),
+        (
+            "Agentic Systems Architect - Contract Role with Opportunity for Full-Time",
+            "Genie Labs",
+        ),
+    ]
+    # A wrapped location is one location; the line break is not a field boundary.
+    assert jobs[0].location == "Bengaluru, Bangalore Rural"
+    assert jobs[0].is_remote is False
+    assert jobs[1].is_remote is True  # said in the title, not in a location run
+    assert [j.external_id for j in jobs] == ["4791870", "4819009", "4683445"]

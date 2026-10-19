@@ -593,6 +593,10 @@ _WF_JOB_PATH = re.compile(r"wellfound\.com/jobs/(\d+)-[^\s>?|]*")
 _WF_HEAD = re.compile(
     r"(?P<title>\S.*?)\s\s+(?P<company>[^/]+?)\s+/\s+[\d,+\u2013-]+\s+Employees\s+(?P<meta>.*)"
 )
+#: The same card from a company that publishes no headcount: "Backend Engineer | Remote
+#: https://crossinghurdles.com/  years of exp" (2026-10-17) — title, company, meta, each set off
+#: by two spaces, and the company is whatever the employer typed into its name field.
+_WF_HEAD_NO_SIZE = re.compile(r"(?P<title>\S.*?)\s\s+(?P<company>\S.*?)\s\s+(?P<meta>.*)")
 #: Where the "salary | location | exp" run ends and Wellfound's own editorializing begins.
 _WF_BADGES = re.compile(r"\bActively Hiring\b|\bOur take\b|\bLearn more\b")
 #: URLs are angle-bracketed in a text/plain alert; they sit inside the card and must come out
@@ -639,12 +643,14 @@ def _wellfound_card(para: str) -> NormalizedJob | None:
     job_match = _WF_JOB_PATH.search(para)
     if job_match is None:
         return None
-    head = _WF_HEAD.search(_WF_ANGLE_URL.sub(" ", para))
+    card = _WF_ANGLE_URL.sub(" ", para).strip()
+    head = _WF_HEAD.search(card) or _WF_HEAD_NO_SIZE.match(card)
     if head is None:
         return None
     meta = head.group("meta")
     badge = _WF_BADGES.search(meta)
     location, remote = _wellfound_place(meta[: badge.start()] if badge else meta)
+    remote = remote or "remote" in head.group("title").lower()
     return NormalizedJob(
         # Kept with its slug rather than rebuilt from the id alone. The slug is sometimes the
         # name of the posting this one was cloned from and disagrees with the title on the card
@@ -687,6 +693,35 @@ def _wellfound_legacy(paras: list[str]) -> list[NormalizedJob]:
     return jobs
 
 
+def _wellfound_paragraphs(text: str) -> list[str]:
+    """Card paragraphs with their line wraps undone, so two spaces still mark a field boundary.
+
+    Wellfound's text/plain is the card's fields set off by two spaces, hard-wrapped near 78
+    columns at a space, and sent quoted-printable. A wrap that lands on a field boundary keeps
+    the spaces either at the end of the line ("Full-Time  ⏎genieX") or, when the decoder has
+    stripped the trailing one as RFC 2045 says it must, half of them at the start of the next
+    (" …Full-Time⏎ genieX"). So: a line that ends in whitespace is joined as it is, and one
+    that does not gets back the single space the decoder took. Joining every wrap with one
+    space glued title and company into one field whenever a long title pushed the company onto
+    the next line, and two of the three alerts on 2026-10-17 yielded nothing.
+    """
+    paragraphs: list[str] = []
+    for block in re.split(r"\n[ \t]*\n", text):
+        joined = ""
+        for line in block.splitlines():
+            if not line.strip():
+                continue
+            if not joined:
+                joined = line.lstrip()
+            elif joined[-1:].isspace():
+                joined += line
+            else:
+                joined += " " + line
+        if joined.strip():
+            paragraphs.append(joined.strip())
+    return paragraphs
+
+
 def _parse_wellfound(alert: _Alert) -> list[NormalizedJob]:
     """Wellfound alerts, from the text/plain body — the HTML links are opaque redirects.
 
@@ -704,7 +739,7 @@ def _parse_wellfound(alert: _Alert) -> list[NormalizedJob]:
     """
     current = [
         job
-        for para in _paragraphs(alert.text, collapse=False)
+        for para in _wellfound_paragraphs(alert.text)
         if (job := _wellfound_card(para)) is not None
     ]
     return current or _wellfound_legacy(_paragraphs(alert.text))
