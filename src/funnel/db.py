@@ -60,5 +60,8 @@ def snapshot_scope() -> Iterator[Session]:
         )
         yield session
     finally:
-        session.rollback()
+        # `close`, not `rollback` then `close`: both end the database transaction, but a
+        # rollback expires every object loaded in it, and an expired object read after the
+        # session is gone raises. Closed, they stay readable as detached snapshots — which is
+        # what a caller that loads rows here and works on them outside a transaction wants.
         session.close()

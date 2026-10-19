@@ -699,43 +699,16 @@ def agent_draft(
 def check_replies(
     days: int = typer.Option(None, help="How far back to scan the mailbox."),
 ) -> None:
-    """Pull replies, classify them, and update the funnel. Reads mail only; sends nothing.
+    """Pull replies, classify them, and update the funnel. Sends nothing.
 
-    Three passes, and every one of them refuses to guess:
-
-    1. **Link.** For applications the human marked `sent` but that have no thread yet, look in
-       Sent mail for the message they sent. Only an unambiguous hit is stored. Most
-       applications go through a web form and have no sent message at all, so the thread is
-       more often learned the other way round — see pass 3.
-    2. **Fetch.** Read incoming mail, skipping any message already recorded — `check-replies`
-       is idempotent and never re-bills a classification.
-    3. **Classify and apply.** Oldest message first, because an acknowledgement teaches us the
-       thread that the real answer arrives in later. A conclusive match writes its thread back
-       onto the application, so every further message in that conversation matches by thread
-       alone. An unmatched reply, one matched only inconclusively, or one classified below
-       `reply_confidence_threshold`, is stored for review but leaves the Application status
-       untouched. A wrong auto-status would hide a real interview; an unread row would not.
-
-    Bulk mail from a job board that matches no application is recorded unclassified: it is
-    over half of everything the mailbox turns up (95 of 166 on 2026-08-12) and it is never an
-    answer to anything, so paying a model to call it `no_reply` bought nothing. The row is
-    still written, which keeps it visible in the admin and keeps the scan idempotent.
-
-    Mail the classifier calls unrelated to a job search (shopping, banking, newsletters) is not
-    stored at all, unless it arrived in an application's thread: only its id goes into
-    `skipped_messages`, so it is never fetched or billed again. See `link.is_unrelated`.
+    The passes and their transaction boundaries are in `replies.scan`. With the trash switches
+    on, the mailbox is tidied after every write has committed: hh notices that answer no
+    application on file, and the incoming mail of each conversation this scan moved to
+    REJECTED (`funnel tidy-mailbox` sweeps the ones it did not).
     """
-    from funnel.models import (
-        REPLYABLE_STATUSES,
-        Application,
-        ApplicationStatus,
-        Reply,
-        SkippedMessage,
-    )
     from funnel.replies.classify import classify_reply
-    from funnel.replies.inbox import build_service, fetch_recent, find_sent_thread
-    from funnel.replies.link import is_unrelated, link, relink_stored
-    from funnel.replies.match import is_board_sender, match_reply
+    from funnel.replies.inbox import build_service
+    from funnel.replies.scan import ReplyScan, clear_mailbox
 
     settings = get_settings()
     if not (settings.llm_api_key and settings.llm_api_key.get_secret_value()):
@@ -747,221 +720,33 @@ def check_replies(
         raise typer.Exit(1)
 
     service = build_service()
-    lookback = days or settings.reply_lookback_days
-
-    with session_scope() as session:
-        sent = list(
-            session.scalars(
-                select(Application).where(Application.status.in_(REPLYABLE_STATUSES))
-            ).all()
-        )
-        rejected_before = {a.id for a in sent if a.status is ApplicationStatus.REJECTED}
-        #: Applications that drew a reply in this scan, for the Trash step after the commit.
-        answered: set[int] = set()
-
-        # 1. Link applications to their Gmail thread.
-        linked = 0
-        for application in sent:
-            if application.thread_id or application.sent_at is None:
-                continue
-            thread_id = find_sent_thread(
-                service, company=application.job.company, sent_at=application.sent_at
-            )
-            if thread_id:
-                application.thread_id = thread_id
-                linked += 1
-
-        # 2. Fetch what is new.
-        messages = fetch_recent(service, days=lookback)
-        ids = [m.gmail_message_id for m in messages] or [""]
-        seen = set(
-            session.scalars(select(Reply.gmail_message_id).where(Reply.gmail_message_id.in_(ids)))
-        ) | set(
-            session.scalars(
-                select(SkippedMessage.gmail_message_id).where(
-                    SkippedMessage.gmail_message_id.in_(ids)
-                )
-            )
-        )
-        # Oldest first, so an acknowledgement matched in this very batch has already taught us
-        # its thread by the time the answer to it is looked at.
-        fresh = sorted(
-            (m for m in messages if m.gmail_message_id not in seen),
-            key=lambda m: (m.received_at is not None, m.received_at),
-        )
-
-        # 3. Match, classify, apply.
-        applied = unmatched = uncertain = weak = bulk = skipped = 0
-        for message in fresh:
-            match = match_reply(message, sent)
-
-            if match is None and is_board_sender(message.from_address):
-                session.add(_reply_row(message, None))
-                bulk += 1
-                continue
-
-            try:
-                verdict = asyncio.run(
-                    classify_reply(message.subject, message.from_address, message.body)
-                )
-            except Exception as exc:  # one bad message must not sink the batch
-                typer.secho(f"  {message.subject[:40]}: ERROR {exc}", fg=typer.colors.RED)
-                continue
-
-            if is_unrelated(verdict.job_related, match):
-                session.add(
-                    SkippedMessage(
-                        gmail_message_id=message.gmail_message_id,
-                        received_at=message.received_at,
-                    )
-                )
-                skipped += 1
-                continue
-
-            row = _reply_row(message, match.application if match else None)
-            if match is not None:
-                answered.add(match.application.id)
-            row.reply_type = verdict.reply_type
-            row.confidence = verdict.confidence
-            row.reasoning = verdict.reasoning
-            # A proposal for the admin's "Record as sent application", nothing more. Free:
-            # the call that produced the verdict read the same email.
-            row.detected_company = verdict.company
-            row.detected_role = verdict.role
-            session.add(row)
-
-            if match is None:
-                unmatched += 1
-                continue
-
-            # The thread of a conversation we are now sure about. Learned from the incoming
-            # side, which is the only side a web-form application has: pass 1 finds nothing
-            # for those, and without this the answer that follows an acknowledgement would be
-            # matched from scratch, on whatever the company happened to put in the subject.
-            if message.thread_id and match.application.thread_id is None:
-                match.application.thread_id = message.thread_id
-
-            if not match.conclusive:
-                weak += 1
-                continue
-            if verdict.confidence < settings.reply_confidence_threshold:
-                uncertain += 1
-                continue
-            if link(row, match.application, conclusive=True):
-                applied += 1
-                typer.echo(
-                    f"  {verdict.reply_type.value}: {match.application.job.company} "
-                    f"({verdict.confidence:.2f}, by {match.strategy})"
-                )
-
-        # 4. And the backlog: replies that found nothing when they arrived, re-matched against
-        #    the applications (and the threads) that exist now. Free, so it runs every time.
-        relinked, relinked_applied = relink_stored(session, sent)
-
-        typer.secho(
-            f"check-replies: {len(fresh)} new, {applied + relinked_applied} applied, "
-            f"{uncertain} below threshold, {weak} linked without a status, {unmatched} "
-            f"unmatched, {bulk} board alerts unclassified, {skipped} unrelated skipped, "
-            f"{linked} threads linked, "
-            f"{relinked} stored replies relinked",
-            fg=typer.colors.GREEN,
-        )
-        if unmatched or uncertain:
-            typer.echo("  Review them in the admin under Replies (unmatched have no Application).")
-        rejected_now = {a.id for a in sent if a.status is ApplicationStatus.REJECTED}
-        to_clear = (rejected_now - rejected_before) | (answered & rejected_now)
-
-    # After the commit and outside it, like the alert Trash in `ingest`: a status is in the
-    # database before the mail that justified it leaves the inbox, and no transaction is held
-    # open across Gmail calls. A failure here loses nothing — `tidy-mailbox` picks it up.
-    if settings.gmail_trash_rejections and to_clear:
-        try:
-            typer.echo(f"  {_clear_rejected_mail(to_clear, apply=True)}")
-        except Exception as exc:
-            typer.secho(f"  rejected mail: ERROR {exc}", fg=typer.colors.RED)
-
-
-def _clear_rejected_mail(application_ids: set[int] | None, *, apply: bool) -> str:
-    """Trash the incoming mail of rejected applications' threads, or say what would go.
-
-    `application_ids=None` is every REJECTED application (the backlog). The threads are read
-    in one snapshot (`link.rejection_threads` excludes any thread an application still in
-    play also owns, and that takes two statements that must agree); Gmail is only called
-    once that read-only transaction is over. A status flipped back in the admin between the
-    two is the one race left, and it costs a message recoverable from Trash for 30 days.
-    """
-    from funnel.adapters.gmail import failures_note, trash_messages
-    from funnel.db import snapshot_scope
-    from funnel.replies.inbox import build_service, incoming_in_threads
-    from funnel.replies.link import rejection_threads
-
-    with snapshot_scope() as session:
-        threads = sorted(rejection_threads(session, application_ids))
-    if not threads:
-        return "rejected mail: nothing to clear"
-    service = build_service()
-    ids = incoming_in_threads(service, threads)
-    if not apply:
-        return f"rejected mail: would trash {len(ids)} messages in {len(threads)} threads"
-    trashed, failures = trash_messages(service.users().messages(), ids)
-    return f"rejected mail: trashed {trashed} messages in {len(threads)} threads" + failures_note(
-        failures
+    scan = ReplyScan(service, classify_reply, threshold=settings.reply_confidence_threshold)
+    report = scan.run(days=days or settings.reply_lookback_days)
+    for line in report.lines:
+        typer.echo(f"  {line}")
+    typer.secho(
+        f"check-replies: {report.fresh} new, {report.applied} applied, "
+        f"{report.hh_rejections} hh rejections applied, "
+        f"{report.uncertain} below threshold, {report.weak} linked without a status, "
+        f"{report.unmatched} unmatched, {report.bulk} board alerts unclassified, "
+        f"{report.skipped} unrelated skipped, {report.errors} errors, "
+        f"{report.threads_linked} threads linked, {report.relinked} stored replies relinked",
+        fg=typer.colors.GREEN,
     )
+    if report.unmatched or report.uncertain:
+        typer.echo("  Review them in the admin under Replies (unmatched have no Application).")
 
-
-def _clear_alert_backlog(*, apply: bool) -> list[str]:
-    """Trash every alert in the inbox whose postings are all in the table already.
-
-    The same promise as `GmailAlertsAdapter.on_committed` — an email goes only once what it
-    carried is in the database — kept by checking instead of ingesting: these are the alerts
-    beyond the 30-day window, and putting month-old postings into the table now would hand
-    expired roles to the shortlist and buy letters for them. An alert with even one posting
-    the table lacks is kept and counted, as is one that parsed into nothing (the parser-bug
-    backlog, see CLAUDE.md).
-    """
-    from funnel.adapters.gmail import (
-        alert_backlog,
-        failures_note,
-        gmail_service,
-        trash_messages,
-    )
-    from funnel.db import snapshot_scope
-    from funnel.models import SourceKind
-
-    with snapshot_scope() as session:
-        sources = [
-            (s.id, s.name, dict(s.config))
-            for s in session.scalars(
-                select(Source).where(Source.kind == SourceKind.GMAIL, Source.enabled.is_(True))
-            )
-        ]
-
-    lines = []
-    for source_id, name, config in sources:
-        parsed = [
-            (message_id, {job.content_hash_for(source_id) for job in jobs})
-            for message_id, jobs in alert_backlog(config)
-        ]
-        wanted = set().union(*(hashes for _, hashes in parsed))
-        with snapshot_scope() as session:
-            known = set(
-                session.scalars(select(Job.content_hash).where(Job.content_hash.in_(wanted)))
-            )
-        done = [message_id for message_id, hashes in parsed if hashes and hashes <= known]
-        unknown = [hashes - known for _, hashes in parsed if hashes - known]
-        empty = sum(1 for _, hashes in parsed if not hashes)
-        kept = (
-            f"kept {len(unknown)} with {sum(map(len, unknown))} postings not in the table, "
-            f"{empty} that parsed into nothing"
-        )
-        if not apply:
-            lines.append(f"{name}: would trash {len(done)} of {len(parsed)} alerts, {kept}")
-            continue
-        trashed, failures = trash_messages(gmail_service().users().messages(), done)
-        lines.append(
-            f"{name}: trashed {trashed} of {len(parsed)} alerts, {kept}" + failures_note(failures)
-        )
-    return lines
+    # A failure here loses nothing: every write above has committed.
+    try:
+        for line in clear_mailbox(
+            service,
+            report,
+            trash_alerts=settings.gmail_trash_parsed_alerts,
+            trash_rejections=settings.gmail_trash_rejections,
+        ):
+            typer.echo(f"  {line}")
+    except Exception as exc:
+        typer.secho(f"  mailbox: ERROR {type(exc).__name__}: {exc}", fg=typer.colors.RED)
 
 
 @app.command(name="tidy-mailbox")
@@ -979,14 +764,16 @@ def tidy_mailbox(
     lands here). Trash only, never delete: everything is recoverable for 30 days. Safe to
     re-run — what is already in Trash is not listed again.
     """
+    from funnel.mailbox import clear_alert_backlog, clear_rejected_mail
+
     settings = get_settings()
     if settings.gmail_trash_parsed_alerts:
-        for line in _clear_alert_backlog(apply=apply):
+        for line in clear_alert_backlog(apply=apply):
             typer.echo(f"  {line}")
     else:
         typer.echo("  alerts: GMAIL_TRASH_PARSED_ALERTS is off, skipped")
     if settings.gmail_trash_rejections:
-        typer.echo(f"  {_clear_rejected_mail(None, apply=apply)}")
+        typer.echo(f"  {clear_rejected_mail(None, apply=apply)}")
     else:
         typer.echo("  rejected mail: GMAIL_TRASH_REJECTIONS is off, skipped")
     if not apply:

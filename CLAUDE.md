@@ -417,6 +417,21 @@ docker compose run --rm --build app uv run funnel run-funnel
   first: a reply with `link.similar_applications` (same employer under another spelling, the
   employer named in another posting's title, or the one same-role application sent that week)
   goes to a review page where the human links it or confirms it is new.
+- **hh.ru's personal mail is read by subject, and a rejection matches by vacancy id.** hh sends
+  alerts, receipts, chat notices and rejections all from `noreply@hh.ru`, so `fetch_recent`
+  leaves the domain out and none of it reached `check-replies` — 193 of the 202 hh mails no
+  parser could read on 2026-10-19, 67 of them rejections. `replies/hh.py` selects three subjects:
+  a rejection carries `hh.ru/vacancy/<id>`, the id `Job.url` stores, so it is a conclusive match
+  (55 of 64 matched; 22 moved a status on the first run); a chat notice carries a `chat_id` and
+  nothing else, is unmatchable by construction and goes to Trash (the human reads hh chats on the
+  site); "вам написали из X" names the employer and is kept when exactly one hh application
+  matches. **An email older than the reply a status rests on never moves it**, and a hand-set
+  `INTERVIEW` with no reply on file counts from its `updated_at` — application 1521, a hand-set
+  interview, was moved to `REJECTED` by an hh rejection received 2026-10-17 before that check
+  existed; whether the interview was set before or after that date is no longer knowable.
+- **`check-replies` holds no transaction across Gmail or the model** (`replies/scan.py`, since
+  2026-10-19). It used to run in one session for the whole scan: minutes of open connection,
+  and a crash near the end lost every write of the run and re-billed every classification.
 - **`check-replies` reads oldest first, and learns threads from incoming mail.** Pass 1 finds
   a Sent message for almost nothing (1 of 36 applications had a thread) because most
   applications go through a web form. So a conclusive match writes `message.thread_id` back

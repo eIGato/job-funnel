@@ -738,3 +738,73 @@ def test_a_thread_deleted_by_hand_is_not_an_error() -> None:
     service = _service({"gone": gone, "t1": [["INBOX"]]})
 
     assert inbox.incoming_in_threads(service, ["gone", "t1"]) == ["t1-0"]
+
+
+# --------------------------------------------------------------------------------------
+# hh.ru notices: which one is which, and what each one lets us match on.
+# --------------------------------------------------------------------------------------
+
+
+def _hh_email(subject: str, html: str) -> bytes:
+    from email.header import Header
+
+    return (
+        f"From: noreply@hh.ru\r\nSubject: {Header(subject, 'utf-8').encode()}\r\n"
+        'Content-Type: text/html; charset="utf-8"\r\nContent-Transfer-Encoding: 8bit\r\n\r\n'
+        f"<html><head><style>p {{ margin:0 }}</style></head><body>{html}</body></html>\r\n"
+    ).encode()
+
+
+def test_an_hh_rejection_names_its_vacancy_by_id() -> None:
+    from funnel.replies import hh
+
+    raw = _hh_email(
+        "Работодатель не готов пригласить вас",
+        "<p>Работодатель не готов пригласить вас</p><p>Вакансия: Senior Backend Engineer</p>"
+        "<p>Компании: Mad Devs</p>"
+        '<a href="https://hh.ru/vacancy/137630439?utm_source=email&sent_date=2026_10_19">→</a>',
+    )
+
+    notice = hh.parse("m1", "t1", raw)
+
+    assert notice is not None and notice.kind is hh.NoticeKind.REJECTION
+    assert notice.vacancy_id == "137630439"
+    assert notice.company == "Mad Devs"
+    assert "margin" not in notice.body, "the stylesheet is not part of the message"
+
+
+def test_an_hh_chat_notice_offers_nothing_to_match_on() -> None:
+    """A chat_id, never a vacancy: these are the notices that go to Trash."""
+    from funnel.replies import hh
+
+    raw = _hh_email(
+        "Новое сообщение от работодателя",
+        "<p>У вас есть новое сообщение</p><p>«Are you currently located in Russia?»</p>"  # noqa: RUF001
+        '<a href="https://hh.ru/applicant/resumes?dl_command=open_chat&chat_id=5714561208">чат</a>',
+    )
+
+    notice = hh.parse("m2", "t2", raw)
+
+    assert notice is not None and notice.kind is hh.NoticeKind.CHAT
+    assert notice.vacancy_id is None and notice.company is None
+
+
+def test_an_hh_message_names_its_employer_in_the_subject() -> None:
+    from funnel.replies import hh
+
+    raw = _hh_email(
+        'Вакансия Middle Backend Python Developer: вам написали из "Альфа-Банк."',
+        "<p>У вас есть новое сообщение от компании Альфа-Банк.</p>",  # noqa: RUF001
+    )
+
+    notice = hh.parse("m3", "t3", raw)
+
+    assert notice is not None and notice.kind is hh.NoticeKind.MESSAGE_FROM
+    assert notice.company == "Альфа-Банк"
+
+
+def test_other_hh_mail_is_not_a_notice() -> None:
+    """Receipts and alerts are someone else's business (and the alert parser's)."""
+    from funnel.replies import hh
+
+    assert hh.parse("m4", "t4", _hh_email("Спасибо за ваше резюме!", "<p>hi</p>")) is None

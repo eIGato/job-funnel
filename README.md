@@ -30,7 +30,34 @@ uv run funnel match        # hard filters + embedding ranking
 uv run funnel draft        # draft cover letters (DOES NOT SEND)
 uv run funnel run-funnel   # ingest -> match -> draft, end to end
 uv run funnel admin        # review UI at http://localhost:8000/admin
+uv run funnel check-replies  # classify replies, apply statuses, tidy the inbox
+uv run funnel tidy-mailbox   # dry run of the Trash backlog; --apply to move it
 ```
+
+## Architecture
+
+- **CLI (`cli.py`)** parses options, calls a pass, prints its report. `check-replies` is the
+  model for this: the command is a few lines over `replies.scan.ReplyScan`.
+- **Services** own the transactions. `replies.scan` (reading replies), `mailbox` (Trash
+  sweeps), `match` (filter → embed → score), `ingest` (one transaction for the postings, the
+  source-side side effect after it commits).
+- **Adapters and I/O modules** talk to the outside: `adapters/*` to boards and Gmail alerts,
+  `replies.inbox`/`replies.hh` to Gmail, `drafting`/`replies.classify` to the model. Gmail goes
+  through `adapters.gmail.execute` and HTTP through `adapters.util.get_*`: timeouts, and retries
+  with backoff for idempotent calls only.
+
+Transaction rules:
+
+- `db.session_scope()` commits on success and rolls back on an exception — the only place a
+  commit happens. `db.snapshot_scope()` is `REPEATABLE READ, READ ONLY` for reads made of
+  several statements that must agree.
+- **No transaction is open across Gmail, HTTP or a model call.** Read in a snapshot, do the
+  external work, then write in a short transaction that re-checks what it depends on: the
+  application row is locked `FOR UPDATE` and its status re-read, inserts are `ON CONFLICT DO
+  NOTHING`, thread and embedding writes are conditional (`WHERE … IS NULL`).
+- **The mailbox changes only after the database has committed** — an alert leaves the inbox
+  once its postings are stored, a rejected conversation once the status says so — and only to
+  Trash, behind `GMAIL_TRASH_PARSED_ALERTS` / `GMAIL_TRASH_REJECTIONS`.
 
 ## Quality
 
