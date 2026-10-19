@@ -6,6 +6,7 @@ that there is no network and no token spend. Vectors live in Job.embedding as ra
 
 from __future__ import annotations
 
+import gc
 import warnings
 from functools import lru_cache
 from typing import TYPE_CHECKING
@@ -39,6 +40,16 @@ def get_model() -> TextEmbedding:
             model_name=settings.embedding_model,
             cache_dir=str(settings.embedding_cache_dir),
         )
+
+
+def release_model() -> None:
+    """Let go of the loaded model, so a phase that no longer needs it does not carry its weight.
+
+    e5-large is ~1.8 GB resident once loaded. `match` needs it only to embed new rows and the
+    profile; scoring is a matmul over stored vectors. The next `get_model()` loads it again.
+    """
+    get_model.cache_clear()
+    gc.collect()
 
 
 def _needs_e5_prefix() -> bool:

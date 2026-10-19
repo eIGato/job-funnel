@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import typer
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, select, update
 
 from funnel import adapters
 from funnel.config import get_settings
@@ -17,6 +17,8 @@ from funnel.models import Job, Source
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import numpy as np
+    from numpy.typing import NDArray
     from sqlalchemy import ColumnElement, Select
     from sqlalchemy.orm import InstrumentedAttribute, Session
 
@@ -309,80 +311,171 @@ def match() -> None:
        would produce numbers that cannot be ranked against the existing ones. Rescoring
        everything is one matmul over vectors already in the database: no model call, no
        network, milliseconds at this size. An edited profile lands on the next run too.
+
+    The table is never held in memory, which is the other half of the design: 67k rows are
+    190 MB of descriptions and 200 MB of vectors, and loading them as ORM objects took the
+    process to 1.5 GB before the 1.8 GB embedding model was even loaded alongside them (3.07 GB
+    peak, measured 2026-10-19). Filtering streams plain columns and writes back only the
+    verdicts that changed; embedding reads its texts a chunk at a time; the model is released
+    before scoring, which reads `(id, embedding)` straight into one preallocated matrix.
+    """
+    from funnel.matching.embed import centered_similarity, percentile_ranks, release_model
+    from funnel.matching.profile import get_profile_vector
+
+    scanned, needs_embedding, retired, blocked = _match_filter()
+    embedded = _match_embed(needs_embedding)
+    profile = get_profile_vector()
+    release_model()
+
+    ids, matrix = _match_population()
+    with session_scope() as session:
+        # A rejected row must not keep a score: it is off the shortlist, and leaving it in the
+        # population would also drag the centre towards postings we decided against.
+        session.execute(
+            update(Job)
+            .where(Job.hard_filter_passed.is_(False), Job.match_score.is_not(None))
+            .values(match_score=None, match_percentile=None)
+        )
+        if not ids:
+            typer.secho(
+                f"match: {scanned} scanned, 0 passed the hard filters", fg=typer.colors.YELLOW
+            )
+            return
+        scores = centered_similarity(matrix, profile)
+        percentiles = percentile_ranks(scores)
+        session.execute(
+            update(Job),
+            [
+                {"id": job_id, "match_score": float(score), "match_percentile": float(pct)}
+                for job_id, score, pct in zip(ids, scores, percentiles, strict=True)
+            ],
+        )
+
+    typer.secho(
+        f"match: {scanned} scanned, {embedded} newly embedded, "
+        f"{len(ids)} scored ({scanned - len(ids)} filtered out"
+        + (f", {retired} newly retired" if retired else "")
+        + (f", {blocked} scored but unapplyable" if blocked else "")
+        + f"), top score {float(scores.max()):.3f}",
+        fg=typer.colors.GREEN,
+    )
+
+
+#: Rows per round trip when `match` streams the table.
+_STREAM_ROWS = 2000
+
+
+def _match_filter() -> tuple[int, list[int], int, int]:
+    """Pass 1: re-judge every row. Returns (scanned, ids to embed, newly retired, blocked).
+
+    Streams the columns the filters read, not `Job` objects, and never the embedding blob — a
+    `Row` has the attributes `passes_hard_filters` reads, which is all its protocol asks for.
+    Only a verdict that changed is written, so a run where no rule changed writes nothing.
+    """
+    from funnel.matching.apply_route import is_blocked
+    from funnel.matching.filters import passes_hard_filters
+
+    columns = select(
+        Job.id,
+        Job.title,
+        Job.description,
+        Job.location,
+        Job.is_remote,
+        Job.url,
+        Job.hard_filter_passed,
+        Job.apply_blocked,
+        Job.embedding.is_(None).label("unembedded"),
+    ).execution_options(yield_per=_STREAM_ROWS)
+
+    scanned = retired = blocked = 0
+    needs_embedding: list[int] = []
+    changed: list[dict[str, Any]] = []
+    with session_scope() as session:
+        for row in session.execute(columns):
+            scanned += 1
+            passed = passes_hard_filters(row)
+            # Scored like everything else, but off the shortlist: no apply route (see
+            # matching/apply_route.py). Recomputed here rather than at ingest so a change to
+            # the host list lands on the whole table at once.
+            no_route = is_blocked(row.url)
+            retired += row.hard_filter_passed and not passed
+            blocked += no_route and passed
+            if passed and row.unembedded:
+                needs_embedding.append(row.id)
+            if (passed, no_route) != (row.hard_filter_passed, row.apply_blocked):
+                changed.append(
+                    {"id": row.id, "hard_filter_passed": passed, "apply_blocked": no_route}
+                )
+        if changed:
+            session.execute(update(Job), changed)
+    return scanned, needs_embedding, retired, blocked
+
+
+def _match_embed(job_ids: list[int]) -> int:
+    """Pass 2: embed the rows that passed and have no vector yet, one committed chunk at a time.
+
+    Each chunk reads its texts, embeds them with no transaction open, and writes in a
+    transaction of its own — the model is minutes of CPU on a backlog, and nothing should hold
+    a connection across it. The write is conditional on the row still having no vector, so a
+    second `match` running alongside cannot be overwritten by this one.
+    """
+    from funnel.matching.embed import embed_texts, to_bytes
+
+    done = 0
+    for start in range(0, len(job_ids), _SCORE_CHUNK):
+        chunk = job_ids[start : start + _SCORE_CHUNK]
+        with session_scope() as session:
+            rows = session.execute(
+                select(Job.id, Job.title, Job.company, Job.description).where(Job.id.in_(chunk))
+            ).all()
+        # Postings are the passage side of the e5 pair; the profile is the query side.
+        texts = [f"{r.title}\n{r.company}\n{r.description}".strip() for r in rows]
+        vectors = embed_texts(texts, is_query=False)
+        with session_scope() as session:
+            for row, vector in zip(rows, vectors, strict=True):
+                session.execute(
+                    update(Job)
+                    .where(Job.id == row.id, Job.embedding.is_(None))
+                    .values(embedding=to_bytes(vector))
+                )
+        done += len(rows)
+        typer.echo(f"  embedded {done}/{len(job_ids)}")
+    return done
+
+
+def _match_population() -> tuple[list[int], NDArray[np.float32]]:
+    """Pass 3's input: the ids and vectors of every row that passed, as one float32 matrix.
+
+    The count and the rows come from one `REPEATABLE READ` snapshot so the preallocated matrix
+    is exactly the right size, and each vector is copied straight into its row — no list of
+    67k small arrays and no `vstack` doubling the peak.
     """
     import numpy as np
 
-    from funnel.matching.apply_route import is_blocked
-    from funnel.matching.embed import (
-        centered_similarity,
-        embed_texts,
-        from_bytes,
-        percentile_ranks,
-        to_bytes,
-    )
-    from funnel.matching.filters import passes_hard_filters
-    from funnel.matching.profile import get_profile_vector
+    from funnel.db import snapshot_scope
+    from funnel.matching.embed import from_bytes
 
-    with session_scope() as session:
-        every = session.scalars(select(Job)).all()
-
-        retired = 0
-        blocked = 0
-        needs_embedding: list[Job] = []
-        for job in every:
-            passed = passes_hard_filters(job)
-            if job.hard_filter_passed and not passed:
-                retired += 1
-            job.hard_filter_passed = passed
-            # Scored like everything else, but off the shortlist: no apply route (see
-            # matching/apply_route.py). Recomputed here rather than at ingest so a change to the
-            # host list lands on the whole table at once.
-            job.apply_blocked = is_blocked(job.url)
-            blocked += job.apply_blocked and passed
-            if passed and job.embedding is None:
-                needs_embedding.append(job)
-
-        # Postings are the passage side of the e5 pair; the profile is the query side.
-        for start in range(0, len(needs_embedding), _SCORE_CHUNK):
-            chunk = needs_embedding[start : start + _SCORE_CHUNK]
-            texts = [f"{j.title}\n{j.company}\n{j.description}".strip() for j in chunk]
-            for job, vector in zip(chunk, embed_texts(texts, is_query=False), strict=True):
-                job.embedding = to_bytes(vector)
-            session.commit()
-            typer.echo(f"  embedded {start + len(chunk)}/{len(needs_embedding)}")
-
-        # A rejected row must not keep a score: it is off the shortlist, and leaving it in the
-        # population would also drag the centre towards postings we decided against.
-        population = [j for j in every if j.hard_filter_passed and j.embedding is not None]
-        for job in every:
-            if job.hard_filter_passed is False:
-                job.match_score = None
-                job.match_percentile = None
-        if not population:
-            session.commit()
-            typer.secho(
-                f"match: {len(every)} scanned, 0 passed the hard filters", fg=typer.colors.YELLOW
-            )
-            return
-
-        # One float32 matrix of the whole shortlist: 1024 dims is ~4 KB a row, so a few thousand
-        # postings is a few MB. Chunk this only if the table grows by an order of magnitude.
-        matrix = np.vstack([from_bytes(job.embedding) for job in population if job.embedding])
-        scores = centered_similarity(matrix, get_profile_vector())
-        percentiles = percentile_ranks(scores)
-        for job, score, percentile in zip(population, scores, percentiles, strict=True):
-            job.match_score = float(score)
-            job.match_percentile = float(percentile)
-        session.commit()
-
-        typer.secho(
-            f"match: {len(every)} scanned, {len(needs_embedding)} newly embedded, "
-            f"{len(population)} scored ({len(every) - len(population)} filtered out"
-            + (f", {retired} newly retired" if retired else "")
-            + (f", {blocked} scored but unapplyable" if blocked else "")
-            + f"), top score {float(scores.max()):.3f}",
-            fg=typer.colors.GREEN,
+    population = (Job.hard_filter_passed.is_(True), Job.embedding.is_not(None))
+    with snapshot_scope() as session:
+        count = session.scalar(select(func.count()).select_from(Job).where(*population)) or 0
+        if not count:
+            return [], np.empty((0, 0), dtype=np.float32)
+        ids: list[int] = []
+        matrix: NDArray[np.float32] | None = None
+        rows = session.execute(
+            select(Job.id, Job.embedding)
+            .where(*population)
+            .order_by(Job.id)
+            .execution_options(yield_per=_STREAM_ROWS)
         )
+        for i, (job_id, blob) in enumerate(rows):
+            vector = from_bytes(blob)
+            if matrix is None:
+                matrix = np.empty((count, vector.size), dtype=np.float32)
+            matrix[i] = vector
+            ids.append(job_id)
+    assert matrix is not None
+    return ids, matrix
 
 
 def _screen_and_draft(session: Session, job: Job, *, do_screen: bool) -> str:
