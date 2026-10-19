@@ -268,7 +268,11 @@ def ingest() -> None:
                 typer.secho(f"  {source.name}: not implemented ({exc})", fg=typer.colors.YELLOW)
                 continue
             except Exception as exc:  # one broken source must not sink the whole run
-                typer.secho(f"  {source.name}: ERROR {exc}", fg=typer.colors.RED)
+                # The type as well as the text: an httpx timeout stringifies to "", and
+                # "teletype: ERROR" on five runs running said nothing about why.
+                typer.secho(
+                    f"  {source.name}: ERROR {type(exc).__name__}: {exc}", fg=typer.colors.RED
+                )
                 continue
 
             new = _persist(session, source, fetched)
