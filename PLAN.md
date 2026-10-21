@@ -428,7 +428,7 @@ corrects the machine.
 
 ### [x] Phase 7 — Orchestration
 - `funnel run-funnel` = `ingest` → `match` → `draft` (no sending).
-- A host systemd timer with `Persistent=true`, 3×/day, driving
+- A host systemd timer, once a day at 05:00, driving
   `docker compose run --rm --build app uv run funnel run-funnel`.
 - **Optional, agent layer over top-N only:** the graph `decide-worth-it → research-company
   (web search) → draft → critic`.
@@ -448,6 +448,11 @@ there: `loginctl enable-linger` (or it only runs while logged in) and `docker` g
 `check-replies` is deliberately **not** on the schedule: it needs applications the human has marked
 sent, it reads the mailbox and calls the LLM, and a Gmail token due for re-auth must not fail a
 nightly ingest.
+
+Changed 2026-10-21 — **once a day at 05:00, no `Persistent`.** The 3x/day runs at 13:00 and 19:00
+took every core for 10-20 minutes while the human was at the machine, and two of them were killed
+by stopping Docker. `Persistent=true` is off for the same reason: a catch-up run fires right after
+boot, which is when the machine is in use. More runs than one are a manual `run-funnel`.
 
 Progress 2026-07-24 — **agent layer built on pydantic-graph; phase closed.** `funnel agent-draft
 --limit N` runs the graph `decide-worth-it → research-company → draft → critic` over the very top
