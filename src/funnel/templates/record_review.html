@@ -1,0 +1,54 @@
+{% extends "sqladmin/layout.html" %}
+{% block content %}
+<div class="col-12">
+  {% if recorded %}
+  <div class="alert alert-success">{{ recorded }}</div>
+  {% endif %}
+  <p class="text-secondary">
+    These emails name an employer the funnel may already have an application for, under another
+    spelling. Link the email to the application it belongs to, or record a new one if none of
+    them is it. Nothing is sent either way.
+  </p>
+  {% for item in items %}
+  <div class="card mb-3">
+    <div class="card-header">
+      <h3 class="card-title">
+        <a href="{{ url_for('admin:details', identity='reply', pk=item.reply.id) }}">Reply #{{ item.reply.id }}</a>
+        — {{ item.reply.subject }}
+      </h3>
+    </div>
+    <div class="card-body">
+      <p>
+        Read out of the email: <strong>{{ item.reply.detected_company }}</strong>
+        / {{ item.reply.detected_role or "(role not stated)" }}
+        · from {{ item.reply.from_address }}
+      </p>
+      <form method="post" action="{{ url_for('admin:view-reply-record_review_submit') }}">
+        <input type="hidden" name="reply_id" value="{{ item.reply.id }}">
+        <table class="table table-vcenter card-table">
+          <thead>
+            <tr><th>Application</th><th>Company / role</th><th>Status</th><th>Sent</th><th>Why offered</th><th></th></tr>
+          </thead>
+          <tbody>
+            {% for application, reason in item.candidates %}
+            <tr>
+              <td><a href="{{ url_for('admin:details', identity='application', pk=application.id) }}">#{{ application.id }}</a></td>
+              <td>{{ application.job.company }} / {{ application.job.title }}</td>
+              <td>{{ application.status.value }}</td>
+              <td>{{ application.sent_at.strftime("%Y-%m-%d") if application.sent_at else "" }}</td>
+              <td>{{ reason }}</td>
+              <td><button class="btn btn-primary" name="choice" value="{{ application.id }}">Link to this</button></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <button class="btn btn-outline-secondary mt-2" name="choice" value="new">None of these — record a new application</button>
+      </form>
+    </div>
+  </div>
+  {% else %}
+  <p>Nothing left to review.</p>
+  {% endfor %}
+  <a href="{{ url_for('admin:list', identity='reply') }}">Back to replies</a>
+</div>
+{% endblock %}

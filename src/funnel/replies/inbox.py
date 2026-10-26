@@ -1,14 +1,16 @@
 """Reading replies out of the mailbox (Phase 6). Gmail I/O only — no LLM here.
 
 Reuses the alert adapter's OAuth (`adapters.gmail.get_credentials`), so there is one token and
-one **read-only** scope for the whole system. Nothing in this module can send: the scope does
-not allow it, and invariant 2 says it never will.
+one scope for the whole system (read-only unless trashing is on). Nothing in this module can
+send: the scope does not allow it, and invariant 2 says it never will.
 
-Two directions:
+Three directions:
 - `find_sent_thread` looks *backwards* at Sent mail to learn which thread an application the
   human sent by hand actually lives in. The read-only scope covers Sent, which is what makes
   reliable threading possible without the system ever touching the outbox.
 - `fetch_recent` reads incoming mail so it can be matched and classified.
+- `incoming_in_threads` names what to Trash once a conversation has ended in a rejection
+  (`GMAIL_TRASH_REJECTIONS`): incoming messages only, never the human's own.
 """
 
 from __future__ import annotations
@@ -20,10 +22,10 @@ from email import message_from_bytes, policy
 from email.message import EmailMessage
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from funnel.adapters.gmail import get_credentials
+from funnel.adapters.gmail import execute, gmail_service
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
 
 #: Replies quote the whole history. Everything from the first quote marker on is the human's
 #: own letter coming back, which is noise for the classifier and pure cost in tokens.
@@ -53,12 +55,8 @@ class IncomingMessage(NamedTuple):
 
 
 def build_service() -> Any:
-    """A Gmail API client on the shared read-only credentials."""
-    from googleapiclient.discovery import build
-
-    return build(
-        "gmail", "v1", credentials=get_credentials(interactive=False), cache_discovery=False
-    )
+    """A Gmail API client on the shared credentials (`adapters.gmail.gmail_service`)."""
+    return gmail_service()
 
 
 def _plain_text(msg: EmailMessage) -> str:
@@ -104,9 +102,9 @@ def parse_message(payload: dict[str, Any]) -> IncomingMessage:
 
 def _iter_messages(service: Any, query: str, max_results: int) -> Iterator[dict[str, Any]]:
     messages = service.users().messages()
-    listed = messages.list(userId="me", q=query, maxResults=max_results).execute()
+    listed = execute(messages.list(userId="me", q=query, maxResults=max_results))
     for meta in listed.get("messages", []):
-        yield messages.get(userId="me", id=meta["id"], format="raw").execute()
+        yield execute(messages.get(userId="me", id=meta["id"], format="raw"))
 
 
 def fetch_recent(service: Any, *, days: int, max_results: int = 100) -> list[IncomingMessage]:
@@ -114,12 +112,35 @@ def fetch_recent(service: Any, *, days: int, max_results: int = 100) -> list[Inc
 
     `-category:promotions` and the alert senders are dropped because job-board alerts arrive in
     the same mailbox and would otherwise be classified as replies to applications.
+
+    The exclusion names the **alert address** where a board has a separate one, because a board
+    that mails alerts also mails the human personally. Excluding all of `career.habr.com` threw
+    away the four "Вы откликнулись на вакансию X" acknowledgements Habr sent in a year — every
+    one of them naming a company and answering an application already in the database as `sent`
+    (measured 2026-08-13; the acknowledgement arrived within two minutes of `sent_at`). hh.ru
+    mails alerts and acknowledgements from the same `noreply@hh.ru` and cannot be split.
+
+    `no-reply@justjoin.it` is the same case as hh and is deliberately **not** excluded: it sends
+    the daily alert *and* the "You applied for X" receipt, and the receipt is worth a
+    classification. Its sibling `jobs@hello.justjoin.it` only ever digests, so that one is out.
+
+    Indeed is split by subdomain rather than by mailbox: `jobalert.` is the alert address and
+    `match.` is an ad network selling one advertiser's inventory (8 mails in a year, all on one
+    day, all DataAnnotation), while the apex sends the human personally. **The apex is worth
+    reading even though its receipt names no employer.** `indeedapply@indeed.com` confirms only
+    the role ("Bewerbung über Indeed: Software Developer", 2026-08-11), so it can never match on
+    a company and must not go in `_BOARD_ADDRESS_EXCEPTIONS` — `indeed.com` stays in
+    `_BOARD_DOMAINS`, which costs no classification call and lets the message match by thread.
+    What the narrower exclusion buys is that a mail Indeed sends *about an application* is in
+    scope at all, here and for whatever address it invents next.
     """
     query = (
         f"newer_than:{days}d in:inbox -category:promotions "
-        "-from:linkedin.com -from:hh.ru -from:career.habr.com "
-        "-from:wellfound.com -from:glassdoor.com -from:indeed.com "
-        "-from:landing.jobs"
+        "-from:linkedin.com -from:hh.ru -from:subscribe@career.habr.com "
+        "-from:wellfound.com -from:glassdoor.com "
+        "-from:jobalert.indeed.com -from:match.indeed.com "
+        "-from:landing.jobs -from:jobs@hello.justjoin.it "
+        "-from:rekomendacje@wysylka.pracuj.pl -from:gmate@getmatch.ru"
     )
     return [parse_message(payload) for payload in _iter_messages(service, query, max_results)]
 
@@ -141,3 +162,30 @@ def find_sent_thread(
     threads = {str(payload.get("threadId", "")) for payload in _iter_messages(service, query, 10)}
     threads.discard("")
     return threads.pop() if len(threads) == 1 else None
+
+
+#: Labels that mean the human wrote the message, or that it is already where it is going.
+_NOT_INCOMING = frozenset({"SENT", "DRAFT", "TRASH"})
+
+
+def incoming_in_threads(service: Any, thread_ids: Iterable[str]) -> list[str]:
+    """Ids of the messages in these threads that somebody else wrote and are not in Trash yet.
+
+    What `GMAIL_TRASH_REJECTIONS` clears once a conversation has ended in a no. The human's own
+    letter is labelled `SENT` and stays where it is: it is the record of what went out, and the
+    database only holds the draft it was made from. A thread that has vanished (deleted by
+    hand) is skipped, not an error.
+    """
+    threads = service.users().threads()
+    found: list[str] = []
+    for thread_id in thread_ids:
+        try:
+            thread = execute(threads.get(userId="me", id=thread_id, format="minimal"))
+        except Exception as exc:
+            if getattr(exc, "status_code", None) == 404:
+                continue
+            raise
+        for message in thread.get("messages", []):
+            if not _NOT_INCOMING & set(message.get("labelIds", [])):
+                found.append(str(message["id"]))
+    return found

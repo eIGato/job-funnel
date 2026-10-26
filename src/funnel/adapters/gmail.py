@@ -10,11 +10,13 @@ never learns which boards these are — that lives here, behind the `gmail-alert
 
 The parsers are deliberately structural, not textual: they key on the job-posting links
 (hh `/vacancy/<id>`, habr `/vacancies/<id>`, LinkedIn `/jobs/view/<id>`, Glassdoor's
-`jobListingId`, Indeed's `jk`) and the card body around them, never on a subject line or a
-greeting. A board's wording changes between the first "your alert has been created" email and
-the later "new jobs" ones; the link shapes and the per-card labels do not. Indeed pushes this
-further: its cards are read by counting in from both ends, because the middle lines are
-localized to whichever country site sent the alert.
+`jobListingId`, Indeed's `jk`, justjoin's `/job-offer/<slug>`, pracuj's `,oferta,<id>`) and the
+card body around them, never on a subject line or a greeting. A board's wording changes between
+the first "your alert has been created" email and the later "new jobs" ones; the link shapes and
+the per-card labels do not. Indeed pushes this further: its cards are read by counting in from
+both ends, because the middle lines are localized to whichever country site sent the alert;
+justjoin needs the same treatment for the same reason, since it mails the identical card layout
+in English from one address and in Polish from another.
 
 Most boards are parsed from the `text/html` part. Wellfound and Indeed are the exceptions and
 read `text/plain`: Wellfound's HTML wraps every posting link in an opaque
@@ -24,41 +26,143 @@ cards carry a snippet the HTML buries in table chrome. So a parser is handed bot
 (`_Alert`) and reads whichever one carries a stable id.
 
 Several boards (Habr, Landing.Jobs) hide the posting URL behind a per-recipient click
-redirect, and Indeed and Glassdoor hang tracking tokens off theirs. In every one of those the
-stored URL is rebuilt from the id alone (`_redirect_target`, or a canonical built from the
-id), so nothing personal to this mailbox ends up in the database.
+redirect, and Indeed, Glassdoor, justjoin and pracuj hang tracking tokens off theirs. In every
+one of those the stored URL is rebuilt from the id alone (`_redirect_target`, or a canonical
+built from the id), so nothing personal to this mailbox ends up in the database.
+
+Boards that were surveyed and deliberately have **no** parser (mailbox sweep, 2026-08-17), for
+two different reasons — which is the difference between the two Gmail queries in `seeds.py`:
+
+*Nothing to read.* Reed (23 msgs/yr), Totaljobs (23), 24recruitment (9), Indeed's
+`match.indeed.com` (8) and spelljob (2) wrap every posting in an opaque per-recipient redirect
+(`clicks.reed.co.uk/f/a/…`, `click.totaljobsmail.com/f/a/…`, `cts.indeed.com/v3/<blob>`) with no
+id in it anywhere and no plain-text alternative that carries one. Ingesting them would mint a
+fresh row and a fresh cover letter on every run, which is the Adzuna `se=` bug (CLAUDE.md,
+"Dedup at the door"). Resolving the redirect means an HTTP call per posting inside the alert
+parser; the one Reed link tried landed on a 404 under "Appcast Enterprise", an ad network. These
+are **not** duplicates — 34 of 47 Totaljobs postings measured were new — so they stay in the
+inbox for a human to glance at, and the honest fix is to unsubscribe, not to have a batch job
+sweep them up forever.
+
+*Nothing we do not already have.* These are in `discard_query` and get Trashed unread:
+
+- **Adzuna's own alerts (34/yr)** — `adzuna.com/land/ad/<id>` does carry a stable id, but that
+  host is in `matching/apply_route.BLOCKED_HOSTS` (403 from where the human lives) and Adzuna is
+  already an API source for eight countries. `adzuna.nl` (5) is marketing with no postings at
+  all.
+- **WeWorkRemotely's digest (2)** — already an RSS source.
+- **getmatch.ru (4)** — a weekly digest of postings the human has already seen during the week
+  in the Telegram bot the same subscription feeds, where applying is one click (human, 2026-08-17).
+  A parser was written and removed the same day; the postings were real, they were just not new.
+- **`info@glassdoor.com` (2)** — Glassdoor's marketing address. `noreply@glassdoor.com` is the
+  alert address and is parsed; naming the address rather than the domain is what keeps the two
+  apart (CLAUDE.md, "A board is an address, not a domain").
 """
 
 from __future__ import annotations
 
 import base64
+import random
 import re
 import stat
+import time
+import unicodedata
+from collections import Counter
 from email import message_from_bytes, policy
 from email.message import EmailMessage
 from html.parser import HTMLParser
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 from urllib.parse import parse_qs, urlparse
 
 from funnel.adapters.base import BaseAdapter, register
-from funnel.adapters.util import clip, strip_html
+from funnel.adapters.util import clip, looks_remote, strip_html
 from funnel.schemas import NormalizedJob
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable, Iterator
     from pathlib import Path
 
     from google.oauth2.credentials import Credentials
 
-#: Read-only on purpose. This system cannot send mail and never will, so a write scope
-#: would be strictly more authority than it has any use for.
-GMAIL_SCOPES: list[str] = ["https://www.googleapis.com/auth/gmail.readonly"]
+#: Read-only is the default and covers everything the pipeline reads: alert mail, Sent mail,
+#: replies. `gmail.modify` is asked for only when the human turns on trashing parsed alerts
+#: (`GMAIL_TRASH_PARSED_ALERTS`), because moving a message to Trash is a write and Gmail has no
+#: narrower scope for it.
+#:
+#: Neither scope can send: `gmail.send`, `gmail.compose` and `gmail.insert` are separate scopes
+#: and are never requested. That is what invariant 2 is actually about — the system has no way
+#: to put mail into the world, whatever it may do to mail already in the mailbox. Full access
+#: (`https://mail.google.com/`) is never requested either, so the worst this system can do to
+#: an email is recoverable: `modify` cannot delete permanently.
+GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+GMAIL_MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
+
+
+def failure_reason(exc: Exception) -> str:
+    """One Gmail call's failure, short enough to group: the status and Google's own reason.
+
+    The `str()` of an `HttpError` embeds the request URL, which carries the message id, so
+    grouping on it would print one line per message instead of one line per cause.
+    """
+    status = getattr(exc, "status_code", None)
+    reason = getattr(exc, "reason", None)
+    if status is not None:
+        return f"HTTP {status} {reason or ''}".strip()
+    return f"{type(exc).__name__}: {exc}"[:200]
+
+
+def failures_note(failures: Counter[str]) -> str:
+    """`, 42 failed (HTTP 400 Precondition check failed. x42)`, or nothing.
+
+    The count alone hid a broken trash for a month (2026-09-18 to 10-17): every run said "N
+    failed" and nothing said why, so the alerts piled up in the inbox in plain sight.
+    """
+    if not failures:
+        return ""
+    causes = "; ".join(f"{cause} x{n}" for cause, n in failures.most_common())
+    return f", {failures.total()} failed ({causes})"
+
+
+def trash_messages(messages: Any, message_ids: Iterable[str]) -> tuple[int, Counter[str]]:
+    """Move each message to Trash; return how many went and why the rest did not.
+
+    One failure does not stop the rest: the ids are independent, and a message left behind is
+    picked up again by whatever chose it. Trash, never `delete` — the scope could not delete
+    permanently even if this asked, and 30 days is the window in which a mistake is noticed.
+    """
+    trashed = 0
+    failures: Counter[str] = Counter()
+    for message_id in message_ids:
+        try:
+            execute(messages.trash(userId="me", id=message_id))
+        except Exception as exc:
+            failures[failure_reason(exc)] += 1
+        else:
+            trashed += 1
+    return trashed, failures
+
+
+def gmail_scopes(*, allow_trash: bool | None = None) -> list[str]:
+    """The OAuth scopes to ask for, which is the least privilege the settings allow.
+
+    `allow_trash=None` reads the setting; the tests pass it explicitly so both states are
+    checked without touching the environment.
+    """
+    if allow_trash is None:
+        from funnel.config import get_settings
+
+        settings = get_settings()
+        allow_trash = settings.gmail_trash_parsed_alerts or settings.gmail_trash_rejections
+    return [GMAIL_MODIFY_SCOPE] if allow_trash else [GMAIL_READONLY_SCOPE]
 
 
 def get_credentials(*, interactive: bool = False) -> Credentials:
     """Return valid Gmail OAuth credentials, refreshing or minting them as needed.
 
     - A saved token is loaded and, if expired, refreshed silently and rewritten.
+    - A token minted for narrower scopes than the settings now call for is discarded the
+      same way, because the alternative is an opaque 403 at the first call that needs the
+      missing scope.
     - A refresh token Google has *revoked* is discarded, not fatal: re-authorizing is the
       whole point of ``funnel auth-gmail``, and a dead token file must not be what stops it.
     - With no usable token and ``interactive=True``, run the installed-app browser flow
@@ -80,18 +184,26 @@ def get_credentials(*, interactive: bool = False) -> Credentials:
     settings = get_settings()
     creds_path: Path = settings.gmail_credentials_path
     token_path: Path = settings.gmail_token_path
+    scopes = gmail_scopes()
 
     creds: Credentials | None = None
     if token_path.exists():
         try:
             # google-auth ships py.typed but leaves these methods unannotated.
-            creds = Credentials.from_authorized_user_file(str(token_path), GMAIL_SCOPES)  # type: ignore[no-untyped-call]
+            creds = Credentials.from_authorized_user_file(str(token_path), scopes)  # type: ignore[no-untyped-call]
         except ValueError:
             # Empty, truncated or hand-edited: `from_authorized_user_file` raises
             # "Authorized user info was not in the expected format". Same stance as the revoked
             # refresh token below — a broken token file must never block the command whose one
             # job is to replace it. Discard and re-authorize.
             creds = None
+
+    if creds and not creds.has_scopes(scopes):  # type: ignore[no-untyped-call]
+        # Minted before the settings widened (turning on trashing is the case that does it).
+        # Google does not upgrade a token in place, and the missing scope surfaces as a bare
+        # 403 insufficientPermissions at whichever call needs it. Same stance as a revoked
+        # token: discard and send the human to `auth-gmail`.
+        creds = None
 
     if creds and creds.valid:
         return creds
@@ -113,9 +225,9 @@ def get_credentials(*, interactive: bool = False) -> Credentials:
 
     if not interactive:
         raise RuntimeError(
-            f"No usable Gmail token at {token_path} (missing, or the refresh token was "
-            "revoked). Run `uv run funnel auth-gmail` once to re-authorize; the pipeline "
-            "stays non-interactive."
+            f"No usable Gmail token at {token_path} (missing, revoked, or minted for "
+            f"narrower scopes than {', '.join(scopes)}). Run `uv run funnel auth-gmail` "
+            "once to re-authorize; the pipeline stays non-interactive."
         )
 
     if not creds_path.exists():
@@ -123,7 +235,7 @@ def get_credentials(*, interactive: bool = False) -> Credentials:
             f"Missing OAuth client secret at {creds_path}. Download a Desktop-app OAuth "
             "client from Google Cloud Console (Gmail API enabled) and save it there."
         )
-    flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), GMAIL_SCOPES)
+    flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), scopes)
     creds = flow.run_local_server(port=0)
     _write_token(token_path, creds)
     return creds
@@ -134,6 +246,74 @@ def _write_token(token_path: Path, creds: Credentials) -> None:
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_text(creds.to_json(), encoding="utf-8")  # type: ignore[no-untyped-call]
     token_path.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600
+
+
+#: Per HTTP request. A Gmail call that has not answered in this long is not going to, and the
+#: library default is to wait forever — which on a systemd run means until `TimeoutStartSec`.
+GMAIL_TIMEOUT_S = 60
+
+
+def gmail_service() -> Any:
+    """A Gmail API client on the shared credentials, with a socket timeout.
+
+    The one place the client is built, so the alert adapter and the reply scan cannot drift
+    apart on timeout or credentials.
+    """
+    import httplib2
+    from google_auth_httplib2 import AuthorizedHttp
+    from googleapiclient.discovery import build
+
+    http = AuthorizedHttp(
+        get_credentials(interactive=False), http=httplib2.Http(timeout=GMAIL_TIMEOUT_S)
+    )
+    return build("gmail", "v1", http=http, cache_discovery=False)
+
+
+#: Google's reasons for "slow down", as opposed to "you may not". The per-minute quota is the
+#: one this mailbox actually hits: a run reads up to 100 messages at 5 units each and then
+#: Trashes at 5 more apiece, and from 2026-09-18 on the Trash calls landed in the same minute
+#: and came back `403 Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per
+#: minute per user'` — all but the first few, every run, for a month.
+_RATE_LIMIT_REASONS = frozenset({"rateLimitExceeded", "userRateLimitExceeded"})
+
+
+def is_retryable(exc: Exception) -> bool:
+    """A quota or server-side failure, which waiting cures. A 403 for a missing scope is not."""
+    status = getattr(exc, "status_code", None)
+    if status == 429 or (isinstance(status, int) and status >= 500):
+        return True
+    if status != 403:
+        return False
+    details = getattr(exc, "error_details", None)
+    reasons = {d.get("reason") for d in details if isinstance(d, dict)} if details else set()
+    return bool(reasons & _RATE_LIMIT_REASONS) or "Quota exceeded" in str(
+        getattr(exc, "reason", "")
+    )
+
+
+def execute(
+    request: Any,
+    *,
+    attempts: int = 7,
+    base_delay_s: float = 2.0,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Any:
+    """`request.execute()`, retried with exponential backoff and full jitter on quota errors.
+
+    **Only for idempotent calls**, which is every call this system makes: `list`, `get`, and
+    `trash` (Trashing a message already in Trash is a no-op). The delays double from
+    `base_delay_s` and are capped at a minute, because the quota that is hit is a per-minute
+    one — seven attempts outlast it with room to spare, and anything still failing after that
+    is raised for the caller to count.
+    """
+    for attempt in range(attempts):
+        try:
+            return request.execute()
+        except Exception as exc:
+            if attempt == attempts - 1 or not is_retryable(exc):
+                raise
+            sleep(random.uniform(0, min(60.0, base_delay_s * 2**attempt)))
+    raise AssertionError("unreachable")  # pragma: no cover - the loop returns or raises
 
 
 # --------------------------------------------------------------------------------------
@@ -186,6 +366,12 @@ def _anchors(html: str) -> list[tuple[str, str]]:
     collector = _AnchorCollector()
     collector.feed(html)
     return collector.anchors
+
+
+#: The href of an anchor already isolated by a card regex. Used by the boards whose card is one
+#: <a> wrapping the whole posting (Glassdoor, justjoin), where `_anchors` would flatten away the
+#: line structure the parser needs.
+_HREF = re.compile(r'href="([^"]*)"', re.IGNORECASE)
 
 
 def _lines(html: str) -> list[str]:
@@ -357,17 +543,21 @@ def _parse_linkedin(alert: _Alert) -> list[NormalizedJob]:
     return jobs
 
 
-def _blocks(text: str) -> list[list[str]]:
-    """Blank-line-separated blocks of a plain-text body, each a list of collapsed lines.
+def _blocks(text: str, *, collapse: bool = True) -> list[list[str]]:
+    """Blank-line-separated blocks of a plain-text body, each a list of lines.
 
     The blank line is the one piece of structure a text/plain alert always has. What a block
     means differs per board: for Indeed it is one whole posting card (so the lines matter,
     below), for Wellfound one field of a card (so the lines are joined back up).
+
+    `collapse` squeezes runs of whitespace inside a line, which is what a reader wants from a
+    field. Wellfound's current layout is the one caller that must say no: there the run of two
+    spaces *is* the boundary between the job title and the company name, which share a line.
     """
     blocks: list[list[str]] = []
     buffer: list[str] = []
     for line in text.splitlines():
-        stripped = " ".join(line.split())
+        stripped = " ".join(line.split()) if collapse else line.strip()
         if stripped:
             buffer.append(stripped)
         elif buffer:
@@ -378,32 +568,109 @@ def _blocks(text: str) -> list[list[str]]:
     return blocks
 
 
-def _paragraphs(text: str) -> list[str]:
+def _paragraphs(text: str, *, collapse: bool = True) -> list[str]:
     """Blank-line-separated paragraphs, each with its soft-wrapped lines joined into one.
 
     A plain-text alert wraps a field (Wellfound's location can be a 60-city list) across many
     physical lines but separates real fields with a blank line. Collapsing to paragraphs turns
     those wraps back into one logical value per field.
     """
-    return [" ".join(block) for block in _blocks(text)]
+    return [" ".join(block) for block in _blocks(text, collapse=collapse)]
 
 
-#: A Wellfound card's "Company / 11-50 Employees" line — the structural anchor of each posting.
+#: A Wellfound card's "Company / 11-50 Employees" line — the anchor of each posting in the
+#: layout Wellfound used until August 2026, where every field was its own paragraph.
 _WF_COMPANY = re.compile(r"^(?P<name>.+?) / .+ Employees$")
-#: The real posting link, present only in the text/plain body (the HTML link is opaque).
+#: The posting link in that layout, present only in the text/plain body (the HTML link is opaque).
 _WF_JOB = re.compile(r"wellfound\.com/jobs\?job_listing_slug=(\d+)-[^\s>|]*")
+#: The posting link in the current layout: the id moved out of the query string and into the path,
+#: so the two shapes cannot match each other's mail. Everything after `?` is per-recipient
+#: tracking (`email_uid`) and is cut off here rather than stored.
+_WF_JOB_PATH = re.compile(r"wellfound\.com/jobs/(\d+)-[^\s>?|]*")
+#: Title, company and headcount, run together in one line of that card:
+#: "Senior Backend Engineer  District Cyber  / 11-50 Employees  $175k - $220k | Berlin | ...".
+#: Two spaces separate title from company, which is the only boundary Wellfound gives us.
+_WF_HEAD = re.compile(
+    r"(?P<title>\S.*?)\s\s+(?P<company>[^/]+?)\s+/\s+[\d,+\u2013-]+\s+Employees\s+(?P<meta>.*)"
+)
+#: The same card from a company that publishes no headcount: "Backend Engineer | Remote
+#: https://crossinghurdles.com/  years of exp" (2026-10-17) — title, company, meta, each set off
+#: by two spaces, and the company is whatever the employer typed into its name field.
+_WF_HEAD_NO_SIZE = re.compile(r"(?P<title>\S.*?)\s\s+(?P<company>\S.*?)\s\s+(?P<meta>.*)")
+#: Where the "salary | location | exp" run ends and Wellfound's own editorializing begins.
+_WF_BADGES = re.compile(r"\bActively Hiring\b|\bOur take\b|\bLearn more\b")
+#: URLs are angle-bracketed in a text/plain alert; they sit inside the card and must come out
+#: before the head is read, or the company link would be parsed as the title.
+_WF_ANGLE_URL = re.compile(r"<https?://[^>]*>")
 #: Non-place segments of the "salary | location | exp | type" line.
 _WF_JOBTYPE = frozenset({"Full-time", "Part-time", "Contract", "Internship"})
+#: Equity, which Wellfound quotes in the same run as the city ("0.0% - 2.0%", "No equity").
+_WF_EQUITY = re.compile(r"\d\s*%|No equity", re.IGNORECASE)
 
 
-def _parse_wellfound(alert: _Alert) -> list[NormalizedJob]:
-    """Wellfound alerts, from the text/plain body: title, "Company / size", "… location …".
+def _is_pay(segment: str) -> bool:
+    """True for a pay or equity segment, so it can be kept out of the location.
 
-    Each posting is a run of paragraphs anchored on its "Company / N Employees" line: the
-    paragraph before it is the title, the one after is the "salary | location | exp | type"
-    line, and the next `job_listing_slug` URL is the posting's stable link and id.
+    Any Unicode currency symbol counts, rather than a list of them. Wellfound quotes whatever
+    the employer pays in — the list that started as `$€£` let a naira range through into a
+    location field ("<naira>1500-2500k, Onsite or remote, Lagos, ...", measured 2026-08-21), and an
+    enumeration is a bug waiting for the next currency.
     """
-    paras = _paragraphs(alert.text)
+    return any(unicodedata.category(ch) == "Sc" for ch in segment) or bool(
+        _WF_EQUITY.search(segment)
+    )
+
+
+def _wellfound_place(line: str) -> tuple[str | None, bool]:
+    """Reduce a "salary | location | exp | type" run to a location and a remote flag."""
+    segments = [seg.strip() for seg in line.split("|")]
+    remote = any("remote" in seg.lower() for seg in segments)
+    places = [
+        seg
+        for seg in segments
+        if seg and not _is_pay(seg) and "years of exp" not in seg and seg not in _WF_JOBTYPE
+    ]
+    return re.sub(r"^Remote only,?\s*", "", ", ".join(places)).strip() or None, remote
+
+
+def _wellfound_card(para: str) -> NormalizedJob | None:
+    """One posting out of a card paragraph in the current Wellfound layout.
+
+    The whole card — company link, title, company, size, pay, location, badges and the "Learn
+    more" link — is a single blank-line-delimited paragraph, so it is read as one string rather
+    than by counting paragraphs around an anchor.
+    """
+    job_match = _WF_JOB_PATH.search(para)
+    if job_match is None:
+        return None
+    card = _WF_ANGLE_URL.sub(" ", para).strip()
+    head = _WF_HEAD.search(card) or _WF_HEAD_NO_SIZE.match(card)
+    if head is None:
+        return None
+    meta = head.group("meta")
+    badge = _WF_BADGES.search(meta)
+    location, remote = _wellfound_place(meta[: badge.start()] if badge else meta)
+    remote = remote or "remote" in head.group("title").lower()
+    return NormalizedJob(
+        # Kept with its slug rather than rebuilt from the id alone. The slug is sometimes the
+        # name of the posting this one was cloned from and disagrees with the title on the card
+        # (measured 2026-08-21) — but it is the slug Wellfound's own link carries, and the page
+        # resolves on the id, so it is theirs to be wrong about, not ours to guess at.
+        url="https://" + job_match.group(0),
+        company=head.group("company").strip(),
+        title=head.group("title").strip(),
+        location=location,
+        is_remote=remote,
+        external_id=job_match.group(1),
+    )
+
+
+def _wellfound_legacy(paras: list[str]) -> list[NormalizedJob]:
+    """The pre-August-2026 layout: one field per paragraph, anchored on "Company / N Employees".
+
+    The paragraph before the anchor is the title, the one after is the "salary | location | exp
+    | type" line, and the next `job_listing_slug` URL is the posting's stable link and id.
+    """
     jobs: list[NormalizedJob] = []
     for i, para in enumerate(paras):
         company_match = _WF_COMPANY.match(para)
@@ -412,15 +679,7 @@ def _parse_wellfound(alert: _Alert) -> list[NormalizedJob]:
         job_match = next((m for p in paras[i + 1 :] if (m := _WF_JOB.search(p))), None)
         if job_match is None:
             continue
-        location_line = paras[i + 1] if i + 1 < len(paras) else ""
-        segments = [seg.strip() for seg in location_line.split("|")]
-        remote = any("remote" in seg.lower() for seg in segments)
-        places = [
-            seg
-            for seg in segments
-            if seg and seg[0] not in "$€£" and "years of exp" not in seg and seg not in _WF_JOBTYPE
-        ]
-        location = re.sub(r"^Remote only,?\s*", "", ", ".join(places)).strip() or None
+        location, remote = _wellfound_place(paras[i + 1] if i + 1 < len(paras) else "")
         jobs.append(
             NormalizedJob(
                 url="https://" + job_match.group(0),
@@ -434,9 +693,60 @@ def _parse_wellfound(alert: _Alert) -> list[NormalizedJob]:
     return jobs
 
 
+def _wellfound_paragraphs(text: str) -> list[str]:
+    """Card paragraphs with their line wraps undone, so two spaces still mark a field boundary.
+
+    Wellfound's text/plain is the card's fields set off by two spaces, hard-wrapped near 78
+    columns at a space, and sent quoted-printable. A wrap that lands on a field boundary keeps
+    the spaces either at the end of the line ("Full-Time  ⏎genieX") or, when the decoder has
+    stripped the trailing one as RFC 2045 says it must, half of them at the start of the next
+    (" …Full-Time⏎ genieX"). So: a line that ends in whitespace is joined as it is, and one
+    that does not gets back the single space the decoder took. Joining every wrap with one
+    space glued title and company into one field whenever a long title pushed the company onto
+    the next line, and two of the three alerts on 2026-10-17 yielded nothing.
+    """
+    paragraphs: list[str] = []
+    for block in re.split(r"\n[ \t]*\n", text):
+        joined = ""
+        for line in block.splitlines():
+            if not line.strip():
+                continue
+            if not joined:
+                joined = line.lstrip()
+            elif joined[-1:].isspace():
+                joined += line
+            else:
+                joined += " " + line
+        if joined.strip():
+            paragraphs.append(joined.strip())
+    return paragraphs
+
+
+def _parse_wellfound(alert: _Alert) -> list[NormalizedJob]:
+    """Wellfound alerts, from the text/plain body — the HTML links are opaque redirects.
+
+    **Two layouts, both live.** Wellfound began rolling out a new alert template on 2026-08-05
+    and still sends the old one from the same address: of the twelve alerts on record on
+    2026-08-21, nine were new and three old, interleaved by date (08-19 old, 08-20 new). The
+    old layout gave every field its own paragraph; the new one puts the whole card in one. The
+    parser read only the old shape, so those nine — back to 07-23, 11 postings — yielded
+    nothing and sat in the inbox unparsed while the other three were read and Trashed.
+
+    Which layout an email is in is decided by the link shape, not by a date or a subject, and
+    the two shapes are mutually exclusive (`/jobs?job_listing_slug=<id>` against
+    `/jobs/<id>-<slug>`), so an email only ever answers to one of them. `_wellfound_legacy`
+    can go once no old-layout mail has arrived for a month.
+    """
+    current = [
+        job
+        for para in _wellfound_paragraphs(alert.text)
+        if (job := _wellfound_card(para)) is not None
+    ]
+    return current or _wellfound_legacy(_paragraphs(alert.text))
+
+
 #: Each Glassdoor posting is one <a> wrapping the whole card; the id rides in the href.
 _GD_ANCHOR = re.compile(r"<a\b[^>]*jobListing\.htm[^>]*>(.*?)</a>", re.DOTALL | re.IGNORECASE)
-_GD_HREF = re.compile(r'href="([^"]*)"', re.IGNORECASE)
 _GD_JID = re.compile(r"jobListingId=(\d+)")
 #: A trailing " 4.2 ★" employer rating hangs off the company name; drop it.
 _GD_RATING = re.compile(r"\s+\d(?:\.\d)?\s*★.*$")
@@ -450,7 +760,7 @@ def _parse_glassdoor(alert: _Alert) -> list[NormalizedJob]:
     """Glassdoor alerts: each posting is a single <a> card of company / title / location lines."""
     jobs: list[NormalizedJob] = []
     for anchor in _GD_ANCHOR.finditer(alert.html):
-        href_match = _GD_HREF.search(anchor.group(0))
+        href_match = _HREF.search(anchor.group(0))
         id_match = _GD_JID.search(href_match.group(1)) if href_match else None
         lines = [line for line in strip_html(anchor.group(1)).splitlines() if line.strip()]
         if id_match is None or len(lines) < 2:
@@ -546,7 +856,128 @@ def _parse_landing_jobs(alert: _Alert) -> list[NormalizedJob]:
     return jobs
 
 
+#: Each justjoin.it posting is one <a> wrapping the whole card, like Glassdoor's.
+_JJ_ANCHOR = re.compile(
+    r"<a\b[^>]*justjoin\.it/job-offer/[^>]*>(.*?)</a>", re.DOTALL | re.IGNORECASE
+)
+#: The slug in the path is the posting's id; everything after `?` is per-recipient tracking
+#: (and justjoin concatenates two query strings onto one href, so the cut matters).
+_JJ_SLUG = re.compile(r"justjoin\.it/job-offer/([^?\"'\s]+)")
+#: Head (company, city, title) plus tail (work mode, contract, seniority, days left, apply).
+#: A card with no salary line has exactly this many; one with a salary has nine.
+_JJ_MIN_LINES = 8
+#: The work-mode chip, in both languages justjoin mails: Remote / Praca w pełni zdalna.
+_JJ_REMOTE = re.compile(r"remote|zdaln", re.IGNORECASE)
+#: Hybrid / Praca hybrydowa. Read off the same chip and decisive against, so a wording like
+#: "praca zdalna hybrydowa" cannot be counted as remote.
+_JJ_HYBRID = re.compile(r"hybr", re.IGNORECASE)
+
+
+def _parse_justjoin(alert: _Alert) -> list[NormalizedJob]:
+    """justjoin.it alerts: a fixed card read in from both ends, past a localized middle.
+
+    Two addresses mail the identical layout — `no-reply@` in English, `jobs@hello.` in Polish —
+    so the fields are taken by position, never by label (the Indeed lesson). Head: company,
+    city, title. Tail: work mode, contract, seniority, days remaining, apply. The salary line
+    between them is present or absent, which is exactly what counting from both ends absorbs.
+    """
+    jobs: list[NormalizedJob] = []
+    seen: set[str] = set()
+    for anchor in _JJ_ANCHOR.finditer(alert.html):
+        href_match = _HREF.search(anchor.group(0))
+        slug_match = _JJ_SLUG.search(href_match.group(1)) if href_match else None
+        lines = [line.strip() for line in strip_html(anchor.group(1)).splitlines() if line.strip()]
+        if slug_match is None or len(lines) < _JJ_MIN_LINES or slug_match.group(1) in seen:
+            continue
+        seen.add(slug_match.group(1))
+        company, location, title = lines[0], lines[1], lines[2]
+        work_mode = lines[-5]
+        if not company or not title:
+            continue
+        jobs.append(
+            NormalizedJob(
+                url=f"https://justjoin.it/job-offer/{slug_match.group(1)}",
+                company=company,
+                title=title,
+                location=location or None,
+                is_remote=bool(_JJ_REMOTE.search(work_mode)) and not _JJ_HYBRID.search(work_mode),
+                external_id=slug_match.group(1),
+            )
+        )
+    return jobs
+
+
+#: A pracuj.pl posting path, `/praca/<slug>,oferta,<id>`. The slug holds no comma, so the group
+#: stops at `,oferta,` on its own and the tracking query after `?` never enters the URL.
+_PRACUJ_OFFER = re.compile(r"pracuj\.pl/praca/([^,\"'\s]+,oferta,\d+)")
+#: The yellow "!" chip pracuj renders *inside* the title anchor, ahead of the title itself.
+_PRACUJ_BADGE = re.compile(r"^!\s+")
+#: A pay line. It sits between the title anchor and the company anchor and carries the same
+#: href as both, so without this it would be read as the employer's name.
+#: The dash is escaped, not typed: pracuj writes the range with an en dash (U+2013) in some
+#: mails and a plain hyphen in others, and the two are indistinguishable in source.
+_PRACUJ_PAY = re.compile("\\d[\\d\\s\\u2013-]*(?:zł|pln|eur|usd)", re.IGNORECASE)
+
+
+def _parse_pracuj(alert: _Alert) -> list[NormalizedJob]:
+    """pracuj.pl recommendation mails: several anchors per card, all on the same offer link.
+
+    There is no card container to key on — a posting is a title anchor, an optional pay anchor
+    and a company anchor, each pointing at the same `,oferta,<id>` URL. So the anchors are
+    grouped by that id in document order: the first text is the title, the last one that is not
+    a pay line is the employer.
+
+    The city is not in any anchor: pracuj appends it to the company name in the rendered text
+    ("Integral Solutions Warszawa"). It is recovered by finding that line and subtracting the
+    company off the front, scanning forward only so two cards from the same employer keep their
+    own line rather than both taking the first.
+    """
+    html = alert.html
+    cards: dict[str, list[str]] = {}
+    for href, text in _anchors(html):
+        match = _PRACUJ_OFFER.search(href)
+        if match and text:
+            cards.setdefault(match.group(1), []).append(text)
+
+    lines = _lines(html)
+    cursor = 0
+    jobs: list[NormalizedJob] = []
+    for path, texts in cards.items():
+        title = _PRACUJ_BADGE.sub("", texts[0]).strip()
+        company = next((t for t in reversed(texts[1:]) if not _PRACUJ_PAY.search(t)), "").strip()
+        if not title or not company:
+            continue
+        location: str | None = None
+        for index in range(cursor, len(lines)):
+            line = lines[index]
+            if line.startswith(company) and len(line) > len(company):
+                location = line[len(company) :].strip() or None
+                cursor = index + 1
+                break
+        jobs.append(
+            NormalizedJob(
+                url=f"https://pracuj.pl/praca/{path}",
+                company=company,
+                title=title,
+                location=location,
+                # The alert states no work mode at all, so this reads the title and the city and
+                # nothing else. False is the safe answer here: an on-site EU posting is kept by
+                # the hard filters either way, it simply ranks below a remote one.
+                is_remote=looks_remote(title, location, ""),
+                external_id=path.rpartition(",")[2],
+            )
+        )
+    return jobs
+
+
 #: Sender-domain substring -> parser. First match wins; unknown senders yield nothing.
+#:
+#: `wysylka.pracuj.pl`, not `pracuj.pl`: the receipts from `noreply@aplikacje.pracuj.pl` ("the
+#: employer answers you directly") carry a "more employers waiting for you" block in the very
+#: same card markup, so the domain reading would parse a per-application message into a dozen
+#: postings — and, with `GMAIL_TRASH_PARSED_ALERTS` on, then Trash it. justjoin cannot be split
+#: this way (`no-reply@justjoin.it` sends both the alerts and the "You applied for X" receipts),
+#: so its receipts are held out by the Gmail query instead; see `seeds.py`.
 _PARSERS: tuple[tuple[str, Callable[[_Alert], list[NormalizedJob]]], ...] = (
     ("hh.ru", _parse_hh),
     ("career.habr.com", _parse_habr),
@@ -555,6 +986,8 @@ _PARSERS: tuple[tuple[str, Callable[[_Alert], list[NormalizedJob]]], ...] = (
     ("glassdoor.com", _parse_glassdoor),
     ("indeed.com", _parse_indeed),
     ("landing.jobs", _parse_landing_jobs),
+    ("justjoin.it", _parse_justjoin),
+    ("wysylka.pracuj.pl", _parse_pracuj),
 )
 
 
@@ -581,6 +1014,31 @@ def _sender_and_bodies(msg: EmailMessage) -> tuple[str, str, str]:
     return sender, html, text
 
 
+_WINDOW = re.compile(r"\b(?:newer|older)_than:\S+\s*")
+
+
+def alert_backlog(config: dict[str, Any]) -> Iterator[tuple[str, list[NormalizedJob]]]:
+    """Every alert still in the inbox, of any age, with what the parsers make of it.
+
+    The source's own `query` with its time window removed — which senders are alerts is the
+    source's decision, and this must not grow a second list of them. For `funnel tidy-mailbox`,
+    which clears what `on_committed` never reaches: alerts older than the 30-day window, left
+    behind while the Trash was failing on quota (2026-09-18 to 10-19) or from before the switch
+    was turned on. Paged, because the backlog is several hundred messages.
+    """
+    query = "in:inbox " + _WINDOW.sub("", str(config.get("query", ""))).strip()
+    messages = gmail_service().users().messages()
+    page: str | None = None
+    while True:
+        listed = execute(messages.list(userId="me", q=query, maxResults=500, pageToken=page))
+        for meta in listed.get("messages", []):
+            raw = execute(messages.get(userId="me", id=meta["id"], format="raw"))
+            yield str(meta["id"]), parse_raw_email(base64.urlsafe_b64decode(raw["raw"]))
+        page = listed.get("nextPageToken")
+        if not page:
+            return
+
+
 def parse_raw_email(raw: bytes) -> list[NormalizedJob]:
     """Parse one raw RFC-822 message (as Gmail returns with format='raw')."""
     msg = message_from_bytes(raw, policy=policy.default)
@@ -596,27 +1054,102 @@ class GmailAlertsAdapter(BaseAdapter):
 
     Expected config keys (Source.config JSONB):
       query: str, a Gmail search query spanning every board that emails alerts, e.g.
-             'newer_than:2d (from:hh.ru OR from:career.habr.com OR from:linkedin.com
-              OR from:wellfound.com OR from:glassdoor.com OR from:indeed.com
-              OR from:landing.jobs)'
-      max_results: int, cap on messages pulled per run.
+             'newer_than:2d (from:hh.ru OR from:subscribe@career.habr.com
+              OR from:jobalerts-noreply@linkedin.com OR from:wellfound.com
+              OR from:glassdoor.com OR from:jobalert.indeed.com OR from:landing.jobs)'
+             Name the board's alert address wherever it has one: whatever this query
+             matches is what `on_committed` may put in the Trash, and a board's other
+             addresses write to the human about specific applications (see `seeds.py`).
+      max_results: int, cap on messages pulled per run. Caps the discard sweep too.
+      discard_query: str, optional. Senders whose mail this funnel has decided it will
+             never read, because everything in it arrives through a source we already
+             have. Matching messages are Trashed **unread and unparsed** by
+             `on_committed`, under the same setting and the same scope as the parsed
+             alerts. Empty by default, and empty is the only safe default: this is the
+             one query that discards mail without having got anything out of it, so
+             every address in it has to be a decision somebody wrote down (they are,
+             in the module docstring above).
     """
 
     name = "gmail-alerts"
 
-    async def fetch(self) -> list[NormalizedJob]:
-        from googleapiclient.discovery import build
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        super().__init__(config)
+        #: Gmail ids of the messages this fetch actually got postings out of. Only these are
+        #: eligible for the Trash (see `on_committed`) — a message that parsed into nothing
+        #: is as likely to be a board that changed its markup as it is to be junk, and
+        #: deleting it would throw away the one copy a new parser could be written against.
+        self.parsed_message_ids: list[str] = []
 
+    async def fetch(self) -> list[NormalizedJob]:
         query = str(self.config.get("query", ""))
         max_results = int(self.config.get("max_results", 50))
 
-        creds = get_credentials(interactive=False)
-        service = build("gmail", "v1", credentials=creds, cache_discovery=False)
-        messages = service.users().messages()
+        messages = gmail_service().users().messages()
 
-        listed = messages.list(userId="me", q=query, maxResults=max_results).execute()
+        listed = execute(messages.list(userId="me", q=query, maxResults=max_results))
         jobs: list[NormalizedJob] = []
+        self.parsed_message_ids = []
         for meta in listed.get("messages", []):
-            raw = messages.get(userId="me", id=meta["id"], format="raw").execute()
-            jobs.extend(parse_raw_email(base64.urlsafe_b64decode(raw["raw"])))
+            raw = execute(messages.get(userId="me", id=meta["id"], format="raw"))
+            parsed = parse_raw_email(base64.urlsafe_b64decode(raw["raw"]))
+            if parsed:
+                self.parsed_message_ids.append(str(meta["id"]))
+            jobs.extend(parsed)
         return jobs
+
+    def _discard_ids(self, messages: Any) -> list[str]:
+        """Gmail ids matching `discard_query` — mail we have decided never to read.
+
+        Held apart from `parsed_message_ids` because the justification is the opposite one.
+        A parsed alert is Trashed *because* we got its postings; these are Trashed because
+        everything in them reaches the funnel by another route already, so there is nothing to
+        get. That is a standing editorial decision about a handful of named addresses, not a
+        judgement this code makes per message — which is why it is a query in the source config
+        and not a rule here, and why an empty query means "discard nothing".
+        """
+        query = str(self.config.get("discard_query", "")).strip()
+        if not query:
+            return []
+        max_results = int(self.config.get("max_results", 50))
+        listed = execute(messages.list(userId="me", q=query, maxResults=max_results))
+        return [str(meta["id"]) for meta in listed.get("messages", [])]
+
+    async def on_committed(self) -> str | None:
+        """Move alerts we read, and mail we never will, to Trash. Off unless turned on.
+
+        Three deliberate limits, because this is the only thing the system does *to* the
+        mailbox:
+
+        - **Only after the commit.** The hook runs outside the transaction, so a posting is in
+          the database before its email stops being.
+        - **Only messages that yielded a posting, or that `discard_query` names.** A parse that
+          found nothing keeps its email (see `parsed_message_ids`): it is as likely to be a
+          board that changed its markup as it is to be junk. The discard list is the one
+          exception, and it is an explicit list of addresses rather than an inference.
+        - **Trash, never delete.** Gmail keeps a trashed message recoverable for 30 days,
+          which is the window in which a parser bug is actually noticed, and the `gmail.modify`
+          scope cannot permanently delete anything even if this code asked it to.
+
+        One failure does not stop the rest: the ids are independent, and a message that stays
+        in the inbox costs nothing but a re-parse that dedups to zero new rows.
+        """
+        from funnel.config import get_settings
+
+        if not get_settings().gmail_trash_parsed_alerts:
+            return None
+
+        messages = gmail_service().users().messages()
+
+        discarded_ids = self._discard_ids(messages)
+        if not self.parsed_message_ids and not discarded_ids:
+            return None
+
+        trashed, failures = trash_messages(messages, [*self.parsed_message_ids, *discarded_ids])
+        # Reported apart: "we read these" and "we will never read these" are different claims,
+        # and a run where the second number is not zero is one to look at.
+        summary = f"trashed {trashed} alerts ({len(self.parsed_message_ids)} parsed"
+        if discarded_ids:
+            summary += f", {len(discarded_ids)} discarded unread"
+        self.parsed_message_ids = []
+        return summary + ")" + failures_note(failures)

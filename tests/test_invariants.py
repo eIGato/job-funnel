@@ -61,12 +61,35 @@ def test_no_heavy_framework() -> None:
     assert "django" not in deps
 
 
-def test_gmail_scope_is_readonly() -> None:
-    """Invariant 2: the system cannot send, so it has no use for a write scope."""
-    from funnel.adapters.gmail import GMAIL_SCOPES
+def test_gmail_scope_can_never_send() -> None:
+    """Invariant 2: the system has no way to put mail into the world.
 
-    assert GMAIL_SCOPES == ["https://www.googleapis.com/auth/gmail.readonly"]
-    assert not any("send" in scope or "compose" in scope for scope in GMAIL_SCOPES)
+    Read-only is the default. `gmail.modify` is reachable — trashing parsed alerts is a write —
+    but it grants no send, no compose, no insert and no permanent deletion, so nothing it
+    allows can produce an email. Those are the scopes this asserts against, not "readonly":
+    the invariant is about sending, and pinning the literal string would only be a tripwire
+    for a decision the human already made.
+    """
+    from funnel.adapters.gmail import gmail_scopes
+
+    assert gmail_scopes(allow_trash=False) == ["https://www.googleapis.com/auth/gmail.readonly"]
+    assert gmail_scopes(allow_trash=True) == ["https://www.googleapis.com/auth/gmail.modify"]
+    for scopes in (gmail_scopes(allow_trash=False), gmail_scopes(allow_trash=True)):
+        for scope in scopes:
+            assert not any(
+                banned in scope
+                for banned in ("send", "compose", "insert", "settings", "mail.google.com")
+            ), f"a scope that can send or destroy mail: {scope}"
+
+
+def test_nothing_permanently_deletes_mail() -> None:
+    """Trashing is recoverable for 30 days; `messages.delete` is not, and is never called."""
+    offenders = [
+        path.relative_to(SRC)
+        for path in _modules()
+        if ".delete(userId=" in path.read_text(encoding="utf-8")
+    ]
+    assert not offenders, f"permanent Gmail deletion in: {offenders}"
 
 
 def test_admin_forms_never_expose_delete_orphan_relations() -> None:

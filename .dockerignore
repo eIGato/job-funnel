@@ -1,0 +1,21 @@
+# The build context is what `COPY . .` bakes into the image, and the timer rebuilds on every
+# run (`--build`). Without this file the context was ~2.9 GB: the 2.2 GB fastembed model under
+# .cache (which compose mounts over anyway), the host .venv, mypy's cache — and .env and
+# secrets/, i.e. the Gmail OAuth token, inside an image layer. Any change to those directories
+# invalidated the layer, so a local `mypy` run cost the next timer tick a 3 GB layer export;
+# on 2026-10-19 that export swapped the machine and never finished. Runtime inputs come in
+# through compose instead: env_file for .env, bind mounts for data/ and secrets/.
+.git
+.githooks
+.idea
+.claude
+.venv
+.cache
+.mypy_cache
+.ruff_cache
+.pytest_cache
+**/__pycache__
+.env
+secrets
+data
+tests

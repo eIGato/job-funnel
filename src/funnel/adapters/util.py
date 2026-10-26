@@ -6,6 +6,8 @@ so no BeautifulSoup/lxml is pulled in for what the adapters need here.
 
 from __future__ import annotations
 
+import asyncio
+import random
 import re
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -175,6 +177,42 @@ def from_rfc822(value: str | None) -> datetime | None:
     return _aware(parsed) if parsed else None
 
 
+#: Attempts per GET. A board's API that drops one request is usually back a second later; one
+#: that is down for the run stays a per-source ERROR line, which `ingest` already isolates.
+_GET_ATTEMPTS = 3
+
+
+def _transient(exc: Exception) -> bool:
+    """A timeout, a dropped connection, a 429 or a 5xx — not a 404 or any other answer."""
+    if isinstance(exc, httpx.TransportError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status == 429 or status >= 500
+    return False
+
+
+async def _get(
+    client: httpx.AsyncClient, url: str, params: dict[str, Any] | None
+) -> httpx.Response:
+    """GET with retries on transient failures, exponential backoff with full jitter.
+
+    GET is idempotent, so retrying is safe. A 404 is an answer, not a failure — the ATS
+    adapters probe guessed slugs and most of them miss — and is raised at once. Teletype's
+    feed timed out on five runs in a row (2026-10-17/18), each a whole source lost for the run.
+    """
+    for attempt in range(_GET_ATTEMPTS):
+        try:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            return response
+        except Exception as exc:
+            if attempt == _GET_ATTEMPTS - 1 or not _transient(exc):
+                raise
+            await asyncio.sleep(random.uniform(0, 2.0**attempt))
+    raise AssertionError("unreachable")  # pragma: no cover - the loop returns or raises
+
+
 async def get_json(
     base_url: str, params: dict[str, Any] | None = None, *, follow_redirects: bool = True
 ) -> Any:
@@ -190,9 +228,7 @@ async def get_json(
         timeout=_REQUEST_TIMEOUT,
         follow_redirects=follow_redirects,
     ) as client:
-        response = await client.get(base_url, params=params)
-        response.raise_for_status()
-        return response.json()
+        return (await _get(client, base_url, params)).json()
 
 
 async def get_text(base_url: str, params: dict[str, Any] | None = None) -> str:
@@ -200,9 +236,7 @@ async def get_text(base_url: str, params: dict[str, Any] | None = None) -> str:
     async with httpx.AsyncClient(
         headers={"User-Agent": USER_AGENT}, timeout=_REQUEST_TIMEOUT, follow_redirects=True
     ) as client:
-        response = await client.get(base_url, params=params)
-        response.raise_for_status()
-        return response.text
+        return (await _get(client, base_url, params)).text
 
 
 __all__ = [

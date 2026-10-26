@@ -137,9 +137,11 @@ No CTO profile: the human declined one. CTO alerts will therefore be scored agai
 backend profile and land mid-table. Revisit if the CTO alerts turn out to be noisy.
 
 **`Application`** — an application (one-to-one with Job)
-- `job` (FK), `status` (Enum: `shortlisted` / `drafted` / `declined` / `sent` / `rejected` /
-  `interview` / `no_reply`). `declined` = *we* chose not to apply (the Phase 7 agent's
-  decide-worth-it node), distinct from `rejected` = *they* declined us.
+- `job` (FK), `status` (Enum: `shortlisted` / `drafted` / `declined` / `closed` / `sent` /
+  `rejected` / `interview` / `no_reply`). Three of them are ways of not applying and they are
+  kept apart on purpose: `declined` = *we* chose not to apply (the Phase 7 agent's
+  decide-worth-it node), `closed` = the posting stopped taking applications before we got there,
+  and `rejected` = *they* declined us, which presupposes something was sent.
 - `cover_letter` (text), `sent_at`, `reply_at`, `reply_type`, `notes`
 
 ---
@@ -185,6 +187,14 @@ visible by actually submitting the forms:
   the worst possible failure. Both relationships are now off their forms.
 
 Both are guarded by tests in `tests/test_invariants.py` (verified to fail without the fixes).
+
+The "filters by status" half of this phase only landed 2026-08-06, on sqladmin's own
+`column_filters` (it grew them since this was written; nothing had to be hand-rolled except
+"unmatched replies", which is an IS NULL on a foreign key and no built-in filter expresses it).
+Sorting by status had been standing in for it, and a sort is not a filter when 246 of 392
+applications are `declined`. Applications also gained search, over the posting's company and
+title through a dotted relationship path — an application is identified by its posting, so
+that is the only way to look one up.
 
 ### [x] Phase 3 — Ingest layer
 - The base interface `BaseAdapter.fetch() -> list[NormalizedJob]` (NormalizedJob is a
@@ -418,7 +428,7 @@ corrects the machine.
 
 ### [x] Phase 7 — Orchestration
 - `funnel run-funnel` = `ingest` → `match` → `draft` (no sending).
-- A host systemd timer with `Persistent=true`, 3×/day, driving
+- A host systemd timer, once a day at 05:00, driving
   `docker compose run --rm --build app uv run funnel run-funnel`.
 - **Optional, agent layer over top-N only:** the graph `decide-worth-it → research-company
   (web search) → draft → critic`.
@@ -438,6 +448,11 @@ there: `loginctl enable-linger` (or it only runs while logged in) and `docker` g
 `check-replies` is deliberately **not** on the schedule: it needs applications the human has marked
 sent, it reads the mailbox and calls the LLM, and a Gmail token due for re-auth must not fail a
 nightly ingest.
+
+Changed 2026-10-21 — **once a day at 05:00, no `Persistent`.** The 3x/day runs at 13:00 and 19:00
+took every core for 10-20 minutes while the human was at the machine, and two of them were killed
+by stopping Docker. `Persistent=true` is off for the same reason: a catch-up run fires right after
+boot, which is when the machine is in use. More runs than one are a manual `run-funnel`.
 
 Progress 2026-07-24 — **agent layer built on pydantic-graph; phase closed.** `funnel agent-draft
 --limit N` runs the graph `decide-worth-it → research-company → draft → critic` over the very top
@@ -610,8 +625,67 @@ trick as "chat with your PDF", except the retrieval is over CV bullets.
   pydantic-ai stack, lighter, no second ecosystem. LangGraph's resume-line recognizability was
   weighed and declined. Not built yet — this only records the library choice for Phase 7.
 
+- **Postings with no apply route** (2026-08-05). A link the human cannot apply through gets **no
+  shortlist slot**. `matching/apply_route.py` holds the host list and the evidence:
+  `adzuna.com` and `adzuna.ca` answer 403 from Montenegro (the whole site, not the apply button
+  — the other Adzuna countries are unaffected and stay), and RemoteOK gates applying behind its
+  paid tier, with no way round it in the feed (every row's `apply_url` is a copy of its own
+  `url`). Together they were 131 of the ~640 rows above the floor — a fifth of the shortlist.
+
+  Excluded at **selection**, not by a hard filter: a filtered row loses its score, which moves
+  the corpus centre every other score is measured against, and would hide those companies from
+  the one automatic route to a direct link — the ATS name probe, which now takes them first
+  (`adapters/ats.probe_candidates`). Measured alternatives that did **not** work: a twin row
+  from another source for the same company+title (1 hit in 131), and RemoteOK's `apply_url`
+  (0 in 100). Reading an apply link out of a paywalled page is out under invariant 9.
+
+- **Resolving a dead end by web search: BUILT, MEASURED, REMOVED** (2026-08-05). Do not build it
+  again without reading this. `funnel resolve-links` searched for the employer's own page
+  (company + title), verified the result by fetching it, and put a confirmed URL on the posting
+  so it could return to the shortlist. It worked — on a control posting it found Reddit's real
+  Greenhouse URL, and it caught the model proposing a *different company's* page for YouFibre,
+  which is exactly what the verification half was for. It was reverted anyway, on cost:
+
+  - **The estimate that sold it was wrong by 30-50x.** $10/1000 searches is the line item people
+    quote, and it is not the bill: web-search results come back as **input tokens**, and the
+    provider's server-side loop resends the whole conversation on every iteration. Real cost on
+    `claude-sonnet-5` was on the order of **a dollar per posting**, not the 1-3 cents estimated
+    from the search fee alone. Roughly $10 went on ~17 postings before anyone noticed.
+  - **At that price it cannot be routine.** 9 dead ends per shortlist × 3 timer runs a day is
+    tens of dollars a day to fill in some links.
+  - **Nothing measured what it spent.** A command that costs money must report tokens and price
+    per row. It did not, which is why the estimate went unchallenged for an afternoon.
+  - **The order of operations was backwards anyway.** 6 of the 9 candidates were RemoteOK junk
+    rows ("Basic", "AWESOME LIFE", "Mews"). Free deterministic filtering belongs first, then the
+    cheap screen, and only then anything paid — see the RemoteOK item below.
+
+  Consequence: **`matching/apply_route.py` is unconditional again.** A dead-end host is excluded
+  from the shortlist, full stop; RemoteOK included. The only automatic route to an employer's own
+  posting is the free one — the ATS name probe in `adapters/ats.py`, ~9% hit rate. If this is
+  ever revisited, the entry price is a measured cost-per-row on a single posting, before any
+  batch runs.
+
 ### Still open
 
+- **RemoteOK junk rows reach the shortlist.** Six of the nine top-ranked dead ends on 2026-08-05
+  were page furniture with a real company name and a nonsense title — "Basic", "AWESOME LIFE",
+  "I am a Professional", "Mews". They pass `_unwritten_body` (their bodies are plausible prose)
+  and `_JUNK_TITLES` (which needs an exact match). They cost a screening call each. Deterministic
+  fix in `matching/filters.py`, free; not yet built.
+- **Adzuna `us`/`ca` stay in the source config** (2026-08-05, human's call). The rows take no
+  shortlist slot but keep feeding ATS slug discovery. Counter-evidence worth revisiting: of the
+  7 boards the name probe has confirmed, only one company appears in an Adzuna row at all (and it
+  also arrives via arbeitnow and gmail-alerts), while **33 of the 114 companies unique to
+  adzuna.com/.ca have been probed for 0 hits** — against 7 in ~79 overall. 23 remain untried.
+- **A reply to a Telegram application has nothing to match on** (noted 2026-08-06). The human
+  applies through Telegram and the answer arrives by email, but there is no sent message, so
+  `find_sent_thread` finds no thread; the recruiter usually writes from freemail, which
+  `_GENERIC_DOMAINS` skips by design; and an informal subject line rarely carries the company
+  name. All three strategies in `replies/match.py` therefore miss, and the reply sits unmatched
+  in the admin forever. Two ways out, both unbuilt: a recruiter-address column on Application
+  plus a fourth strategy, or just linking these by hand in `ReplyAdmin` (which is what the
+  editable `Reply.application` field is already for). Not urgent — unmatched is a reviewable
+  state, not a wrong one.
 - **Which boards actually have an available API/alerts today** — verify while building Phase 3.
 - **Telegram ingest account** (Phase 3.5 C): a dedicated number + login code. Deferred by the
   human (2026-07-24) — it only widens the ingest funnel and is not needed for the MVP.

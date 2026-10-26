@@ -7,22 +7,52 @@ these tests care as much about the refusals (ambiguous -> None) as about the hit
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from pydantic_ai.models.test import TestModel
 
-from funnel.models import Application, Job
+from funnel.models import Application, ApplicationStatus, Job, Reply, Source, SourceKind
 from funnel.replies import inbox
 from funnel.replies.classify import ReplyClassification, classify_reply, make_agent
-from funnel.replies.match import company_slug, match_reply, registrable_domain, sender_domain
+from funnel.replies.link import (
+    MANUAL_SOURCE,
+    company_reason,
+    is_unrelated,
+    record_as_application,
+    role_words,
+    same_company,
+)
+from funnel.replies.match import (
+    company_slug,
+    display_name,
+    is_board_sender,
+    match_reply,
+    names_company,
+    registrable_domain,
+    sender_domain,
+)
 
 
-def _application(company: str, *, thread_id: str | None = None, app_id: int = 1) -> Application:
+def _application(
+    company: str,
+    *,
+    thread_id: str | None = None,
+    app_id: int = 1,
+    sent_at: datetime | None = None,
+    title: str = "Backend Developer",
+) -> Application:
     """An in-memory Application; no session, no flush — matching never touches the DB."""
-    application = Application(id=app_id, thread_id=thread_id)
-    application.job = Job(company=company, title="Backend Developer", url="https://x.test/1")
+    application = Application(id=app_id, thread_id=thread_id, sent_at=sent_at)
+    application.job = Job(company=company, title=title, url="https://x.test/1")
     return application
+
+
+def _matched(*args: object, **kwargs: object) -> Application | None:
+    """The application `match_reply` found, or None. Most tests care about nothing else."""
+    found = match_reply(*args, **kwargs)  # type: ignore[arg-type]
+    return found.application if found else None
 
 
 def _message(
@@ -76,42 +106,77 @@ def test_company_slug(company: str, expected: str) -> None:
 
 def test_thread_id_wins() -> None:
     apps = [_application("Acme", thread_id="t-42", app_id=1), _application("Other", app_id=2)]
-    matched = match_reply(_message(thread_id="t-42", sender="anyone@elsewhere.test"), apps)
+    matched = _matched(_message(thread_id="t-42", sender="anyone@elsewhere.test"), apps)
     assert matched is apps[0]
 
 
 def test_matches_on_company_domain() -> None:
     apps = [_application("Proxify AB", app_id=1), _application("Acme Ltd", app_id=2)]
-    assert match_reply(_message(sender="hr@proxify.io"), apps) is apps[0]
+    assert _matched(_message(sender="hr@proxify.io"), apps) is apps[0]
 
 
 def test_matches_on_company_in_subject_when_sender_is_an_ats() -> None:
     """A form application replies from the ATS, whose domain identifies nobody."""
     apps = [_application("Proxify AB", app_id=1), _application("Acme Ltd", app_id=2)]
     message = _message(sender="no-reply@greenhouse.io", subject="Your application to Proxify")
-    assert match_reply(message, apps) is apps[0]
+    assert _matched(message, apps) is apps[0]
 
 
 def test_freemail_sender_alone_does_not_match() -> None:
     """Nothing about gmail.com says which company wrote — refuse rather than guess."""
     apps = [_application("Acme Ltd", app_id=1)]
-    assert match_reply(_message(sender="recruiter@gmail.com"), apps) is None
+    assert _matched(_message(sender="recruiter@gmail.com"), apps) is None
 
 
 def test_ambiguity_refuses_to_match() -> None:
     """Two equally plausible applications must leave the reply for a human."""
     apps = [_application("Acme Ltd", app_id=1), _application("Acme Group", app_id=2)]
-    assert match_reply(_message(sender="hr@acme.com"), apps) is None
+    assert _matched(_message(sender="hr@acme.com"), apps) is None
 
 
 def test_short_company_names_do_not_match_by_substring() -> None:
     """'Ai' must not match aircall.com."""
     apps = [_application("Ai", app_id=1)]
-    assert match_reply(_message(sender="jobs@aircall.com"), apps) is None
+    assert _matched(_message(sender="jobs@aircall.com"), apps) is None
+
+
+def test_a_board_name_containing_a_company_name_does_not_match() -> None:
+    """The regression: 'join' sits inside 'justjoin', and a job alert became JOIN's answer.
+
+    Two independent guards now stop it — justjoin is a known board, and the containment is
+    anchored — so this asserts the outcome rather than either mechanism.
+    """
+    apps = [_application("JOIN", app_id=1)]
+    message = _message(sender='"justjoin.it" <no-reply@justjoin.it>', subject="New jobs for you")
+    assert _matched(message, apps) is None
+
+
+def test_containment_is_anchored_not_free_substring() -> None:
+    """A legal tail the domain drops still matches; a name buried mid-word does not."""
+    itds = [_application("ITDS Polska Sp. z o.o.", app_id=1)]
+    assert _matched(_message(sender="barbara@itds.pl"), itds) is itds[0]
+    buried = [_application("Cast", app_id=1)]
+    assert _matched(_message(sender="hr@podcastly.test"), buried) is None
+
+
+@pytest.mark.parametrize(
+    "sender",
+    [
+        "no-reply@us.greenhouse-mail.io",  # the ATS list held the parent domain only
+        "no-reply@app.bamboohr.com",
+        "no-reply@wysylka.pracuj.pl",  # a board, on one of its several subdomains
+        "no-reply@adzuna.nl",  # and on one of its many country domains
+    ],
+)
+def test_platform_subdomains_do_not_reach_company_matching(sender: str) -> None:
+    """Every one of these passed an exact-membership test and matched on the company name."""
+    from funnel.replies.match import is_generic_sender
+
+    assert is_generic_sender(sender_domain(sender))
 
 
 def test_unknown_sender_is_unmatched() -> None:
-    assert match_reply(_message(sender="hr@nowhere.test"), [_application("Acme")]) is None
+    assert _matched(_message(sender="hr@nowhere.test"), [_application("Acme")]) is None
 
 
 def test_strip_quoted_cuts_the_history_and_clamps_length() -> None:
@@ -130,6 +195,76 @@ def test_classify_reply_returns_structured_output_offline() -> None:
     )
     assert isinstance(verdict, ReplyClassification)
     assert 0.0 <= verdict.confidence <= 1.0
+
+
+def test_a_verdict_that_omits_job_related_keeps_the_email() -> None:
+    """The field defaults to True: a model that never fills it in throws nothing away."""
+    verdict = ReplyClassification.model_validate(
+        {"reply_type": "no_reply", "confidence": 0.9, "reasoning": "ack"}
+    )
+    assert verdict.job_related is True
+
+
+def test_job_related_mail_is_always_stored() -> None:
+    assert not is_unrelated(True, None)
+
+
+def test_unrelated_mail_that_matched_nothing_is_skipped() -> None:
+    assert is_unrelated(False, None)
+
+
+def test_unrelated_mail_matched_by_domain_is_still_skipped() -> None:
+    """The ChatGPT newsletter: openai.com is the employer's domain, and that proves nothing."""
+    openai = _application("OpenAI")
+    match = match_reply(
+        _message(subject="Introducing ChatGPT Work", sender="ChatGPT <noreply@email.openai.com>"),
+        [openai],
+    )
+    assert match is not None and match.strategy != "thread"
+    assert is_unrelated(False, match)
+
+
+def test_mail_in_an_applications_thread_is_kept_whatever_the_model_says() -> None:
+    acme = _application("Acme", thread_id="t1")
+    match = match_reply(_message(subject="Re: hello", sender="x@y.test", thread_id="t1"), [acme])
+    assert match is not None and match.strategy == "thread"
+    assert not is_unrelated(False, match)
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        # The five twins `record_as_application` minted by exact-name lookup (2026-10-02).
+        ("Octopus Energy", "Octopus Energy Group jobs"),
+        ("Source Group International", "SGI"),
+        ("Polskie Sieci Elektroenergetyczne S.A.", "PSE S.A."),
+        # An ATS slug against the written-out name.
+        ("Moon Active", "moonactive"),
+        ("lemon.markets", "Lemon Markets"),
+    ],
+)
+def test_one_employer_spelled_two_ways(a: str, b: str) -> None:
+    assert same_company(a, b)
+    assert same_company(b, a)
+
+
+@pytest.mark.parametrize(
+    ("a", "b"), [("Avito", "Avenga"), ("Reddit", "Remedy Logic"), ("AI", "Acme Inc")]
+)
+def test_different_employers_stay_apart(a: str, b: str) -> None:
+    assert not same_company(a, b)
+
+
+def test_an_aggregator_that_names_the_employer_in_its_title() -> None:
+    teletype = _application("Teletype (courierus)", title="Senior Backend Developer (Matrix)")
+    assert company_reason("Matrix", teletype) == "employer named in the title"
+    assert company_reason("Acclaim", teletype) is None
+
+
+def test_role_words_ignore_gender_markers() -> None:
+    assert role_words("Forward Deployed Engineer (m/f/d)") == role_words(
+        "Forward Deployed Engineer"
+    )
 
 
 def test_matching_stays_pure() -> None:
@@ -153,3 +288,553 @@ def test_matching_stays_pure() -> None:
 
     stateful = [m for m in imported if m.startswith(("sqlalchemy", "funnel.db", "httpx", "google"))]
     assert not stateful, f"replies.match imports {stateful}"
+
+
+# --------------------------------------------------------------------------------------
+# Matching by words. Every case below is a message this mailbox actually received and the
+# old slug-containment rule got wrong (measured over 166 stored replies, 2026-08-12).
+# --------------------------------------------------------------------------------------
+
+
+def test_a_company_name_buried_in_a_longer_word_is_not_a_mention() -> None:
+    """The dry run's one false positive: 'profil' sits inside 'profile'.
+
+    A Toptal acknowledgement whose body said "your profile" was matched to a Profil Software
+    application, because both sides were compared as one run-together string of letters.
+    """
+    assert not names_company("Your Toptal Application: update your profile", "Profil Software")
+    assert names_company("Thanks for applying to Profil Software", "Profil Software")
+
+
+def test_diacritics_fold() -> None:
+    """'Szkoła' lost its ł to the slug and could never match its own subject line."""
+    apps = [_application("Fundacja Szkoła w Chmurze", app_id=1)]
+    message = _message(sender="hr@szkolawchmurze.test", subject="Szkoła w Chmurze - rekrutacja")
+    assert _matched(message, apps) is apps[0]
+
+
+def test_a_legal_form_the_company_never_writes_in_email() -> None:
+    """ "MindPal Sp. z o. o." welcomes you to plain "Mindpal"."""
+    apps = [_application("MindPal Sp. z o. o.", app_id=1)]
+    assert _matched(_message(subject="Welcome to Mindpal"), apps) is apps[0]
+
+
+def test_a_three_letter_company_matches_as_a_word() -> None:
+    """The four-character floor dropped CGF; a whole-word match does not need it."""
+    apps = [_application("CGF", app_id=1)]
+    message = _message(
+        sender="notifications@app.bamboohr.com", subject="Thank you for applying at CGF"
+    )
+    assert _matched(message, apps) is apps[0]
+    # Still not two characters: an initialism that short means something else too often.
+    assert not names_company("Thanks for applying at AI", "AI")
+
+
+def test_the_display_name_identifies_the_company_when_nothing_else_does() -> None:
+    """An ATS mails as itself and signs as the employer; the subject may not name it at all."""
+    apps = [_application("Moon Active", app_id=1), _application("Acme Ltd", app_id=2)]
+    message = _message(
+        sender="Moon Active Hiring Team <no-reply@ashbyhq.com>",
+        subject="We've got your application!",
+    )
+    found = match_reply(message, apps)
+    assert found is not None
+    assert found.application is apps[0]
+    assert found.strategy == "display-name"
+    assert found.conclusive is True
+
+
+def test_two_roles_at_one_company_are_a_tie_broken_by_send_time() -> None:
+    """Reddit answered three times while two Reddit applications were open.
+
+    The company is certain and the role is a guess, so the match is inconclusive: it links the
+    reply for a human to read and must not move a status.
+    """
+    older = _application("Reddit", app_id=1, sent_at=datetime(2026, 7, 1, tzinfo=UTC))
+    newer = _application("reddit", app_id=2, sent_at=datetime(2026, 8, 1, tzinfo=UTC))
+    message = _message(
+        sender="no-reply@us.greenhouse-mail.io", subject="Thank you for your interest in Reddit"
+    )
+    found = match_reply(message, [older, newer])
+    assert found is not None
+    assert found.application is newer
+    assert found.conclusive is False
+
+
+def test_an_application_sent_after_the_email_arrived_never_wins_the_tie() -> None:
+    # Relative to the message, which `_message` stamps with `now`: a literal date here is a
+    # test that passes until the calendar reaches it (2026-09-01 did).
+    before = _application("Reddit", app_id=1, sent_at=datetime.now(tz=UTC) - timedelta(days=60))
+    after = _application("Reddit", app_id=2, sent_at=datetime.now(tz=UTC) + timedelta(days=30))
+    message = _message(subject="Thank you for your interest in Reddit")
+    found = match_reply(message, [before, after])
+    assert found is not None and found.application is before
+
+
+def test_two_different_companies_are_still_an_ambiguity() -> None:
+    """The tie-break is for one company's several roles, never for two companies."""
+    apps = [_application("Acme Ltd", app_id=1), _application("Acme Group", app_id=2)]
+    assert _matched(_message(subject="Your application to Acme"), apps) is None
+
+
+def test_a_name_found_only_in_the_body_is_never_conclusive() -> None:
+    """Footers, disclaimers and "powered by" lines live here too."""
+    apps = [_application("EuroCert", app_id=1)]
+    message = _message(
+        sender="no-reply@traffit-mail.com",
+        subject="Dziękujemy za Twoją aplikację",
+        body="Dzień dobry, dziękujemy za przesłanie aplikacji.\nPozdrawiamy, zespół EuroCert",
+    )
+    found = match_reply(message, apps)
+    assert found is not None
+    assert found.strategy == "body"
+    assert found.conclusive is False
+
+
+def test_the_body_is_read_only_at_its_head() -> None:
+    """Past the letter it is quoted history and legal boilerplate."""
+    apps = [_application("EuroCert", app_id=1)]
+    message = _message(subject="Hello", body="x" * 900 + " EuroCert")
+    assert _matched(message, apps) is None
+
+
+@pytest.mark.parametrize(
+    ("address", "expected"),
+    [
+        ("Moon Active Hiring Team <no-reply@ashbyhq.com>", "Moon Active Hiring Team"),
+        ('"justjoin.it" <no-reply@justjoin.it>', "justjoin.it"),
+        ("plain@address.test", ""),
+    ],
+)
+def test_display_name(address: str, expected: str) -> None:
+    assert display_name(address) == expected
+
+
+@pytest.mark.parametrize(
+    ("sender", "is_board"),
+    [
+        ("rekomendacje@wysylka.pracuj.pl", True),
+        ("no-reply@adzuna.nl", True),
+        ("no-reply@jobs.reed.co.uk", True),
+        ("jobalerts-noreply@linkedin.com", True),
+        # A person at a board is still a board sender: the classification is withheld, the row
+        # is not, and a message that matched an application is classified before we get here.
+        ("pykarpenko@avito.ru", True),
+        # Habr Career mails from two addresses and only one of them is bulk. The digest is a
+        # board; the per-application acknowledgement is the thing we are here to catch.
+        ("subscribe@career.habr.com", True),
+        ("noreply@career.habr.com", False),
+        ("Хабр Карьера <noreply@career.habr.com>", False),  # noqa: RUF001 (Cyrillic is the data)
+        # The ATSs must never be skipped — they carry the acknowledgements.
+        ("no-reply@us.greenhouse-mail.io", False),
+        ("no-reply@ashbyhq.com", False),
+        ("hr@acme.com", False),
+    ],
+)
+def test_is_board_sender(sender: str, is_board: bool) -> None:
+    assert is_board_sender(sender) is is_board
+
+
+def test_a_habr_acknowledgement_reaches_its_application() -> None:
+    """The regression the address split exists for (measured 2026-08-13).
+
+    Habr Career sends a per-application receipt from `noreply@` minutes after the human applies
+    through the web form — so there is no thread and no Sent mail, and the company name in the
+    body is the only handle. All four such emails in a year answered an application already
+    stored as `sent`. Treating the whole domain as a board refused every one of them.
+
+    Text is verbatim from the real message: this rule only ever fires on Russian mail.
+    """
+    apps = [_application("Raft Digital Solutions", app_id=167, title="AI архитектор")]
+    message = _message(
+        sender="Хабр Карьера <noreply@career.habr.com>",  # noqa: RUF001
+        subject="Вы откликнулись на вакансию AI архитектор на Хабр Карьере",  # noqa: RUF001
+        body=(
+            "Здравствуйте, Evgenii! Вы откликнулись на вакансию AI архитектор "
+            "(https://career.habr.com/vacancies/1000166542) компании Raft Digital Solutions "
+            "(https://career.habr.com/companies/raft)."
+        ),
+    )
+    assert _matched(message, apps) is apps[0]
+
+
+def test_a_habr_digest_is_still_refused() -> None:
+    """The other half: the subscription digest lists companies by the dozen and matches none."""
+    apps = [_application("Raft Digital Solutions", app_id=167)]
+    message = _message(
+        sender="Хабр Карьера <subscribe@career.habr.com>",  # noqa: RUF001
+        subject="Новые вакансии по вашей подписке «job-funnel» на Хабр Карьере",  # noqa: RUF001
+        body="Backend Developer, Raft Digital Solutions. Tech Lead Python, Acme.",
+    )
+    assert _matched(message, apps) is None
+
+
+def test_the_alert_query_names_habrs_alert_address_not_its_domain() -> None:
+    """What this query matches is what `GMAIL_TRASH_PARSED_ALERTS` may put in the Trash.
+
+    Widening it back to the domain would put Habr's per-application acknowledgements within
+    reach of the Trash again, held out only by the parser happening to return nothing on them.
+    """
+    from funnel.seeds import DEFAULT_SOURCES
+
+    query = next(s for s in DEFAULT_SOURCES if s.name == "gmail-alerts").config["query"]
+    assert "from:subscribe@career.habr.com" in query
+    assert "from:career.habr.com" not in query
+
+
+def test_the_reply_scan_excludes_alert_addresses_not_whole_board_domains() -> None:
+    """A board's bulk mail is excluded; the address it writes the human from is not.
+
+    Both halves of this have been wrong in production. `-from:career.habr.com` threw away four
+    per-application acknowledgements (2026-08-13) and `-from:indeed.com` threw away the
+    Indeed Apply receipt along with the alerts (2026-08-22). The scan costs nothing on a mail
+    it decides is bulk — `is_board_sender` short-circuits before any classification call — so
+    the narrow exclusion is the cheap side of the trade in both directions.
+    """
+    captured: dict[str, str] = {}
+
+    class _Messages:
+        def list(self, *, userId: str, q: str, maxResults: int) -> Any:  # noqa: N803
+            captured["q"] = q
+            return self
+
+        def execute(self) -> dict[str, object]:
+            return {}
+
+    class _Service:
+        def users(self) -> Any:
+            return self
+
+        def messages(self) -> Any:
+            return _Messages()
+
+    assert inbox.fetch_recent(_Service(), days=14) == []
+    query = captured["q"]
+    for alert_address in (
+        "subscribe@career.habr.com",
+        "jobalert.indeed.com",
+        "match.indeed.com",
+        "jobs@hello.justjoin.it",
+        "rekomendacje@wysylka.pracuj.pl",
+    ):
+        assert f"-from:{alert_address}" in query
+    # The apex of a board that has a separate alert address is never excluded whole: that is
+    # where the mail about one application comes from.
+    for personal_domain in ("career.habr.com", "indeed.com", "justjoin.it", "pracuj.pl"):
+        assert f"-from:{personal_domain} " not in f"{query} "
+
+
+def test_a_run_together_company_name_matches_its_written_out_form() -> None:
+    """ATS boards hand us the slug; the ATS's own mail writes the words out."""
+    apps = [_application("Chaosindustries", app_id=1)]
+    message = _message(
+        sender="no-reply@us.greenhouse-mail.io",
+        subject="Thank you for applying to CHAOS Industries!",
+    )
+    assert _matched(message, apps) is apps[0]
+    # And the other way round, which is how the same company arrives from a different board.
+    assert names_company("Applying to Chaosindustries", "CHAOS Industries")
+    # Still equality on the run, not containment: no prefix of a longer word counts.
+    assert not names_company("chaosindustriesgroup pays well", "CHAOS Industries")
+
+
+def test_a_board_can_only_match_by_thread() -> None:
+    """A digest lists companies by the dozen; one of them naming ours proves nothing.
+
+    justjoin's "Proponowane oferty" recommended a EuroCert role and was matched to the
+    EuroCert application through the body (2026-08-12, dry run).
+    """
+    apps = [_application("EuroCert", app_id=1, thread_id="t-9")]
+    digest = _message(
+        sender='"justjoin.it" <jobs@hello.justjoin.it>',
+        subject="Proponowane oferty - justjoin.it",
+        body="Stanowisko: Python Developer w EuroCert",
+    )
+    assert _matched(digest, apps) is None
+    # A board relaying an answer inside a known thread is still a match.
+    assert _matched(digest._replace(thread_id="t-9"), apps) is apps[0]
+
+
+# --------------------------------------------------------------------------------------
+# Recording an application the funnel never saw. The suite has no database (see CLAUDE.md
+# on keeping it hermetic), so the session is a stand-in that hands back canned rows and
+# collects what was added: what is under test here is the decision, not the SQL.
+# --------------------------------------------------------------------------------------
+
+
+class _FakeSession:
+    """Answers each `scalar` from a queue, in the order `record_as_application` asks."""
+
+    def __init__(self, *answers: object) -> None:
+        self._answers = list(answers)
+        self.added: list[object] = []
+        self.flushed = 0
+
+    def scalar(self, _statement: object) -> object:
+        return self._answers.pop(0) if self._answers else None
+
+    def add(self, row: object) -> None:
+        self.added.append(row)
+        if getattr(row, "id", None) is None:
+            row.id = 900 + len(self.added)  # what a flush would assign
+
+    def flush(self) -> None:
+        self.flushed += 1
+
+
+def _orphan_reply(**kwargs: object) -> Reply:
+    fields: dict[str, object] = {
+        "id": 7,
+        "gmail_message_id": "m-7",
+        "thread_id": "t-7",
+        "from_address": "no-reply@ashbyhq.com",
+        "subject": "We've got your application!",
+        "body": "Thanks for applying.",
+        "received_at": datetime(2026, 8, 1, 9, 30, tzinfo=UTC),
+        "detected_company": "Moon Active",
+        "detected_role": "Backend Engineer",
+    }
+    return Reply(**(fields | kwargs))
+
+
+def test_recording_builds_the_application_out_of_the_email() -> None:
+    session = _FakeSession(None, None, None)  # no manual source, no job, no application yet
+
+    application = record_as_application(session, _orphan_reply())  # type: ignore[arg-type]
+
+    assert application is not None
+    assert application.status is ApplicationStatus.SENT
+    # The acknowledgement's arrival is the closest honest bound on when the letter went out.
+    assert application.sent_at == datetime(2026, 8, 1, 9, 30, tzinfo=UTC)
+    assert application.thread_id == "t-7"
+    job = next(row for row in session.added if isinstance(row, Job))
+    assert (job.company, job.title) == ("Moon Active", "Backend Engineer")
+    assert job.hard_filter_passed is False  # a record of an application, not a candidate
+
+
+def test_the_source_it_creates_is_disabled() -> None:
+    """`ingest` resolves adapters by Source.name, and there is no 'manual' adapter."""
+    session = _FakeSession(None, None, None)
+    record_as_application(session, _orphan_reply())  # type: ignore[arg-type]
+
+    source = next(row for row in session.added if isinstance(row, Source))
+    assert source.name == MANUAL_SOURCE
+    assert source.enabled is False
+
+
+def test_a_role_the_model_did_not_name_is_left_explicit() -> None:
+    session = _FakeSession(None, None, None)
+    record_as_application(session, _orphan_reply(detected_role=None))  # type: ignore[arg-type]
+
+    job = next(row for row in session.added if isinstance(row, Job))
+    assert job.title == "(role not stated)"
+
+
+def test_no_employer_no_row() -> None:
+    """A null company means the model refused to guess; a row named after a guess is worse."""
+    session = _FakeSession()
+    assert record_as_application(session, _orphan_reply(detected_company=None)) is None  # type: ignore[arg-type]
+    assert session.added == []
+
+
+def test_an_already_linked_reply_creates_nothing() -> None:
+    session = _FakeSession()
+    assert record_as_application(session, _orphan_reply(application_id=3)) is None  # type: ignore[arg-type]
+    assert session.added == []
+
+
+def test_a_second_acknowledgement_reuses_the_row_it_already_made() -> None:
+    """Two mails from one employer must not mint two applications (or collide on the hash)."""
+    source = Source(id=5, name=MANUAL_SOURCE, kind=SourceKind.API, enabled=False)
+    job = Job(id=6, source_id=5, company="Moon Active", title="Backend Engineer", url="")
+    existing = Application(id=8, job_id=6, status=ApplicationStatus.SENT)
+    session = _FakeSession(source, job, existing)
+
+    application = record_as_application(session, _orphan_reply(id=9))  # type: ignore[arg-type]
+
+    assert application is existing
+    assert session.added == []
+
+
+def test_an_existing_posting_is_reused_rather_than_duplicated() -> None:
+    """The funnel often already has the posting; the application belongs on that row.
+
+    Two of the eleven employers named across this mailbox's unmatched replies already had a
+    Job here (2026-08-12), so a manual-source-only lookup would have minted a twin the first
+    time the button was pressed.
+    """
+    source = Source(id=5, name=MANUAL_SOURCE, kind=SourceKind.API, enabled=False)
+    from_a_board = Job(id=6, source_id=99, company="Moon Active", title="Backend Engineer", url="")
+    session = _FakeSession(source, from_a_board, None)
+
+    application = record_as_application(session, _orphan_reply())  # type: ignore[arg-type]
+
+    assert application is not None
+    assert application.job_id == 6, "a stub was created beside the posting we already had"
+    assert not [row for row in session.added if isinstance(row, Job)]
+
+
+# --------------------------------------------------------------------------------------
+# Clearing a rejected conversation (GMAIL_TRASH_REJECTIONS): incoming mail only.
+# --------------------------------------------------------------------------------------
+
+
+class _Request:
+    def __init__(self, result: dict[str, Any] | Exception) -> None:
+        self._result = result
+
+    def execute(self) -> dict[str, Any]:
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
+
+
+class _Threads:
+    def __init__(self, threads: dict[str, list[list[str]] | Exception]) -> None:
+        self._threads = threads
+
+    def get(self, *, id: str, **_kw: object) -> _Request:
+        thread = self._threads[id]
+        if isinstance(thread, Exception):
+            return _Request(thread)
+        return _Request(
+            {
+                "messages": [
+                    {"id": f"{id}-{n}", "labelIds": labels} for n, labels in enumerate(thread)
+                ]
+            }
+        )
+
+
+def _service(threads: dict[str, list[list[str]] | Exception]) -> Any:
+    class _Users:
+        def threads(self) -> _Threads:
+            return _Threads(threads)
+
+    class _Service:
+        def users(self) -> _Users:
+            return _Users()
+
+    return _Service()
+
+
+def test_the_human_s_own_letter_survives_its_rejection() -> None:
+    """His sent letter is the record of what went out; only what came back is cleared."""
+    service = _service(
+        {
+            "t1": [["SENT"], ["INBOX", "UNREAD"], ["INBOX"]],  # letter, ack, rejection
+            "t2": [["INBOX"], ["DRAFT"], ["TRASH"]],  # an unsent reply, one already gone
+        }
+    )
+
+    assert inbox.incoming_in_threads(service, ["t1", "t2"]) == ["t1-1", "t1-2", "t2-0"]
+
+
+def test_a_thread_deleted_by_hand_is_not_an_error() -> None:
+    from googleapiclient.errors import HttpError
+    from httplib2 import Response
+
+    gone = HttpError(Response({"status": "404"}), b'{"error": {"code": 404}}', uri="x")
+    service = _service({"gone": gone, "t1": [["INBOX"]]})
+
+    assert inbox.incoming_in_threads(service, ["gone", "t1"]) == ["t1-0"]
+
+
+# --------------------------------------------------------------------------------------
+# hh.ru notices: which one is which, and what each one lets us match on.
+# --------------------------------------------------------------------------------------
+
+
+def _hh_email(subject: str, html: str) -> bytes:
+    from email.header import Header
+
+    return (
+        f"From: noreply@hh.ru\r\nSubject: {Header(subject, 'utf-8').encode()}\r\n"
+        'Content-Type: text/html; charset="utf-8"\r\nContent-Transfer-Encoding: 8bit\r\n\r\n'
+        f"<html><head><style>p {{ margin:0 }}</style></head><body>{html}</body></html>\r\n"
+    ).encode()
+
+
+def test_an_hh_rejection_names_its_vacancy_by_id() -> None:
+    from funnel.replies import hh
+
+    raw = _hh_email(
+        "Работодатель не готов пригласить вас",
+        "<p>Работодатель не готов пригласить вас</p><p>Вакансия: Senior Backend Engineer</p>"
+        "<p>Компании: Mad Devs</p>"
+        '<a href="https://hh.ru/vacancy/137630439?utm_source=email&sent_date=2026_10_19">→</a>',
+    )
+
+    notice = hh.parse("m1", "t1", raw)
+
+    assert notice is not None and notice.kind is hh.NoticeKind.REJECTION
+    assert notice.vacancy_id == "137630439"
+    assert notice.company == "Mad Devs"
+    assert "margin" not in notice.body, "the stylesheet is not part of the message"
+
+
+def test_an_hh_chat_notice_offers_nothing_to_match_on() -> None:
+    """A chat_id, never a vacancy: these are the notices that go to Trash."""
+    from funnel.replies import hh
+
+    raw = _hh_email(
+        "Новое сообщение от работодателя",
+        "<p>У вас есть новое сообщение</p><p>«Are you currently located in Russia?»</p>"  # noqa: RUF001
+        '<a href="https://hh.ru/applicant/resumes?dl_command=open_chat&chat_id=5714561208">чат</a>',
+    )
+
+    notice = hh.parse("m2", "t2", raw)
+
+    assert notice is not None and notice.kind is hh.NoticeKind.CHAT
+    assert notice.vacancy_id is None and notice.company is None
+
+
+def test_an_hh_message_names_its_employer_in_the_subject() -> None:
+    from funnel.replies import hh
+
+    raw = _hh_email(
+        'Вакансия Middle Backend Python Developer: вам написали из "Альфа-Банк."',
+        "<p>У вас есть новое сообщение от компании Альфа-Банк.</p>",  # noqa: RUF001
+    )
+
+    notice = hh.parse("m3", "t3", raw)
+
+    assert notice is not None and notice.kind is hh.NoticeKind.MESSAGE_FROM
+    assert notice.company == "Альфа-Банк"
+
+
+def test_other_hh_mail_is_not_a_notice() -> None:
+    """Receipts and alerts are someone else's business (and the alert parser's)."""
+    from funnel.replies import hh
+
+    assert hh.parse("m4", "t4", _hh_email("Спасибо за ваше резюме!", "<p>hi</p>")) is None
+
+
+def test_an_employer_message_on_hh_is_a_reply_matched_by_vacancy() -> None:
+    from funnel.replies import hh
+
+    html = (
+        "<p>Сообщение от работодателя</p><p>Вакансия: Backend-разработчик</p>"
+        "<p>Компания: CashFactories</p>"
+        '<a href="https://hh.ru/vacancy/137916324?utm_source=email">Перейти к вакансии</a>'
+        "<p>«Рассмотрим ваше резюме.»</p>"
+    )
+    for subject in ("Вам написали по вакансии Backend-разработчик", "Сообщение от работодателя"):
+        notice = hh.parse("m5", "t5", _hh_email(subject, html))
+
+        assert notice is not None and notice.kind is hh.NoticeKind.VACANCY_MESSAGE, subject
+        assert (notice.vacancy_id, notice.company) == ("137916324", "CashFactories")
+
+    chat = hh.parse("m6", "t6", _hh_email("Новое сообщение от работодателя", html))
+    assert chat is not None and chat.kind is hh.NoticeKind.CHAT
+
+
+def test_the_alert_query_never_sees_hh_personal_mail() -> None:
+    """The alert parser reads an employer message's vacancy link as a posting, and a parsed
+    alert is Trashed: five such messages were, two of them on applications still in play."""
+    from funnel.replies import hh
+    from funnel.seeds import DEFAULT_SOURCES
+
+    query = next(s for s in DEFAULT_SOURCES if s.name == "gmail-alerts").config["query"]
+    for subject in hh.SUBJECTS:
+        assert f'-subject:"{subject}"' in query

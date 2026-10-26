@@ -43,3 +43,25 @@ def session_scope() -> Iterator[Session]:
         raise
     finally:
         session.close()
+
+
+@contextmanager
+def snapshot_scope() -> Iterator[Session]:
+    """A read-only transaction in one snapshot (`REPEATABLE READ, READ ONLY`). Never commits.
+
+    For a read made of several statements that must agree with each other — under the default
+    READ COMMITTED each statement sees whatever had committed when it started, so a status the
+    admin changed between two of them would split the answer.
+    """
+    session = get_sessionmaker()()
+    try:
+        session.connection(
+            execution_options={"isolation_level": "REPEATABLE READ", "postgresql_readonly": True}
+        )
+        yield session
+    finally:
+        # `close`, not `rollback` then `close`: both end the database transaction, but a
+        # rollback expires every object loaded in it, and an expired object read after the
+        # session is gone raises. Closed, they stay readable as detached snapshots — which is
+        # what a caller that loads rows here and works on them outside a transaction wants.
+        session.close()

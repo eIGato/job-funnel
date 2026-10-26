@@ -112,6 +112,29 @@ class Settings(BaseSettings):
     # --- Gmail: board alerts. We do not scrape LinkedIn. ---
     gmail_credentials_path: Path = Field(default=Path("secrets/gmail_credentials.json"))
     gmail_token_path: Path = Field(default=Path("secrets/gmail_token.json"))
+    gmail_trash_parsed_alerts: bool = Field(
+        default=False,
+        description=(
+            "After ingest commits, move every alert email the parser got at least one posting "
+            "out of into Gmail's Trash (recoverable for 30 days; nothing is deleted outright, "
+            "and an email that parsed into nothing is never touched). Off by default because "
+            "it is the only thing this system does *to* the mailbox: turning it on widens the "
+            "OAuth scope from gmail.readonly to gmail.modify — which still cannot send, "
+            "invariant 2 holds — and needs `funnel auth-gmail` re-run to mint a token for it."
+        ),
+    )
+    gmail_trash_rejections: bool = Field(
+        default=False,
+        description=(
+            "After `check-replies` commits, move the incoming mail of every conversation that "
+            "ended in a rejection into Gmail's Trash: each message the human did not write in "
+            "the threads of an application now REJECTED (the acknowledgement, the rejection, "
+            "anything between). His own sent letter stays in Sent, and a thread that also "
+            "belongs to an application still in play is never touched. A separate switch from "
+            "the alerts one because this is correspondence, not bulk mail; either one widens "
+            "the scope to gmail.modify."
+        ),
+    )
 
     # --- Matching ---
     match_top_k: int = Field(default=25, ge=1, description="Shortlist size after ranking.")
@@ -162,6 +185,15 @@ class Settings(BaseSettings):
     # --- Admin ---
     admin_host: str = Field(default="127.0.0.1")
     admin_port: int = Field(default=8000)
+    admin_timezone: str = Field(
+        default="Europe/Podgorica",
+        description=(
+            "The wall clock the admin reads and writes. Storage stays UTC; this is a display "
+            "and parsing setting, so that typing the time off your own watch records the right "
+            "instant. An IANA name, never a fixed offset — the offset changes twice a year and "
+            "a hardcoded +02:00 would silently start lying at the October changeover."
+        ),
+    )
 
 
 @lru_cache

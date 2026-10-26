@@ -31,6 +31,17 @@ SHARED_FILE = "_experience.md"
 #: its plain instructions when missing.
 WRITING_STYLE_FILE = "_writing_style.md"
 
+#: Profile lines that state eligibility rather than experience: where the human lives, what
+#: passport he holds, what contract he can sign. Retrieval must never decide whether the drafter
+#: sees these — see `load_profile_constraints`.
+CONSTRAINT_KEYS: tuple[str, ...] = (
+    "location",
+    "citizenship",
+    "work authorization",
+    "work permit",
+    "employment",
+)
+
 
 def load_profile_text() -> str:
     """Assemble the active profile: role header first, then the shared experience block."""
@@ -46,6 +57,33 @@ def load_profile_text() -> str:
     if shared.is_file():
         parts.append(shared.read_text(encoding="utf-8").strip())
     return "\n\n".join(parts).strip()
+
+
+def load_profile_constraints() -> str:
+    """Return the profile's eligibility lines (`Location:`, `Employment:`, …), newline-joined.
+
+    These are the facts a letter may assert about residence, citizenship and contract shape, and
+    they are the facts cosine retrieval is worst at surfacing: "Location: Montenegro, ready to
+    relocate or to work remotely" shares no vocabulary with a Python posting, so it never reaches
+    the top-k. On 2026-08-03 that gap produced application 146 — a posting demanding Portuguese
+    residence and EU citizenship, a drafter handed five technology bullets and no location fact
+    at all, and a letter opening "I'm based in Portugal with EU citizenship". The drafter now gets
+    this block unconditionally, outside retrieval.
+
+    Tolerates a missing profile the way `load_writing_style` does: an empty string means "nothing
+    on file", which `drafting/` treats as "claim nothing", not as "anything goes".
+    """
+    try:
+        text = load_profile_text()
+    except FileNotFoundError:
+        return ""
+    lines = []
+    for raw in text.splitlines():
+        line = raw.strip().lstrip("-*•#").strip()
+        key, separator, _ = line.partition(":")
+        if separator and key.strip().casefold() in CONSTRAINT_KEYS:
+            lines.append(line)
+    return "\n".join(lines)
 
 
 def load_writing_style() -> str:

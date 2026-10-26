@@ -10,7 +10,9 @@ dependencies = [
     "fastembed>=0.8.0",
     "ftfy>=6.3.1",
     "google-api-python-client>=2.198.0",
+    "google-auth-httplib2>=0.4.0",
     "google-auth-oauthlib>=1.4.0",
+    "httplib2>=0.32.0",
     "httpx>=0.28.1",
     "numpy>=2.5.1",
     "psycopg[binary]>=3.3.4",
@@ -84,7 +86,14 @@ plugins = ["pydantic.mypy"]
 files = ["src"]
 
 [[tool.mypy.overrides]]
-module = ["fastembed.*", "googleapiclient.*", "google_auth_oauthlib.*", "sqladmin.*"]
+module = [
+    "fastembed.*",
+    "googleapiclient.*",
+    "google_auth_httplib2.*",
+    "google_auth_oauthlib.*",
+    "httplib2.*",
+    "sqladmin.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -101,4 +110,5 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.15.21",
+    "types-wtforms>=3.2.1.20260518",
 ]

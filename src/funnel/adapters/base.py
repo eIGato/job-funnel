@@ -34,6 +34,16 @@ class BaseAdapter(ABC):
         Do not deduplicate here; ingest handles that via content_hash.
         """
 
+    async def on_committed(self) -> str | None:
+        """Housekeeping once ingest has committed the postings this fetch returned.
+
+        Runs only if the transaction succeeded, which makes it the one safe place for a side
+        effect on the source side that cannot be undone by a rollback — the Gmail adapter
+        trashes the alert emails it got postings out of. The pipeline stays source-agnostic:
+        it calls this on every adapter it used and prints whatever line comes back.
+        """
+        return None
+
 
 _REGISTRY: dict[str, type[BaseAdapter]] = {}
 

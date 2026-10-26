@@ -1,15 +1,18 @@
 [Unit]
-Description=Run the job-search funnel three times a day
+Description=Run the job-search funnel once a day, before the working day
 Documentation=https://github.com/eIGato/job-funnel
 
 [Timer]
-# 3x/day (PLAN.md Phase 7). Boards refresh through the working day; more often than this
-# buys nothing and just burns embedding time and API calls.
-OnCalendar=*-*-* 08,13,19:00
-# The machine is a laptop and will be asleep at some of these. Persistent=true runs a missed
-# occurrence once on the next boot instead of silently skipping the day.
-Persistent=true
-# Do not have all three fire at the same second as everything else on the box.
+# Once a day, at an hour nobody is at the machine. A run takes 10-20 min of every core (the
+# e5-large embedding), and the 13:00 and 19:00 runs of the old 3x/day schedule made the desktop
+# unusable often enough that they were killed by stopping Docker (2026-10-19, 10-20). Boards
+# refresh through the day, but a day's lag costs nothing here; run `funnel run-funnel` by hand
+# when it does.
+OnCalendar=*-*-* 05:00
+# No catch-up. Persistent=true would run a missed 05:00 right after the next boot, i.e. exactly
+# when somebody has just sat down to use the machine. A skipped day is caught by tomorrow's run.
+Persistent=false
+# Do not fire at the same second as everything else on the box.
 RandomizedDelaySec=5min
 Unit=funnel.service
 

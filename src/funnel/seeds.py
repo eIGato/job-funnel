@@ -13,7 +13,14 @@ the Gmail adapter sorts senders out internally.
 from __future__ import annotations
 
 from funnel.models import SourceKind
+from funnel.replies.hh import SUBJECTS as HH_NOTICE_SUBJECTS
 from funnel.schemas import SourceConfig
+
+#: hh.ru's personal mail, which shares `noreply@hh.ru` with its alerts: a rejection, an
+#: employer's message, a chat notice. `check-replies` reads these (`replies/hh.py`); the alert
+#: query must never see them, because the alert parser reads the vacancy link in an employer's
+#: message as a posting, and a parsed alert is Trashed.
+_HH_NOTICES = " ".join(f'-subject:"{subject}"' for subject in HH_NOTICE_SUBJECTS)
 
 DEFAULT_SOURCES: list[SourceConfig] = [
     SourceConfig(
@@ -84,20 +91,80 @@ DEFAULT_SOURCES: list[SourceConfig] = [
     SourceConfig(name="recruitee", kind=SourceKind.API, config={}),
     SourceConfig(name="smartrecruiters", kind=SourceKind.API, config={}),
     # The token is already in place (`funnel auth-gmail`); the query spans every board that
-    # emails alerts. Parsers exist for hh, Habr, LinkedIn, Wellfound, Glassdoor, Indeed and
-    # Landing.Jobs; add senders here as more boards come online. Left disabled by default —
-    # enable in the admin once a real alert has landed in the mailbox, so a first run has
-    # something to read.
+    # emails alerts. Parsers exist for hh, Habr, LinkedIn, Wellfound, Glassdoor, Indeed,
+    # Landing.Jobs, justjoin.it and pracuj.pl; add senders here as more boards come online.
+    # Left disabled by default — enable in the admin once a real alert has landed in the
+    # mailbox, so a first run has something to read.
+    #
+    # **The window is 30 days, not a week.** With `GMAIL_TRASH_PARSED_ALERTS` on, an alert is
+    # read and Trashed within a run of arriving, so nothing older than a day is ever in scope
+    # and the window costs nothing in the steady state — it is what lets the pipeline catch up
+    # after a parser is added or the flag is turned on. Both happened on 2026-08-17: 247 board
+    # mails were sitting in the inbox, 187 of them older than a week, including 27 pracuj and
+    # justjoin alerts whose postings the funnel had never seen because the parsers did not yet
+    # exist. A 7-day window could never have reached them. `max_results` caps a single run, so
+    # a backlog that size clears over the next few timer ticks rather than in one burst.
+    #
+    # **Name the alert address, not the whole domain, wherever the board has one.** A board
+    # that mails alerts also mails the human personally, and this query decides what
+    # `GMAIL_TRASH_PARSED_ALERTS` is allowed to touch. Habr Career is the measured case
+    # (2026-08-13): `subscribe@` sent 29 subscription digests in a year and `noreply@` sent 4
+    # "Вы откликнулись на вакансию X" acknowledgements, each naming a company and linking the
+    # posting. Only the parser returning nothing on those kept them out of the Trash, and
+    # resting that on a parser is resting it on the wrong thing. hh.ru mails both from
+    # `noreply@hh.ru`, so it cannot be split this way and stays a whole domain.
+    #
+    # **LinkedIn's `jobs-noreply@` is split by subject too.** It sends single-posting "apply to X
+    # at Y" recommendations in the same card markup the alert parser reads (2 in the 90 days to
+    # 2026-10-19, never read until then because only `jobalerts-noreply@` was in the query), and
+    # it also sends the "your application was sent to X" receipt, which the card parser would
+    # read as a posting and the Trash would then take.
+    #
+    # **justjoin.it needs a third split: by subject.** `no-reply@justjoin.it` sends both the
+    # daily "New jobs for you" alert and the "You applied for X" receipt, and unlike hh's the
+    # receipt is *not* harmless to parse — it carries a "similar offers" block in the identical
+    # card markup, so the parser reads five postings out of it and the message becomes
+    # trash-eligible. Three such receipts were in the mailbox on 2026-08-17 and the exclusion
+    # holds all three out. If justjoin rewords the subject the failure is one lost receipt in
+    # Trash, recoverable for 30 days; the alternative — dropping the address — costs 20 alerts a
+    # month, since `jobs@hello.justjoin.it` mails a different, Polish-language selection.
     SourceConfig(
         name="gmail-alerts",
         kind=SourceKind.GMAIL,
         enabled=False,
         config={
             "query": (
-                "newer_than:7d (from:hh.ru OR from:career.habr.com "
+                f"newer_than:30d ((from:hh.ru {_HH_NOTICES}) OR from:subscribe@career.habr.com "
                 "OR from:jobalerts-noreply@linkedin.com "
-                "OR from:wellfound.com OR from:glassdoor.com "
-                "OR from:jobalert.indeed.com OR from:landing.jobs)"
+                'OR (from:jobs-noreply@linkedin.com -subject:"your application") '
+                "OR from:wellfound.com OR from:noreply@glassdoor.com "
+                "OR from:jobalert.indeed.com OR from:landing.jobs "
+                "OR from:jobs@hello.justjoin.it "
+                'OR (from:no-reply@justjoin.it -subject:"You applied for") '
+                "OR from:rekomendacje@wysylka.pracuj.pl)"
+            ),
+            # Mail this funnel has decided it will never read, Trashed unread. Every entry is a
+            # measured "we already have this by another route", never "this looked like spam":
+            #   adzuna.com   - already an API source for eight countries, and the alert host is
+            #                  in BLOCKED_HOSTS (403 from Montenegro), so the rows would be
+            #                  duplicates no shortlist could select. adzuna.nl is marketing.
+            #   weworkremotely - already an RSS source.
+            #   getmatch.ru  - a weekly digest of what the human has already seen in the Telegram
+            #                  bot the same subscription feeds, where applying is one click
+            #                  (human, 2026-08-17). The parser written that morning was removed
+            #                  that afternoon: the postings were real, they were just not new.
+            #   info@glassdoor.com - the marketing address. `noreply@glassdoor.com` is the alert
+            #                  address and is parsed above; this is why both are named as
+            #                  addresses and neither as `glassdoor.com`.
+            # Reed, Totaljobs, 24recruitment, match.indeed.com and spelljob are NOT here. They
+            # have no parser either, but for the opposite reason — no stable id in any link —
+            # and their postings are genuinely new (34 of 47 Totaljobs postings measured were
+            # not in the table). Discarding those would be throwing away mail unread that a
+            # human might want; the fix for them is to unsubscribe, which is his call.
+            "discard_query": (
+                "newer_than:400d (from:no-reply@adzuna.com OR from:no-reply@adzuna.nl "
+                "OR from:hello@m.weworkremotely.com OR from:gmate@getmatch.ru "
+                "OR from:info@glassdoor.com)"
             ),
             "max_results": 100,
         },

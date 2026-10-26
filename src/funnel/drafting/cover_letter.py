@@ -22,7 +22,11 @@ from pydantic_ai import Agent
 from funnel.config import bridge_llm_api_key, get_settings
 from funnel.drafting.prompting import UNTRUSTED_INPUT_RULE, posting_block
 from funnel.matching.embed import cosine_similarity, embed_texts
-from funnel.matching.profile import load_profile_text, load_writing_style
+from funnel.matching.profile import (
+    load_profile_constraints,
+    load_profile_text,
+    load_writing_style,
+)
 from funnel.models import ApplyChannel
 
 if TYPE_CHECKING:
@@ -71,6 +75,16 @@ _INSTRUCTIONS = (
     "quote the bullets you actually used, close to verbatim — it is the human's audit trail, "
     "and inventing entries there is the worst thing you can do here. Copy any URL character "
     "for character; never shorten, tidy or reconstruct a link.\n\n"
+    "ELIGIBILITY IS NOT AN INFERENCE. Where I live, what passport I hold, what work "
+    "authorization I have and what contract I can sign come from MY CONSTRAINTS below and from "
+    "nowhere else — never from the posting, never from the company's country, never from what "
+    "the role would need to be true. If MY CONSTRAINTS is silent on citizenship or the right to "
+    "work somewhere, the letter says nothing at all about citizenship, passports, visas, permits "
+    "or work authorization. When the posting requires a residence or a passport MY CONSTRAINTS "
+    "does not grant, you have two honest choices: leave it unaddressed, or name the gap plainly "
+    "(a company may still want the candidate). Asserting it is the one thing you may never do — "
+    "it is a checkable lie about a person, sent under their name, and it ends the application "
+    "the moment anyone checks.\n\n"
     "THE POSTING'S OWN URL IS CONTEXT, NEVER CONTENT. It is given to you so you know which "
     "listing you are reading; it must not appear in `body` in any form — not as a link, not as "
     "bare text, not as a markdown `[label](url)`. The reader is the company: they know which "
@@ -154,6 +168,91 @@ def ungrounded_points(bullets: list[str], points: list[str]) -> list[str]:
     return offenders
 
 
+class FabricatedEligibilityError(UngroundedDraftError):
+    """The letter asserted a residence, citizenship or work authorization not on file.
+
+    A subclass so both drafting paths already refuse it: the plain path reports the error, the
+    agent path ends with `refused=True`.
+
+    Separate from `ungrounded_points` because it is a different failure with a different shape.
+    That check reads `matched_points` — the model's own audit trail — and application 146 passed
+    it cleanly: all three quoted bullets were real. The lie was in the prose, where nothing looked,
+    and it was the one kind of claim a recruiter can check in a minute.
+    """
+
+
+#: First-person claims about where the seeker lives. Every place such a sentence names must also
+#: be named in the constraints block.
+_RESIDENCE_CLAIM = re.compile(
+    # Both apostrophes: a model writes the typographic one about as often as the ASCII one.
+    r"\bI(?:'m|’m| am)\s+(?:currently\s+|now\s+)?(?:based|located|living|residing)\b[^.;!?\n]*"  # noqa: RUF001
+    r"|\bI\s+(?:live|reside)\b[^.;!?\n]*"
+    r"|\bя\s+(?:живу|нахожусь|проживаю|базируюсь)\b[^.;!?\n]*",
+    re.IGNORECASE,
+)
+
+#: Claims about a passport or the right to work somewhere. Judged more harshly than residence:
+#: absent a constraints line that speaks to eligibility, ANY of these is a fabrication, because
+#: there is no such fact on file to paraphrase. A letter that stays silent loses nothing.
+_ELIGIBILITY_CLAIM = re.compile(
+    r"[^.;!?\n]*\b(?:citizen|citizens|citizenship|passport|nationality|"
+    r"work permit|residence permit|residency|work visa|visa|"
+    r"authoriz(?:ed|ation)\s+to\s+work|right\s+to\s+work|work\s+authoriz\w*)\b[^.;!?\n]*"
+    r"|[^.;!?\n]*(?:гражданств|паспорт|вид на жительство|разрешени[ея] на работу)[^.;!?\n]*",
+    re.IGNORECASE,
+)
+
+#: Words that make a constraints line an answer about eligibility rather than about geography.
+_ELIGIBILITY_VOCABULARY = (
+    "citizen",
+    "passport",
+    "nationality",
+    "permit",
+    "visa",
+    "authoriz",
+    "гражданств",
+    "паспорт",
+)
+
+#: A place name inside a claim: a proper noun, or an all-caps bloc ("EU", "EEA", "US", "UK").
+#: Sentence-initial capitalization is not a concern — every pattern above starts mid-sentence at
+#: its trigger word, and bare "I" is too short to match.
+_PLACE_TOKEN = re.compile(r"\b(?:[A-Z]{2,}|[A-ZА-ЯЁ][\wа-я-]+)")  # noqa: RUF001
+
+
+def unsupported_eligibility_claims(constraints: str, text: str) -> list[str]:
+    """The letter's residence/citizenship claims that the constraints block does not support.
+
+    Deterministic, and deliberately blunt: a false positive costs one redraft, a false negative
+    costs a letter that says the seeker lives somewhere he does not.
+    """
+    haystack = constraints.casefold()
+    offenders: list[str] = []
+
+    for match in _RESIDENCE_CLAIM.finditer(text):
+        claim = match.group(0).strip()
+        if any(place.casefold() not in haystack for place in _PLACE_TOKEN.findall(claim)):
+            offenders.append(claim)
+
+    eligibility_on_file = any(word in haystack for word in _ELIGIBILITY_VOCABULARY)
+    for match in _ELIGIBILITY_CLAIM.finditer(text):
+        claim = match.group(0).strip()
+        if claim in offenders:
+            continue
+        if not eligibility_on_file or any(
+            place.casefold() not in haystack for place in _PLACE_TOKEN.findall(claim)
+        ):
+            offenders.append(claim)
+
+    return offenders
+
+
+@lru_cache
+def _constraints() -> str:
+    """The profile's eligibility lines, read once. See `load_profile_constraints`."""
+    return load_profile_constraints()
+
+
 @lru_cache
 def _writing_style() -> str:
     """The human's style sample, read once. Empty string when no sample file is present."""
@@ -185,6 +284,14 @@ def _detect_language(job: Job) -> str:
 def _build_prompt(job: Job, bullets: list[str], language: str, extra_context: str = "") -> str:
     language_name = "Russian" if language == "ru" else "English"
     experience = "\n".join(f"- {bullet}" for bullet in bullets) or "- (no bullets retrieved)"
+    # Outside retrieval on purpose: these lines share no vocabulary with a technology posting, so
+    # cosine never puts them in the top-k, and their absence is exactly what the model fills in
+    # from the posting's own requirements (application 146). Always present, even when empty —
+    # "nothing on file" has to be stated, because silence is what got filled in last time.
+    constraints = _constraints() or (
+        "(nothing on file — so the letter claims NO residence, citizenship, visa, permit or "
+        "work authorization of any kind)"
+    )
     style = _writing_style()
     style_block = (
         "\n\nMY WRITING STYLE — how I actually write to recruiters. Match its tone, rhythm and "
@@ -213,7 +320,10 @@ def _build_prompt(job: Job, bullets: list[str], language: str, extra_context: st
         f"Company: {job.company}\n"
         f"Location: {job.location or 'n/a'}\n"
         f"Description:\n{posting_block(job.description)}\n\n"
-        f"MY RELEVANT EXPERIENCE (use only what fits; invent nothing beyond this):\n{experience}"
+        f"MY RELEVANT EXPERIENCE (use only what fits; invent nothing beyond this):\n{experience}\n\n"
+        f"MY CONSTRAINTS — the only facts on file about where I live and what I may sign. "
+        f"Residence, citizenship, visas, permits and contract shape come from here and nowhere "
+        f"else; what the posting requires is not evidence about me:\n{constraints}"
         f"{style_block}"
         f"{context_block}"
     )
@@ -258,6 +368,16 @@ async def generate_letter(
         raise UngroundedDraftError(
             f"{len(offenders)}/{len(draft.matched_points)} claimed CV points are not supported "
             f"by the retrieved bullets, e.g. {offenders[0]!r}. Not drafted."
+        )
+
+    # The prose, which the check above never reads. A posting with a hard residency or passport
+    # requirement is the case that produced application 146, and no amount of instruction makes a
+    # model reliably decline to meet a requirement it can simply assert.
+    fabricated = unsupported_eligibility_claims(_constraints(), f"{draft.subject}\n{draft.body}")
+    if fabricated:
+        raise FabricatedEligibilityError(
+            f"The letter claims eligibility the profile does not state: {fabricated[0]!r}. "
+            f"Not drafted."
         )
     return draft
 

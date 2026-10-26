@@ -219,6 +219,43 @@ def test_shortlist_caps_how_many_slots_one_company_holds() -> None:
     assert "company_rank" not in after
 
 
+def test_the_shortlist_skips_postings_with_no_apply_route() -> None:
+    """A link the human cannot apply through must not hold a slot (2026-08-05).
+
+    Adzuna's US and CA sites answer 403 from where the human lives and RemoteOK's apply button
+    is behind its paid tier — 131 of the ~640 rows above the floor, a fifth of the shortlist
+    spent on letters that could not be sent. Excluded in the WHERE like every other selection
+    rule, so the slot goes to the next posting instead of being lost.
+    """
+    sql = _compiled_shortlist()
+    where, _, _ = sql.partition("LIMIT")
+    assert "jobs.apply_blocked IS false" in where
+
+
+def test_the_shortlist_skips_postings_with_nothing_to_write_from() -> None:
+    """An empty or one-line body must not hold a slot (2026-08-06).
+
+    Gmail alerts carry a subject line and a link, no posting: 124 of the 554 rows above the
+    floor had an empty body and 71 more were a single short line, so 36% of every shortlist
+    bought a screening call and a letter written from a title. The admin's per-row button is
+    the path for these now — the human pastes the real description in and draws the letter from
+    there. In the WHERE like every other selection rule, so the slot goes to the next posting.
+    """
+    sql = _compiled_shortlist()
+    where, _, after = sql.partition("LIMIT")
+    assert "length(trim(jobs.description)) >= 300" in where
+    assert "length(trim(" not in after
+
+
+def test_the_body_floor_does_not_reject_a_one_paragraph_teaser() -> None:
+    """A length floor, not a newline test: Adzuna's 500-character teaser is one paragraph.
+
+    Salary, requirements and stack, all real — the literal reading of "one line" would have
+    dropped 68 of those along with the junk.
+    """
+    assert cli.MIN_DRAFTABLE_BODY < 426, "Adzuna's shortest teaser is 426 characters"
+
+
 def test_the_company_cap_is_applied_after_twins_collapse() -> None:
     """Order matters: five rows of one role would otherwise spend the whole allowance."""
     sql = _compiled_shortlist()
@@ -236,3 +273,81 @@ def test_the_company_cap_is_configurable() -> None:
         )
     )
     assert "company_rank <= 1" in sql
+
+
+class _UrlsOnly:
+    """A session stub that answers one `select(Job.url)` — the suite never touches Postgres."""
+
+    def __init__(self, urls: list[str]) -> None:
+        self._urls = urls
+
+    def execute(self, _statement: object) -> _UrlsOnly:
+        return self
+
+    def scalars(self) -> list[str]:
+        return self._urls
+
+
+def test_unreachable_rows_are_reported_by_host_commonest_first() -> None:
+    """The report is the input side of `BLOCKED_HOSTS`: one wall is a dead posting, a host that
+    keeps coming back is a dead site, and only the count tells them apart."""
+    session = _UrlsOnly(
+        [
+            "https://www.example-board.com/jobs/1",
+            "https://EXAMPLE-BOARD.com/jobs/2",
+            "https://jobs.example-board.com/3",
+            "https://other.test/x",
+        ]
+    )
+    hosts = cli._unreachable_hosts(session)  # type: ignore[arg-type]
+
+    assert hosts[0][:2] == ("example-board.com", 2), "www. and case must fold to one host"
+    assert ("jobs.example-board.com", 1, False) in hosts, "a subdomain is its own host to count"
+    assert [count for _, count, _ in hosts] == sorted(
+        (count for _, count, _ in hosts), reverse=True
+    )
+
+
+def test_a_host_already_blocked_is_reported_as_such_not_hidden() -> None:
+    """Its rows are the evidence the entry still earns its place — and `BLOCKED_HOSTS` says to
+    delete an entry the moment the site lets the human in again."""
+    session = _UrlsOnly(["https://www.adzuna.com/details/1", "https://untouched.test/2"])
+
+    reported = cli._unreachable_hosts(session)  # type: ignore[arg-type]
+    hosts = {host: already for host, _, already in reported}
+
+    assert hosts["adzuna.com"] is True
+    assert hosts["untouched.test"] is False
+
+
+class _CountThenNotes:
+    """A session stub answering the two statements `_ineligible_requirements` issues, in order."""
+
+    def __init__(self, total: int, notes: list[str | None]) -> None:
+        self._answers: list[object] = [total, notes]
+
+    def execute(self, _statement: object) -> _CountThenNotes:
+        return self
+
+    def scalar_one(self) -> object:
+        return self._answers.pop(0)
+
+    def scalars(self) -> object:
+        return self._answers.pop()
+
+
+def test_the_filter_backlog_prints_requirements_not_a_count() -> None:
+    """The note is meant to hold the posting's own sentence, so it can be grepped over the whole
+    table to size a filter before writing one. A count alone cannot be grepped."""
+    session = _CountThenNotes(2, ["Fluent  German\nrequired", None])
+
+    total, requirements = cli._ineligible_requirements(session)  # type: ignore[arg-type]
+
+    assert total == 2
+    assert requirements == ["Fluent German required"], "whitespace folds, an empty note is skipped"
+
+
+def test_the_filter_backlog_is_quiet_when_there_is_nothing_to_read() -> None:
+    session = _CountThenNotes(0, [])
+
+    assert cli._ineligible_requirements(session) == (0, [])  # type: ignore[arg-type]

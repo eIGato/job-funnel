@@ -37,6 +37,20 @@ def test_stop_phrase_is_case_insensitive(job: NormalizedJob) -> None:
     assert passes_hard_filters(blocked) is False
 
 
+def test_a_terse_posting_is_still_a_posting(job: NormalizedJob) -> None:
+    """The shortlist's body floor (`cli.MIN_DRAFTABLE_BODY`) must not leak in here.
+
+    "Python backend. Remote. Write to @hr." is a whole Telegram posting. It takes no shortlist
+    slot — there is nothing to write a letter from — but it keeps its score and stays one admin
+    button away from one. Rejecting it here would put it beyond that button's reach.
+    """
+    from funnel.cli import MIN_DRAFTABLE_BODY
+
+    terse = job.model_copy(update={"description": "Python backend. Remote. Write to @hr."})
+    assert len(terse.description) < MIN_DRAFTABLE_BODY
+    assert passes_hard_filters(terse) is True
+
+
 def test_ru_by_location_is_a_hard_stop(job: NormalizedJob) -> None:
     for loc in ("Moscow", "Россия", "Minsk", "Санкт-Петербург"):
         blocked = job.model_copy(update={"location": loc})
@@ -74,6 +88,41 @@ def test_geo_lock_that_admits_europe_is_not_rejected(job: NormalizedJob) -> None
     assert passes_hard_filters(ok) is True
 
 
+def test_eu_citizenship_requirement_does_not_read_as_a_europe_welcome(job: NormalizedJob) -> None:
+    """ "EU" in a passport requirement is a lock, not an invitation (job 4267, 2026-08-03).
+
+    `_REGION_OK` matched the "EU" inside "Portuguese or other EU citizenship" and waived a lock
+    the human cannot open — he lives in Montenegro, outside the EU. The posting reached the
+    shortlist, and the letter answered the requirement by claiming it.
+    """
+    blocked = job.model_copy(
+        update={
+            "is_remote": True,
+            "description": (
+                "Availability for a remote regime based in Portugal. Candidates must be based in "
+                "Portugal and hold Portuguese or other EU citizenship, or a valid work permit."
+            ),
+        }
+    )
+    assert passes_hard_filters(blocked) is False
+
+
+def test_a_genuine_europe_welcome_survives_alongside_a_passport_preference(
+    job: NormalizedJob,
+) -> None:
+    """Only the requirement half is neutralized: an invitation elsewhere still waives the lock."""
+    ok = job.model_copy(
+        update={
+            "is_remote": True,
+            "description": (
+                "We are hiring remotely anywhere in Europe. You must be located in one of our "
+                "hubs; an EU passport is preferred but not required. Apply here."
+            ),
+        }
+    )
+    assert passes_hard_filters(ok) is True
+
+
 def test_worldwide_remote_geo_phrase_is_not_rejected(job: NormalizedJob) -> None:
     ok = job.model_copy(
         update={
@@ -96,6 +145,72 @@ def test_onsite_geo_requirement_is_kept_not_rejected(job: NormalizedJob) -> None
         }
     )
     assert passes_hard_filters(kept) is True
+
+
+def test_onsite_refusal_to_sponsor_is_rejected(job: NormalizedJob) -> None:
+    """Job 15486 (clera, San Francisco): the reason on-site postings are kept is that a company
+    stating a requirement often sponsors on request, and this posting has answered that."""
+    dead_end = job.model_copy(
+        update={
+            "is_remote": False,
+            "location": "San Francisco",
+            "title": "Founding Engineer & Head of Engineering",
+            "description": (
+                "Own the agent infrastructure and full stack.\n"
+                "Location & Work Arrangement\n"
+                "On-site in San Francisco, CA — remote work is not available for this role.\n"
+                "Visa sponsorship: not available."
+            ),
+        }
+    )
+    assert passes_hard_filters(dead_end) is False
+
+
+def test_an_onsite_offer_of_sponsorship_is_not_read_as_a_refusal(job: NormalizedJob) -> None:
+    """Job 10437 (Munich): "remote work is not available" and "Visa sponsorship is available" are
+    adjacent lines, and a negation that may cross a sentence turns the offer into a refusal."""
+    kept = job.model_copy(
+        update={
+            "is_remote": False,
+            "location": "Munich",
+            "description": (
+                "Munich, Germany — on-site\n"
+                "This is a full-time, in-person role; remote work is not available\n"
+                "Visa sponsorship is available"
+            ),
+        }
+    )
+    assert passes_hard_filters(kept) is True
+
+
+def test_a_refusal_to_sponsor_where_the_human_already_works_is_kept(job: NormalizedJob) -> None:
+    # Montenegro on-site is a standing keep; a posting there refusing to sponsor is talking to
+    # somebody else.
+    kept = job.model_copy(
+        update={
+            "is_remote": False,
+            "location": "Tivat, Montenegro",
+            "description": "On-site. Visa sponsorship is not available.",
+        }
+    )
+    assert passes_hard_filters(kept) is True
+
+
+def test_a_remote_refusal_to_sponsor_still_opens_to_a_contractor(job: NormalizedJob) -> None:
+    # On the remote branch a refusal is one more way of saying "be authorized here already",
+    # and the existing escapes answer it — unlike on-site, where nothing does.
+    kept = job.model_copy(
+        update={
+            "is_remote": True,
+            "description": "Remote. We do not offer visa sponsorship. Open to B2B contractors.",
+        }
+    )
+    assert passes_hard_filters(kept) is True
+
+    locked = kept.model_copy(
+        update={"description": "Remote from our New York office. We do not offer visa sponsorship."}
+    )
+    assert passes_hard_filters(locked) is False
 
 
 def test_cosine_of_identical_vectors_is_one() -> None:
@@ -477,3 +592,200 @@ def test_the_heading_rule_reads_a_header_not_prose(job: NormalizedJob) -> None:
         update={"location": "Berlin", "description": "Москва\nWe hire in Berlin. Experience: ..."}
     )
     assert passes_hard_filters(labelled) is True
+
+
+#: Job 4257, verbatim but trimmed — the ad the human sent a real letter and a real CV to on
+#: 2026-08-11 before recognizing it (application 166, now DECLINED with the note "Scam").
+_SCAM_BODY = """Responsibilities:
+* Develop, test, and maintain software applications.
+* Write clean and efficient code.
+* Collaborate with developers, testers, and project managers.
+Requirements:
+* Bachelor's degree in Computer Science, IT, or a related field.
+* Experience with Java, Python, . NET, C#, JavaScript, or similar technologies.
+* Good English communication skills.
+* Valid passport.
+* Willingness to relocate to Germany.
+Benefits:
+* Competitive salary
+* Work visa sponsorship
+"""
+
+
+def test_a_posting_that_wants_a_passport_and_promises_a_visa_is_dropped(
+    job: NormalizedJob,
+) -> None:
+    """The other kind of "not a job posting": posting-shaped, and placed to collect documents.
+
+    Nothing upstream could see it — every hiring word is present, the company name is real
+    enough, and it embedded at the 95.8th percentile, above most of the genuine backend roles
+    in the table.
+    """
+    scam = job.model_copy(
+        update={
+            "title": "Software Developer",
+            "company": "Brahmandnayak Group Of Companies",
+            "description": _SCAM_BODY,
+            "location": "Berlin",
+            "is_remote": False,
+        }
+    )
+    assert passes_hard_filters(scam) is False
+
+
+def test_a_real_relocation_offer_survives(job: NormalizedJob) -> None:
+    """Two of the three signals is the ordinary case, and the funnel wants those postings.
+
+    1,549 rows in the table mention visa sponsorship and 553 offer relocation. What none of
+    the real ones do is ask for the passport itself while declining to name a stack.
+    """
+    real = job.model_copy(
+        update={
+            "title": "Senior Backend Engineer",
+            "description": (
+                "You will own our billing services in Python and Go, on Postgres and Kafka. "
+                "We offer visa sponsorship and a relocation package to Berlin, and we will "
+                "help with the paperwork once you sign."
+            ),
+            "location": "Berlin",
+            "is_remote": False,
+        }
+    )
+    assert passes_hard_filters(real) is True
+
+
+def test_a_passport_a_travel_role_really_needs_is_not_the_scam_signal(job: NormalizedJob) -> None:
+    """A role that flies to customers says this honestly, and names the work around it."""
+    travel = job.model_copy(
+        update={
+            "title": "Senior Solutions Engineer",
+            "description": (
+                "Willing to travel significantly (70%), some travel internationally. "
+                "Must have a valid Passport and Clean Driving License. 8+ years experience "
+                "architecting deployments for enterprise customers."
+            ),
+        }
+    )
+    assert passes_hard_filters(travel) is True
+
+
+def test_a_long_technology_list_alone_is_not_the_scam_signal(job: NormalizedJob) -> None:
+    """A consultancy or a platform vendor genuinely does span several stacks.
+
+    Four rows in the table list four or more languages in a run; three of them are ordinary
+    postings from real companies, and the rule must not reach them.
+    """
+    consultancy = job.model_copy(
+        update={
+            "title": "Test Automation Engineer",
+            "description": (
+                "Our clients build on Java, Python, C#, JavaScript or similar technologies, "
+                "and you will write the test harnesses that cover them. Requirements: five "
+                "years of automation experience and a relocation-ready mindset."
+            ),
+        }
+    )
+    assert passes_hard_filters(consultancy) is True
+
+
+def test_a_required_foreign_language_is_a_wall(job: NormalizedJob) -> None:
+    """The requirement the human cannot acquire, in the spellings the boards actually use.
+
+    Job 14708 ("Python Developer | German-speaking", 99.7th percentile) is the recorded case:
+    the human marked it INELIGIBLE by hand with the note "I don't speak German".
+
+    nofluffjobs' "Must have: Python, Polish" (application 806) is deliberately absent: that
+    sentence is on the board, not in the row, and an arm for it was measured at 3 rows in the
+    whole table — one of which is "Must have valid German work rights", which is a visa.
+    """
+    for requirement in (
+        "🐍 Python Developer | German-speaking 🇩🇪",
+        "Fluent, professional German. You'll run workshops with client engineers.",
+        "Sehr gute Deutschkenntnisse (C1) in Wort und Schrift",
+        "Wymagania: Python, znajomość języka polskiego",
+        "Polish C1 alongside English B2",
+    ):
+        blocked = job.model_copy(update={"description": requirement})
+        assert passes_hard_filters(blocked) is False, requirement
+
+
+def test_english_and_russian_are_not_foreign(job: NormalizedJob) -> None:
+    """The two languages the human has. A posting demanding either is not a wall."""
+    for requirement in (
+        "Fluent English is required for this role.",
+        "Свободный русский язык обязателен",
+        "Excellent written and spoken English",
+    ):
+        kept = job.model_copy(update={"description": requirement})
+        assert passes_hard_filters(kept) is True, requirement
+
+
+def test_an_optional_language_is_not_a_wall(job: NormalizedJob) -> None:
+    """A plus is not a requirement, and neither is a language English answers (job 11244)."""
+    for optional in (
+        "Working proficiency in German or English; the team uses both.",
+        "Professional English. German is helpful, but not required.",
+        "Fluent English required, French is a plus",
+        "Sehr gute Englischkenntnisse, Deutschkenntnisse von Vorteil",
+        "Znajomość języka polskiego mile widziane",
+    ):
+        kept = job.model_copy(update={"description": optional})
+        assert passes_hard_filters(kept) is True, optional
+
+
+def test_the_language_softener_must_be_in_the_same_clause(job: NormalizedJob) -> None:
+    """Job 12589's shape, and the reason the rule reads clauses rather than the whole body.
+
+    962 rows in the table state a real language requirement and separately call something else
+    a plus. Scoping the softener to the body would keep every one of them.
+    """
+    blocked = job.model_copy(
+        update={
+            "description": (
+                "Sehr gute Deutschkenntnisse auf muttersprachlichem Niveau setzen wir voraus.\n"
+                "Eine ITIL-Zertifizierung ist von Vorteil.\n"
+                "Kubernetes experience is a plus."
+            )
+        }
+    )
+    assert passes_hard_filters(blocked) is False
+
+
+def test_a_language_spoken_by_the_market_is_not_a_requirement_of_the_role(
+    job: NormalizedJob,
+) -> None:
+    """ "German-speaking market" describes the customers, not the person being hired."""
+    kept = job.model_copy(
+        update={"description": "You will own our growth in the German-speaking market."}
+    )
+    assert passes_hard_filters(kept) is True
+
+
+def test_clearance_variants_are_stopped(job: NormalizedJob) -> None:
+    """ "security clearance" is one phrasing of many; 53 rows in the table use another.
+
+    Job 21031 ("Python Full Stack Developer (TS/SCI clearance)", 95.8th percentile) is the one
+    that sat above the shortlist floor.
+    """
+    for requirement in (
+        "Must hold an active security clearance.",
+        "UK assignments require BPSS screening and may require SC or DV clearance.",
+        "Clearance: Active TS/SCI w/ FS Poly required",
+        "Candidates must be able to obtain and maintain a Public Trust clearance.",
+        "Active Top Secret clearance. 2+ years of application security experience.",
+    ):
+        blocked = job.model_copy(update={"description": requirement})
+        assert passes_hard_filters(blocked) is False, requirement
+
+
+def test_clearance_in_its_other_senses_is_not_a_stop(job: NormalizedJob) -> None:
+    """The named prefixes are what keep the word out of ordinary prose."""
+    kept = job.model_copy(
+        update={
+            "description": (
+                "You will get design clearance from the product team before shipping, "
+                "and own the release checklist."
+            )
+        }
+    )
+    assert passes_hard_filters(kept) is True

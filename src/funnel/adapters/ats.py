@@ -34,6 +34,7 @@ from funnel.schemas import NormalizedJob
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from sqlalchemy import Select
     from sqlalchemy.orm import Session
 
 #: Consecutive barren runs before a board is switched off. Four is roughly a day and a half at
@@ -61,6 +62,23 @@ _BY_NAME = "name-probe:"
 _MISS_PREFIX = "!miss:"
 
 
+def _probe_key(company: str) -> str:
+    """The one identity a company has in this module. Both probe keys are built from it.
+
+    There are two of them — the `name-probe:<key>` marker that answers "have we tried this?"
+    and the `!miss:<digest>` slug that occupies the unique key — and they **must fold the same
+    way**. They did not between 2026-08-03 and 2026-08-18: the marker used the raw company
+    name and the digest used the casefolded one, so `Flohealth` and `flohealth` (both in the
+    table, from different boards) counted as two companies for the "already tried" test and as
+    one for the slug. The second spelling was therefore probed on every run and every run tried
+    to insert a `!miss:` row that already existed. That IntegrityError took the whole ingest
+    transaction with it, so **all five ATS adapters returned nothing for 8 consecutive runs**
+    while the log said only "duplicate key". `Reddit`/`reddit` and `Connectis `/`Connectis`
+    were queued behind it.
+    """
+    return company.strip().casefold()
+
+
 def _miss_slug(company: str) -> str:
     """A unique, never-pollable placeholder recording that this company was tried.
 
@@ -70,7 +88,16 @@ def _miss_slug(company: str) -> str:
     `uq_ats_boards_provider_slug`, and the IntegrityError took the whole ingest transaction
     with it. A digest cannot collide except for the same name.
     """
-    return f"{_MISS_PREFIX}{hashlib.sha256(company.strip().casefold().encode()).hexdigest()[:24]}"
+    return f"{_MISS_PREFIX}{hashlib.sha256(_probe_key(company).encode()).hexdigest()[:24]}"
+
+
+def probe_marker(company: str) -> str:
+    """The `discovered_from` value recording that this company has been probed.
+
+    Also used to read the existing ones back, so a row written before the folding was made
+    consistent still answers "already tried" for whatever spelling shows up next.
+    """
+    return f"{_BY_NAME}{_probe_key(company)}"
 
 
 #: A slug is the company identifier in an ATS board URL. Kept strict — a greedy pattern would
@@ -207,6 +234,26 @@ def _record_slugs(session: Session, provider: AtsProvider) -> int:
     return added
 
 
+def probe_candidates(scan: int = _PROBE_SCAN) -> Select[tuple[str, str]]:
+    """(company, title) rows to draw probe candidates from, best first. A pure query builder.
+
+    Two orderings, and they are not the same one: the *window* is the top `scan` postings by
+    rank, and within it the unapplyable ones come first. Ranking by `apply_blocked` in a single
+    ORDER BY would put a dead-end posting at rank 900 ahead of a live one at rank 2 and spend
+    the run's whole request budget below the shortlist.
+    """
+    ranked = (
+        select(Job.company, Job.title, Job.apply_blocked, Job.match_percentile)
+        .where(Job.match_percentile.isnot(None))
+        .order_by(Job.match_percentile.desc())
+        .limit(scan)
+        .subquery()
+    )
+    return select(ranked.c.company, ranked.c.title).order_by(
+        ranked.c.apply_blocked.desc(), ranked.c.match_percentile.desc()
+    )
+
+
 def _companies_worth_probing(
     session: Session, limit: int, already_tried: set[str]
 ) -> list[tuple[str, list[str]]]:
@@ -216,28 +263,39 @@ def _companies_worth_probing(
     hit rate that is only good among *employers*. Companies that reach the shortlist are the
     ones worth an apply route, and there are tens of them a day.
 
+    **Companies whose links are dead ends go first** (`matching/apply_route.py`). For an
+    ordinary posting the probe buys a fuller description and a nicer link; for one whose only
+    URL is geo-blocked or paywalled, the employer's own board is the *only* automatic route to
+    applying at all, and nothing else in the funnel will find it. This reorders the window, it
+    does not widen it — the rows are still the top `_PROBE_SCAN` by rank, so an unapplyable
+    posting at rank 800 is still not worth a request.
+
     **`already_tried` is applied before the limit**, which is the whole of why this function
     takes it. Taking the top `limit` and skipping the tried ones inside the caller's loop reads
     the same but does the opposite: the tried companies keep their rank, keep their slots, and
     the second run probes nothing at all. `cli.shortlist_select` had exactly this bug and it
     made `draft` a silent no-op for days — same shape, same fix, written down here so the next
     reader does not have to rediscover it.
+
+    Grouping is on `_probe_key`, not on the name as stored: `Reddit` and `reddit` are one
+    company and must not spend two slots — nor two rounds of requests to learn the same miss
+    twice. The first spelling seen is the one handed back, because `board_confirms` compares it
+    against what a board calls itself and the board's own capitalization is the better guess.
     """
-    rows = session.execute(
-        select(Job.company, Job.title)
-        .where(Job.match_percentile.isnot(None))
-        .order_by(Job.match_percentile.desc())
-        .limit(_PROBE_SCAN)
-    ).all()
+    rows = session.execute(probe_candidates()).all()
     grouped: dict[str, list[str]] = {}
+    spellings: dict[str, str] = {}
     for company, title in rows:
-        if f"{_BY_NAME}{company}" in already_tried:
+        key = _probe_key(company)
+        if probe_marker(company) in already_tried:
             continue
-        grouped.setdefault(company, []).append(title)
+        spellings.setdefault(key, company)
+        grouped.setdefault(key, []).append(title)
         if len(grouped) > limit:
-            grouped.pop(company)
+            grouped.pop(key)
+            spellings.pop(key)
             break
-    return list(grouped.items())
+    return [(spellings[key], titles) for key, titles in grouped.items()]
 
 
 class _AtsAdapter(BaseAdapter):
@@ -256,12 +314,15 @@ class _AtsAdapter(BaseAdapter):
         A miss is recorded as a disabled board so it is probed once and never again; that is
         what keeps this bounded as the table grows. `board_confirms` decides what counts as a
         hit, because a slug that merely resolves is not evidence of anything.
+
+        The markers are re-folded on the way in (`probe_marker`), so rows written before the
+        two probe keys agreed still answer for whichever spelling of the company turns up now.
         """
         known = set(
             session.scalars(select(AtsBoard.slug).where(AtsBoard.provider == self.provider)).all()
         )
         probed = {
-            marker
+            probe_marker(marker.removeprefix(_BY_NAME))
             for marker in session.scalars(
                 select(AtsBoard.discovered_from).where(
                     AtsBoard.provider == self.provider,
@@ -272,7 +333,7 @@ class _AtsAdapter(BaseAdapter):
         }
         found = 0
         for company, titles in _companies_worth_probing(session, _PROBE_COMPANIES, probed):
-            marker = f"{_BY_NAME}{company}"
+            marker = probe_marker(company)
             hit = None
             for slug in slug_candidates(company):
                 if slug in known:
@@ -291,15 +352,25 @@ class _AtsAdapter(BaseAdapter):
             if hit is None:
                 # Remember the miss, not the guess: a disabled row keyed on the company so the
                 # next run does not spend the same requests to learn the same nothing.
-                session.add(
-                    AtsBoard(
-                        provider=self.provider,
-                        slug=_miss_slug(company),
-                        discovered_from=marker,
-                        enabled=False,
-                        empty_runs=_MAX_EMPTY_RUNS,
+                #
+                # Guarded against `known` rather than trusted to be new. Consistent folding is
+                # what *should* make this unreachable, and a belt here is still worth its line:
+                # the cost of being wrong is not a duplicate row, it is an IntegrityError that
+                # rolls back the whole adapter's transaction — every board polled, every slug
+                # discovered, every posting fetched this run. That is what happened for 8 runs
+                # from 2026-08-15, and the log said only "duplicate key".
+                miss = _miss_slug(company)
+                if miss not in known:
+                    known.add(miss)
+                    session.add(
+                        AtsBoard(
+                            provider=self.provider,
+                            slug=miss,
+                            discovered_from=marker,
+                            enabled=False,
+                            empty_runs=_MAX_EMPTY_RUNS,
+                        )
                     )
-                )
             session.flush()
         return found
 

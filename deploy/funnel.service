@@ -2,7 +2,7 @@
 # Phase 7. A oneshot batch run, not a daemon: the container starts, works, and dies.
 Description=Job-search funnel: ingest, match, draft (never sends)
 Documentation=https://github.com/eIGato/job-funnel
-# Only meaningful with a network; the timer's Persistent=true catches a missed run after boot.
+# Only meaningful with a network.
 Wants=network-online.target
 After=network-online.target docker.service
 

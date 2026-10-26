@@ -169,10 +169,86 @@ class ApplicationStatus(enum.StrEnum):
     # fit on the soft stop-stack (PLAN.md section 7). Distinct from REJECTED, which is *them*
     # declining *us*. Kept off the plain-draft path so it is never re-drafted by the timer.
     DECLINED = "declined"
+    # The posting carries a mandatory requirement the human does not meet and cannot acquire:
+    # a language he does not speak, a work authorization nobody will file for him, a licence or
+    # a clearance he does not hold. The mirror image of DECLINED — that one is "we do not want
+    # this role", this one is "they cannot take us" — and mixing them made both unreadable.
+    #
+    # It exists for the same reason UNREACHABLE does: it is the input to a hand-maintained list.
+    # Every row here is a hard filter that does not exist yet, and it cost a screening call and
+    # a letter to discover. Measured on 2026-08-27, before the status existed: of 547 DECLINED
+    # rows, 502 were the screen's own verdict (its notes say so) and 45 were the human changing
+    # the status by hand after reading the posting — 36 of those after a letter had already been
+    # written for it. Re-running today's filters over those 45 explains 5. The other 40 are
+    # unreadable: their `notes` hold the drafter's "Leans on:" audit trail and no reason at all.
+    #
+    # **Put the requirement's own words in `notes`.** Not a paraphrase — the posting's sentence.
+    # That is what makes the next filter measurable before it is written: `_NO_SPONSORSHIP` was
+    # built by grepping the whole table for the phrasing of three such notes and finding 1,257
+    # rows carrying 47 variants of it. A paraphrase greps nothing.
+    #
+    # Terminal, nothing was sent, so the same NULL contract as CLOSED and absent from
+    # REPLYABLE_STATUSES. Geography is deliberately included here even though `filters.py` owns
+    # it: the human is recording what he found, not deciding where a rule belongs.
+    INELIGIBLE = "ineligible"
+    # The posting was closed by the time the human went to apply — no letter ever went out.
+    # Neither them declining us (REJECTED) nor us judging the fit (DECLINED), so it gets its own
+    # value: recording it as REJECTED counted a refusal against an application that was never
+    # sent, and needed a fabricated `reply_at` to look consistent. A CLOSED row keeps `sent_at`,
+    # `reply_at` and `reply_type` NULL; `updated_at` is when it was found closed, and anything
+    # more precise goes in `notes`. Terminal like the rest, so `shortlist` treats the role as
+    # handled and `check-replies` never scans it.
+    CLOSED = "closed"
+    # The human went to apply and there was no way to submit: the site answers 403 from his
+    # region, the apply button is behind a paid tier, the form demands an account he will not
+    # open, the link 404s or lands on a board's front page. Not CLOSED — the employer is still
+    # hiring, and saying otherwise misreads a wall of ours as a decision of theirs. Not DECLINED
+    # either: nobody judged the fit, and DECLINED is what the screen writes.
+    #
+    # Its point is that it is a defect signal about the *funnel*, not bookkeeping about a role.
+    # `apply_route.BLOCKED_HOSTS` already keeps whole hosts out of the shortlist, and both of its
+    # entries were found by the human hitting a wall and mentioning it once — when they were
+    # found, they held 131 of the ~640 rows above the floor. This status is that report's input:
+    # `funnel doctor` groups these rows by host, and a host that keeps appearing is the next
+    # entry. Which wall it was goes in `notes`; nothing in `src/` branches on it, so it stays
+    # free text rather than an enum column.
+    #
+    # No letter went out, so `sent_at`/`reply_at`/`reply_type` stay NULL and it is absent from
+    # REPLYABLE_STATUSES, on the same contract as CLOSED. `updated_at` is when the wall was hit.
+    #
+    # It arrives with no data migration on purpose. The 29 CLOSED rows carry no record of what
+    # happened — every one of their `notes` holds the drafter's own "Leans on:" audit trail, so
+    # which of them were really unreachable is not knowable, and inventing an answer is the
+    # habit that produced the fabricated `reply_at` values migration a1c7e35f9b04 had to undo.
+    UNREACHABLE = "unreachable"
+    # The posting was not a real job: an ad placed to collect passports, fees or documents.
+    # Its own value because it is the one terminal status that says nothing about fit and may
+    # sit on either side of the send. `sent_at` is kept when a letter did go out — that is what
+    # happened, and it is the part worth being able to count (application 166, sent 2026-08-11,
+    # a Berlin "Software Developer" that wanted a passport; `filters._is_relocation_scam` now
+    # drops that shape before it can be drafted). Recording it as DECLINED said we judged the
+    # fit and never applied, which was wrong in both halves.
+    SCAM = "scam"
     SENT = "sent"
     REJECTED = "rejected"
     INTERVIEW = "interview"
     NO_REPLY = "no_reply"
+
+
+#: The statuses `check-replies` scans, i.e. the ones where an incoming email could be an answer
+#: to us. Membership means a letter actually went out — which is why CLOSED, UNREACHABLE,
+#: INELIGIBLE and DECLINED are not here. Matching a reply to an application that was never sent is a mismatch by construction,
+#: and it has already happened: a justjoin.it *job alert* was linked to a never-sent row that had
+#: been filed as REJECTED, because the fallback matches on the sender's domain.
+#:
+#: SCAM is the one status a letter *may* have gone out for that is still kept out of the set.
+#: A scam answers — that is the whole point of it — and every answer would be a classification
+#: call whose verdict `replies/link.py` writes straight back onto the status, so
+#: "we would like to schedule an interview" from the people who wanted the passport would move
+#: the row to INTERVIEW. Terminal means terminal.
+REPLYABLE_STATUSES = frozenset(
+    {ApplicationStatus.SENT, ApplicationStatus.INTERVIEW, ApplicationStatus.REJECTED}
+)
 
 
 class ReplyType(enum.StrEnum):
@@ -234,6 +310,12 @@ class Job(Base):
     embedding: Mapped[bytes | None] = mapped_column(LargeBinary)
 
     hard_filter_passed: Mapped[bool] = mapped_column(Boolean, default=False)
+    #: True when this URL leads nowhere the human can apply — a geo-blocked site, a paywalled
+    #: apply button (`matching/apply_route.py`). Such a posting keeps its score and its place in
+    #: the corpus but gets no shortlist slot. Derived, not typed: `match` recomputes it for every
+    #: row on every run, exactly as it does `hard_filter_passed`, so editing `BLOCKED_HOSTS`
+    #: takes effect by itself instead of applying to newly ingested rows only.
+    apply_blocked: Mapped[bool] = mapped_column(Boolean, default=False)
     # Cosine against the profile with the corpus mean removed (matching/embed.centered_similarity),
     # so this is roughly -0.2..0.3 and not the 0.72..0.86 band raw e5 cosine produces. Both are
     # rewritten wholesale on every `match`; NULL means "not on the shortlist".
@@ -385,9 +467,37 @@ class Reply(Base):
     confidence: Mapped[float | None] = mapped_column(Float)
     reasoning: Mapped[str | None] = mapped_column(Text)
 
+    #: Who the classifier thinks the email is about. A *proposal*, never a fact: it is what the
+    #: admin's "Record as sent application" fills a new row from, and nothing else reads it.
+    #: Most acknowledgements this mailbox receives belong to applications the funnel never saw
+    #: — the human applied outside it — and this is how such a row gets created from the only
+    #: record that exists of it (~20 of 166 replies on 2026-08-12).
+    detected_company: Mapped[str | None] = mapped_column(String(255))
+    detected_role: Mapped[str | None] = mapped_column(String(255))
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     application: Mapped[Application | None] = relationship(back_populates="replies")
 
     def __str__(self) -> str:
         return f"{self.from_address}: {self.subject[:60]}"
+
+
+class SkippedMessage(Base):
+    """An incoming email `check-replies` read, judged to have nothing to do with a job search,
+    and threw away. Only the id is kept — no sender, subject or body.
+
+    The id is what keeps the scan idempotent: without it, every run would re-fetch and re-bill a
+    classification for the same Steam sale. Storing those as `Reply` rows did the same job and
+    cost two others: over half of `replies` was shopping, banking and product newsletters
+    (measured 2026-10-02: ~200 of 491), and the matcher kept linking some of them to
+    applications — a ChatGPT newsletter to OpenAI by sender domain, a Cloudflare "Connect"
+    invitation to Connectis by a thread it had wrongly taught. Mail that is never stored can
+    never be relinked. The email itself is still in Gmail.
+    """
+
+    __tablename__ = "skipped_messages"
+
+    gmail_message_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

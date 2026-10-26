@@ -25,6 +25,12 @@ and to automate the drudgery of applying. It doubles as a portfolio piece for th
    Same trick for any board that offers alerts.
 2. **Human in the loop.** The system NEVER sends applications or emails on its own. The
    most it does is put a draft in the database and wait. A human sends it, by hand.
+   The OAuth scope is what enforces this, and the scope is **never** `gmail.send`,
+   `gmail.compose`, `gmail.insert` or full `https://mail.google.com/`. It is `gmail.readonly`
+   by default and `gmail.modify` when `GMAIL_TRASH_PARSED_ALERTS` (human-confirmed 2026-08-12)
+   or `GMAIL_TRASH_REJECTIONS` (2026-10-19) is on — a write scope that still cannot send and
+   cannot delete permanently, so the worst the system can do to an email is put it in Trash for
+   30 days.
 3. **Embeddings are local, via fastembed (ONNX). No torch.** Not a single token and not a
    single API call for matching or filtering.
 4. **The LLM lives only in `drafting/` and `replies/`.** Cover letters and reply
@@ -129,6 +135,8 @@ uv run funnel match                       # filters + embedding ranking
 uv run funnel draft                       # draft cover letters (DOES NOT SEND)
 uv run funnel run-funnel                  # ingest -> match -> draft, end to end
 uv run funnel doctor                      # check config, database, adapters, CV
+uv run funnel check-replies               # classify replies; Trashes rejected threads if on
+uv run funnel tidy-mailbox [--apply]      # Trash old alerts + rejected mail (dry run by default)
 
 # review admin
 uv run funnel admin                       # serve sqladmin (or uvicorn funnel.admin:app)
@@ -170,8 +178,346 @@ docker compose run --rm --build app uv run funnel run-funnel
   clear geography/seniority?" in pure code. `drafting/screen.py` decides "is it the right *kind*
   of job?" in one cheap model call before drafting. Keep them apart: a regex judging emphasis is
   whack-a-mole, and a model re-judging geography overrules a decision the human already made.
+- **An ad that wants a passport is not a posting.** Job 4257 ("Software Developer",
+  "Brahmandnayak Group Of Companies", Berlin, off a Glassdoor alert) promised visa sponsorship
+  and relocation, required a "Valid passport", and named its stack as "Java, Python, . NET, C#,
+  JavaScript, or similar technologies". It ranked at the 95.8th percentile, passed every filter
+  and the screen, and the human sent it a letter and a CV on 2026-08-11 (application 166, now
+  DECLINED, note "Scam"). The cost of that miss is not a wasted call — it is personal data
+  handed to whoever placed the ad, so `filters._is_relocation_scam` drops it before embedding,
+  in the same "not a job posting" category as scraped page furniture. **The three signals only
+  fire together.** Measured over all 18,856 rows (2026-08-23): visa sponsorship 1,549, a
+  relocation offer 553, an "or similar technologies" hedge 139, boilerplate duties 71, four
+  unrelated languages in a run 14, a passport demand 3 — and the conjunction exactly one, 4257,
+  with no other verdict in the table changed. The three rows that come closest hold three
+  signals and no passport, and are all one real Munich/SF startup. A real relocation offer says
+  two of these things too; what it also does is name the stack it hires for. It belongs here
+  and not in the screen because the tell is made of visas and relocation, i.e. geography, which
+  the screen must never judge. **The salary-spread heuristic suggested alongside this one was
+  not built**: `Job` stores no salary at all (only some adapters carry one, inside the body
+  text), and this ad quotes no number — "Competitive salary" is the tell, not a range.
+- **"We will not sponsor" is a geography, and it is the answer to the question that kept on-site
+  postings.** On-site/hybrid rows are kept unfiltered because a company that merely *states* an
+  authorization requirement will often sponsor on request — but a posting that says outright it
+  will not is that question already answered, and the human is a Montenegrin resident who needs
+  someone to file the permit everywhere but Montenegro. `filters._NO_SPONSORSHIP` therefore drops
+  a non-remote posting that refuses, and joins `_GEO_LOCKED` on the remote branch (where the
+  contractor/region/authorization-open escapes still apply — a B2B contract answers "be
+  authorized here already", and cannot put a body in a San Francisco office). Job 15486
+  ("Founding Engineer & Head of Engineering", clera, San Francisco, Ashby) is the measured case:
+  "On-site in San Francisco, CA — remote work is not available for this role. Visa sponsorship:
+  not available", said twice, ranked at the 90.1st percentile, took a shortlist slot and a cover
+  letter on 2026-08-24 (application 773, drafted, never sent). **The screen cannot catch this** —
+  it is forbidden to judge geography, and rightly. Measured over all 20,752 rows (2026-08-26):
+  1,257 carry one of 47 distinct phrasings, 1,137 of them on-site; 26 sat above the shortlist
+  floor and none of the ~18.9k rows that passed before now pass differently in the other
+  direction. **The negation may not cross a sentence** — with a permissive gap, job 10437
+  (Munich) matched across "remote work is not available\nVisa sponsorship is available" and read
+  an offer as a refusal, so the gap is `[^\n.;!?]` and the inversion is pinned by a test.
+- **A language he does not speak is a wall, and it is the only one of three proposed rules the
+  table justified.** `filters._FOREIGN_LANGUAGE_REQUIRED` drops a posting that requires a working
+  language other than English or Russian — a fluency word next to the language, a level ("Polish
+  C1"), or the German/Polish one-word idioms — and `_LANGUAGE_OPTIONAL` keeps the ones that call
+  it a plus or offer English instead ("German or English; the team uses both", job 11244). It
+  belongs in filters and not the screen for the same reason a visa does: it is a fact about the
+  human, not a judgment about the kind of work. **The softener must sit in the same clause as the
+  requirement** — the two scopings disagree on 962 rows, every sampled one a real requirement that
+  a "von Vorteil" about a certification elsewhere in the posting would have cancelled.
+  Measured over all 23,745 rows (2026-09-01): 3,990 fire, 3,537 were passing before, **7 of them
+  above the shortlist floor** — among them job 14708 ("Python Developer | German-speaking", 99.7th
+  percentile), which the human had already marked INELIGIBLE by hand. 3,349 of the 3,537 are
+  arbeitnow's German-language market, below the floor. **Dropping 17% of the population moves
+  every score**, because the centre is a corpus property and the percentile is a rank in it:
+  simulated on the stored embeddings, the pool above the 90th percentile goes 879 → 699 draftable
+  rows, 7 by the rule and 175 by the rank moving under them. Not a loss (the floor only binds when
+  the pool is thin), but older row counts in these notes will not reproduce. Shipped alongside
+  `_CLEARANCE_REQUIRED`, which replaced the literal substring "security clearance" with its
+  spellings — SC, DV, TS/SCI, BPSS, Public Trust, "Active Top Secret" — 53 rows the substring
+  missed, 1 above the floor (job 21031). **The other two rules proposed the same day were measured
+  and not built**: a "must-have residency" rule is `_GEO_LOCKED` again, and half the above-floor
+  rows it would newly catch say "must be located in NYC **or willing to relocate**", which is an
+  invitation, not a lock; a "degree from a named university" rule fires on 17 rows table-wide, 2
+  above the floor (one posting listed twice) and 7 of them "Nice to Have".
+- **A filter cannot read what the board did not send, and that is where the dead applications come
+  from.** Of the 11 rows the human marked `INELIGIBLE`, the three rules above would have caught
+  **one** (14708). Nine are 500-character Adzuna teasers whose stored body stops before the
+  requirements section — the Polish C1, the SC clearance, the Northern Ireland residency and the
+  Russell Group degree are all on the board, not in the table — and the tenth blocker arrived in a
+  recruiter's email, not in the posting at all. Adzuna is 216 of the 665 applicable rows above the
+  floor (209 of them teasers), and it produced 63 of 81 `CLOSED` and 9 of 11 `INELIGIBLE`. So the
+  lever on dead applications is not another regex over `description`: it is fetching the real
+  description for a teaser before it takes a shortlist slot, or treating a truncated body the way
+  `cli.MIN_DRAFTABLE_BODY` treats a short one. Neither is built (2026-09-01).
+- **A link nobody can apply through is not a candidate.** `matching/apply_route.py` lists the
+  hosts that are dead ends for this human — `adzuna.com`/`adzuna.ca` answer 403 from where he
+  lives, RemoteOK's apply button is behind its paid tier — and `match` flags every row against
+  it. Those rows are excluded where the shortlist is **selected**, not by a hard filter: they
+  keep their score, because the centre is a corpus property and because they are the best input
+  ATS discovery has (a company with a dead link is exactly the one whose own board is worth
+  probing, and `adapters/ats.py` probes those first). 131 of the ~640 rows above the floor were
+  dead ends on 2026-08-05 — a fifth of every shortlist, one screening call and one unsendable
+  letter apiece. Other `adzuna.*` countries are fine and stay. **The exclusion is unconditional,
+  and searching for a working link instead was tried and removed on cost the same day** — a
+  web-search resolver ran about a dollar a posting, because search results arrive as input
+  tokens and the server-side loop resends the conversation each iteration. Read PLAN.md §7
+  before building it again.
+- **A body nobody can write from is not a candidate either.** `cli.MIN_DRAFTABLE_BODY` (300
+  chars) keeps a posting with an empty or one-line description out of the shortlist. Same shape
+  as the rule above — excluded where the shortlist is **selected**, so the row keeps its score
+  and stays one click from a letter: the admin's "Screen & draft letter" button is the path for
+  these now, after the human pastes the real description into the row. Measured 2026-08-06: of
+  554 rows above the floor, 124 had an empty body (a gmail alert is a subject line and a link)
+  and 71 more were a single short line — 36% of every shortlist buying a screening call and a
+  letter written from a title. **A length floor, not "the body has no newline"**: Adzuna serves
+  its teaser as one unbroken 500-character paragraph with salary, requirements and stack in it,
+  and the literal reading would have dropped 68 real postings with the junk. The exact number is
+  not load-bearing — nothing has a body between 162 and 369 chars, so any floor in that gap
+  selects the same rows. The hard filters still have **no** minimum-body rule (a terse Telegram
+  posting is real, and rejecting it there would put it beyond the button's reach).
 - **We send nothing.** There is no code path that sends an email or an application. `draft`
   writes to the database; the human sends it and then sets the status to `sent` in the admin.
+- **The mailbox is read, and at most tidied.** `GMAIL_TRASH_PARSED_ALERTS` (off by default)
+  makes `ingest` move an alert email to Trash — never delete it — but only through
+  `BaseAdapter.on_committed`, which runs **after** the transaction commits, and only for the
+  ids in `GmailAlertsAdapter.parsed_message_ids`, i.e. messages the parser got at least one
+  posting out of. An email that parsed into nothing is left alone on purpose: it is as likely
+  to be a board that changed its markup as it is to be junk, and it is the only copy a new
+  parser could be written against. Keep those three limits together — the hook exists so the
+  pipeline can have an irreversible source-side side effect without the pipeline knowing
+  which source it is.
+- **A conversation that ended in a no leaves the inbox; the letter that started it does not.**
+  `GMAIL_TRASH_REJECTIONS` (human, 2026-10-19; off by default) makes `check-replies` Trash, after
+  its commit, every incoming message in the threads of an application it moved to `REJECTED` —
+  the acknowledgement, the rejection, anything between. Messages labelled `SENT` or `DRAFT` stay:
+  the human's own letter is the only record of what actually went out (the table holds the draft
+  it was made from). A thread that any application still in play also owns is never touched — a
+  recruiter writing about two roles in one conversation would otherwise lose the interview with
+  the rejection (`link.rejection_threads`, read in one `REPEATABLE READ` snapshot). A status set
+  by hand in the admin is cleared by `funnel tidy-mailbox --apply`, which is also the backlog
+  sweep for alerts older than the 30-day window: it Trashes an alert only if **every** posting in
+  it is already in the table, instead of ingesting month-old postings to make that true.
+- **The Trash was failing on quota for a month, and only the count said so.** From 2026-09-18
+  the alert Trash ran straight after `fetch` had spent the minute's per-user Gmail quota (up to
+  100 messages at 5 units each); all but the first few calls came back `403 Quota exceeded ...
+  'Units per minute per user'`, nothing retried, and the journal said "41 failed". The alerts
+  stayed, and the next run re-read them and spent the quota again. Every Gmail call now goes
+  through `adapters.gmail.execute` (backoff with jitter on quota and 5xx; every call here is
+  idempotent), and a failure is reported by cause.
+- **A board is an address, not a domain.** A board that mails alerts also mails the human about
+  a specific application, from a different address on the same domain — so the three places that
+  say "this sender is bulk" name the alert address wherever one exists: the `gmail-alerts` query
+  in `seeds.py` (which is what `GMAIL_TRASH_PARSED_ALERTS` may Trash), the exclusion in
+  `inbox.fetch_recent`, and `_BOARD_DOMAINS` in `replies/match.py`. Habr Career is the measured
+  case (2026-08-13): `subscribe@career.habr.com` sent 29 digests in a year, `noreply@` sent 4
+  "you applied to X at Y" receipts naming a company and linking the posting. The whole-domain
+  reading cost all three ways at once — the receipts were inside the Trash query (held out only
+  by the parser returning nothing on them, which is resting a deletion on the wrong thing),
+  excluded from `check-replies` outright, and unmatchable even so. All four answered an
+  application already stored as `sent`, within two minutes of `sent_at`. **hh.ru cannot be split
+  this way** — alerts and receipts share `noreply@hh.ru` — so it stays a whole domain, which is
+  why the rule is "wherever one exists" and not a blanket ban on domains. In `match.py` the
+  split is an exception list (`_BOARD_ADDRESS_EXCEPTIONS`) rather than a promotion of the alert
+  address, so an address the board invents next is still treated as bulk: a missed match costs a
+  human glance, a wrong one stamps a rejection onto the wrong application. pracuj.pl is the same
+  shape (`rekomendacje@wysylka.` vs `noreply@aplikacje.`, added 2026-08-17). **Indeed splits by
+  subdomain**, not by mailbox: `jobalert.` is the alert address and `match.` is an ad network (8
+  mails in a year, all on one day, all one advertiser), while the apex mails the human. Its
+  receipt is the weak case kept anyway — `indeedapply@indeed.com` confirms only the role
+  ("Bewerbung uber Indeed: Software Developer", 2026-08-11) and never the employer, so it can
+  match by thread and nothing else and must **not** join `_BOARD_ADDRESS_EXCEPTIONS`. Narrowing
+  the exclusion in `inbox.fetch_recent` still pays: the mail is in scope, it costs no
+  classification call while `indeed.com` stays in `_BOARD_DOMAINS`, and the address Indeed
+  invents next is in scope by default. **justjoin.it needs
+  a third split, by subject**, and it is the weakest one: `no-reply@justjoin.it` sends both the
+  alert and the "You applied for X" receipt, and unlike hh's the receipt is *not* harmless to
+  parse — it carries a "similar offers" block in the identical card markup, so the parser reads
+  five postings out of it and the message becomes trash-eligible. The `-subject:"You applied
+  for"` term lives in the **query**, never in the parser: a parser that judged what kind of mail
+  it was reading would be back to keying on a subject line, which is the one thing these parsers
+  never do. `tests/test_gmail_adapter.py` pins that down by asserting the parser *does* read the
+  receipt.
+- **No stable id in the link, no parser.** A mailbox sweep on 2026-08-17 found ten recurring
+  bulk senders the funnel was not reading. Two got parsers — justjoin.it (26 mails/mo) and
+  pracuj.pl (37), together **254 distinct postings from ~155 companies out of one week of mail**,
+  none of them present under any other source. Five did not: Reed, Totaljobs, 24recruitment,
+  `match.indeed.com` and spelljob wrap every posting in a per-recipient redirect
+  (`clicks.reed.co.uk/f/a/…`, `cts.indeed.com/v3/<blob>`) with no id anywhere and no plain-text
+  alternative carrying one, so each alert would mint a fresh row and a fresh cover letter — the
+  Adzuna `se=` bug again. Resolving the redirect means an HTTP call per posting inside the alert
+  parser; the one Reed link tried landed on a 404 under "Appcast Enterprise", an ad network.
+  Reasons are in the `adapters/gmail.py` docstring so the next sweep does not re-derive them.
+- **A parser goes quiet one board at a time, and the source still looks healthy.** Wellfound
+  began rolling out a new alert template on 2026-08-05 and kept sending the old one from the
+  same address, interleaved by date. `_parse_wellfound` read only the old shape, so nine alerts
+  back to 07-23 (11 postings from 11 companies) yielded nothing — while `gmail-alerts`
+  went on reporting hundreds of new rows a run, because one source holds ten parsers and
+  `ingest` reports per source. The per-source "produced nothing for N runs" signal that would
+  catch a dead adapter cannot see this; the one that would is per **sender**. Two things make
+  it cheap to find by hand: which layout an email is in is decided by the **link shape**, never
+  by a date or a subject (`/jobs?job_listing_slug=<id>` against `/jobs/<id>-<slug>`, mutually
+  exclusive, so both parsers can stand side by side), and an unparsed alert is still in the
+  inbox, because `GMAIL_TRASH_PARSED_ALERTS` only Trashes what yielded a posting. **The unread
+  pile is the backlog of parser bugs, not junk** — that is the other half of why mail that
+  parsed to nothing is left alone. Re-running the parsers over `in:inbox` is the check.
+- **"Nothing to read" and "nothing new" are different verdicts, and only the second one may
+  Trash.** The `gmail-alerts` source has two queries. `query` is mail we parse, and an email is
+  Trashed once we have its postings. `discard_query` is mail we have decided never to read
+  because everything in it reaches the funnel by another route, and it is Trashed **unread** —
+  Adzuna (already an API source, and the alert host is in `BLOCKED_HOSTS`), WeWorkRemotely
+  (already RSS), `info@glassdoor.com` (marketing, while `noreply@glassdoor.com` is the parsed
+  alert address), and getmatch.ru, whose weekly digest repeats what the human has already seen
+  in the Telegram bot the same subscription feeds (human, 2026-08-17 — its parser was written
+  and deleted the same day; the postings were real, they were just not new). The five
+  unparseable boards above are **not** in `discard_query`: their postings are genuinely new
+  (34 of 47 Totaljobs postings measured were not in the table), and mail nobody can read is
+  still mail a human might want to glance at. Unsubscribing is their fix, and it is his call,
+  not the pipeline's. Both queries answer to the one `GMAIL_TRASH_PARSED_ALERTS` switch, because
+  what needs consent is the `gmail.modify` scope, not each list.
+- **The alert window is 30 days so the pipeline can catch up, and that costs nothing.** With
+  trashing on, an alert is read and Trashed within a run of arriving, so in the steady state
+  there is never anything older than a day in scope. The window only matters after a parser is
+  added or the flag is turned on — both happened on 2026-08-17, when 247 board mails sat in the
+  inbox, 187 of them older than a week, including 27 pracuj and justjoin alerts whose postings
+  the funnel had never seen. The 7-day window it replaced could not have reached one of them.
+- **A reply is correlated on words, and a weak match never moves a status.**
+  `replies/match.py` compares whole words (folded for diacritics, legal forms dropped), not
+  slugs inside a run-together string: `profil` sits inside "profile" and matched a Toptal
+  acknowledgement to a Profil Software application. A run of consecutive words joining to
+  exactly the company slug counts too, because an ATS gives us `Chaosindustries` and mails
+  "CHAOS Industries" — equality on the run, never containment. `Match.conclusive` is the other
+  half: the thread, the company's own domain, the From display name and a unique company in
+  the subject may set `Application.status`; the same-company tie-break (two Reddit roles) and
+  a name found only in the body link the Reply and leave the status to the human. **A job
+  board can match by thread and nothing else** — its digests list companies by the dozen, and
+  one of them naming ours proves nothing. Measured over 166 stored replies (2026-08-12): 17
+  linked before, 26 after, and 96 board alerts now get a Reply row with no classification call
+  at all. The remaining ~20 real acknowledgements belong to applications the funnel has no
+  `sent` row for; no heuristic can reach those.
+- **An application made outside the funnel is recorded from the mail it drew.** Most
+  acknowledgements here answer applications the funnel never saw — the human applied through a
+  board or a referral (~20 of 166 replies on 2026-08-12) — so every later message in that
+  conversation is unmatchable and any sent-to-reply rate uses the wrong denominator. The
+  classifier therefore also reports `company`/`role` (a **proposal**, on a call that already
+  happens — no extra tokens), stored as `Reply.detected_company`/`detected_role`, and the
+  admin's "Record as sent application" builds the row from them: a Job under the disabled
+  `manual` Source, an Application at `sent` with `sent_at` = when the email arrived, and the
+  thread it came in. **The human presses it** — the model only proposes, which is invariant 2
+  applied to an action rather than to sending. No employer named, no row: a row named after a
+  guess is worse than none. `replies/link.py` owns this and every other write a reply causes,
+  so the scan and the admin cannot drift.
+- **Mail unrelated to the job search is not stored, only its id.** The classifier also returns
+  `job_related` (same call, no extra tokens, defaults to True); `link.is_unrelated` throws an email
+  away when it is False **and** the email did not arrive in an application's thread — a domain or
+  body match proves nothing (a ChatGPT newsletter matched OpenAI by domain). Only the id goes into
+  `skipped_messages`, which is what keeps the scan from re-billing it. On 2026-10-02, 68 of 491
+  stored replies were moved there by hand, and a hand re-match of the rest found ~60 replies the
+  matcher had missed (board receipts naming the employer only in the body, ATS slugs like
+  `Wehrtyou` for HRT) and 5 `manual` rows that duplicated funnel rows under another spelling
+  (`record_as_application` looks a company up by exact name). The admin button therefore asks
+  first: a reply with `link.similar_applications` (same employer under another spelling, the
+  employer named in another posting's title, or the one same-role application sent that week)
+  goes to a review page where the human links it or confirms it is new.
+- **hh.ru's personal mail is read by subject, and a rejection matches by vacancy id.** hh sends
+  alerts, receipts, chat notices and rejections all from `noreply@hh.ru`, so `fetch_recent`
+  leaves the domain out and none of it reached `check-replies` — 193 of the 202 hh mails no
+  parser could read on 2026-10-19, 67 of them rejections. `replies/hh.py` selects three subjects:
+  a rejection carries `hh.ru/vacancy/<id>`, the id `Job.url` stores, so it is a conclusive match
+  (55 of 64 matched; 22 moved a status on the first run); a chat notice carries a `chat_id` and
+  nothing else, is unmatchable by construction and goes to Trash (the human reads hh chats on the
+  site); "вам написали из X" names the employer and is kept when exactly one hh application
+  matches. "Вам написали по вакансии X" and "Сообщение от работодателя" carry the employer's
+  message *and* the vacancy id: matched by id, classified like any reply, Trashed when no
+  application is on file. **These subjects are negated in the `gmail-alerts` query** (built
+  from `hh.SUBJECTS` in `seeds.py`), because the alert parser reads the vacancy link in an
+  employer's message as a posting, and a parsed alert is Trashed: five were, two on applications
+  still `SENT` and three on applications at `INTERVIEW` (restored 2026-10-19). Same rule as
+  justjoin's receipts — the split lives in the query, never in the parser.
+  **An email older than the reply a status rests on never moves it**, and a hand-set
+  `INTERVIEW` with no reply on file counts from its `updated_at` — application 1521, a hand-set
+  interview, was moved to `REJECTED` by an hh rejection received 2026-10-17 before that check
+  existed; whether the interview was set before or after that date is no longer knowable.
+- **`check-replies` holds no transaction across Gmail or the model** (`replies/scan.py`, since
+  2026-10-19). It used to run in one session for the whole scan: minutes of open connection,
+  and a crash near the end lost every write of the run and re-billed every classification.
+- **`check-replies` reads oldest first, and learns threads from incoming mail.** Pass 1 finds
+  a Sent message for almost nothing (1 of 36 applications had a thread) because most
+  applications go through a web form. So a conclusive match writes `message.thread_id` back
+  onto the Application, and the oldest-first order means an acknowledgement teaches the thread
+  before the answer to it is looked at in the same batch.
+- **Not applying has six different statuses, and they stay apart.** `DECLINED` is the screen's
+  verdict on fit, `INELIGIBLE` is a requirement the human cannot meet, `CLOSED` is a posting that
+  stopped taking applications before he got there, `UNREACHABLE` is a posting he could not apply
+  to at all, `SCAM` is a posting that was never a job, `REJECTED` is them declining us — which
+  presupposes a letter went out. `REJECTED` was
+  doing all three jobs until 2026-08-06: 16 of the 18 rejections on record had `sent_at IS NULL`
+  and a `reply_at` invented at noon of the day the closure was noticed, so any sent-to-reply rate
+  counted refusals against applications that never existed, and `check-replies` kept scanning
+  them (one had already collected a job-alert newsletter as its "reply"). A `CLOSED` row leaves
+  `sent_at`/`reply_at`/`reply_type` NULL; `updated_at` is when it was found closed. **Never write
+  a timestamp into a reply field to make a row look consistent** — an empty column is readable,
+  a fabricated one is not.
+- **"We do not want them" and "they cannot take us" are different measurements.** `INELIGIBLE`
+  (added 2026-08-27, migration `d3f6b81c04ae`) is a mandatory requirement the human does not meet
+  and cannot acquire — a language he does not speak, a work authorization nobody will file, a
+  licence he does not hold. `DECLINED` is the screen's verdict on the *kind* of work, and it was
+  carrying both: of 547 DECLINED rows, 502 were the screen's own (its notes say so) and **45 were
+  the human changing the status by hand, 36 of them after a letter had already been written**.
+  The two grade different things — DECLINED grades the screen and the profile, `INELIGIBLE`
+  grades the coverage of `matching/filters.py`, because every row in it is a hard filter that
+  does not exist yet. **Put the requirement's own words in `notes`, not a paraphrase.** That is
+  what makes the next filter measurable before it is written: `_NO_SPONSORSHIP` was built by
+  grepping the table for the phrasing of three such notes and finding 1,257 rows carrying 47
+  variants — a paraphrase greps nothing. `funnel doctor` prints the notes (newest first, capped)
+  rather than a count, for the same reason. The migration moved **4 rows and no more**: only
+  hand-written notes are read, because a drafter's "Leans on:" audit trail can quote a posting's
+  visa sentence while the human declined it for something else. The other **40 hand-declined rows
+  are unreadable** — drafted for, then declined, with the drafter's text where the reason should
+  be — and re-running today's filters over the 45 explains only 5. That gap is the thing the
+  status exists to stop growing, and `doctor` prints its size once so it is not re-derived.
+- **A wall of ours is not a decision of theirs, and it is a defect signal about the funnel.**
+  `UNREACHABLE` (added 2026-08-27) is a posting the human went to apply to and could not: the
+  site answers 403 from his region, the apply button is behind a paid tier, the form wants an
+  account he will not open, the link 404s or lands on a board's front page. Filed as `CLOSED` it
+  says the employer stopped hiring, which is a claim about them made out of a fact about us;
+  filed as `DECLINED` it says the screen judged the fit, which nobody did. Same NULL contract as
+  `CLOSED` (`sent_at`/`reply_at`/`reply_type` empty, `updated_at` is when the wall was hit) and
+  the same absence from `REPLYABLE_STATUSES`. **Its point is the report, not the bookkeeping.**
+  `apply_route.BLOCKED_HOSTS` is hand-maintained and both entries were found by the human hitting
+  a wall and mentioning it once — and when they were found they held 131 of the ~640 rows above
+  the floor. `funnel doctor` now groups `UNREACHABLE` rows by host: one row is a dead posting, a
+  host that keeps coming back is the next entry, and the count is the only thing that tells them
+  apart. It reports and never edits — which site is closed to him is a fact about his region and
+  his accounts (invariant 8). **The reason stays free text in `notes`** and is deliberately not
+  an enum column: nothing in `src/` branches on which wall it was, and the split that would have
+  earned one (a dead *link* should let the role return from another source, a dead *site* should
+  not) was measured and is worth ~nothing — of the 131 blocked rows above the floor, exactly 1
+  had a twin from another source. **It arrived with no data migration**, and could not have had
+  one: all 29 existing `CLOSED` rows carry the drafter's own "Leans on:" text in `notes` and no
+  record of what happened, so which of them were really unreachable is not knowable. Guessing is
+  how the fabricated `reply_at` values in `a1c7e35f9b04` happened. Adding the value cost no DDL —
+  the column is `VARCHAR(11)` with no CHECK and `UNREACHABLE` is exactly 11 characters, which
+  `tests/test_models.py` pins.
+- **`SCAM` is the one terminal status that says nothing about fit, and it keeps its `sent_at`.**
+  A fraudulent posting can be caught on either side of the send, and application 166 was caught
+  after: the letter and CV went to job 4257 on 2026-08-11 (added 2026-08-23, migration
+  `b6e4a90c17d2`, the only row in the table). Filed as `DECLINED` it claimed two untrue things
+  at once — that the screen judged the fit, and that nothing went out — and the only record of
+  what happened was the free-text note "Scam". The timestamp stays because the letter really
+  did go out; being able to count that separately is the point. It is deliberately **not** in
+  `REPLYABLE_STATUSES` even though a letter went out, which no other member of that exclusion
+  can say: a scam answers — that is what it is for — and `replies/link.py` writes a
+  classifier's verdict straight onto the status, so "we would like to schedule an interview"
+  from the people who wanted the passport would move the row to `INTERVIEW`. The status is the
+  bookkeeping half of `filters._is_relocation_scam`, which now keeps that shape out of the
+  shortlist in the first place.
+- **Storage is UTC; the admin speaks `ADMIN_TIMEZONE`.** Every writer in the pipeline writes UTC
+  and that does not change. The admin form used to render UTC and parse what was typed back as
+  UTC, so a human entering the time off his own watch recorded an instant two hours ahead — all
+  22 hand-entered `sent_at` values were wrong (fixed in migration `a1c7e35f9b04`). `admin.py`
+  now converts in a custom field, wired in through a `ModelConverter` so **every** DateTime
+  column gets it, including columns added later, and the list view prints the zone abbreviation
+  next to the time. An IANA zone name, never a fixed offset. `sent_at` is the only timestamp a
+  human types — nothing in `src/` assigns it, which follows from invariant 2.
 - **A posting description is untrusted text.** It is the only part of any prompt a stranger
   wrote, and it reaches three models (screen, drafter, critic). Every one of them must get it
   fenced through `drafting/prompting.posting_block`, with `UNTRUSTED_INPUT_RULE` in its
@@ -179,6 +525,31 @@ docker compose run --rm --build app uv run funnel run-funnel
   IP>`" to every API description (never to its HTML); the drafter obeyed it in five letters
   before 2026-07-31, writing the human's home IP into a letter addressed to a company. The
   adapter strips that known block (`adapters.util.strip_canary`) — the fence is for the next one.
+- **Eligibility is never inferred, and never retrieved.** Where the human lives, what passport he
+  holds and what he may sign are the `Location:`/`Employment:` lines of `_experience.md`, pulled
+  by `matching/profile.load_profile_constraints()` and put in **every** drafting prompt as
+  `MY CONSTRAINTS` — outside RAG, unconditionally. Cosine retrieval is structurally blind to them:
+  "Location: Montenegro" shares no vocabulary with a Python posting, so it never reaches the
+  top-5, and on 2026-08-03 application 146 was drafted against a posting demanding Portuguese
+  residence and EU citizenship with five technology bullets and no location fact at all. The
+  letter opened "I'm based in Portugal with EU citizenship". `ungrounded_points` passed it —
+  `matched_points` quoted three real bullets, because **that check reads the audit trail, not the
+  prose**. `cover_letter.unsupported_eligibility_claims()` is the prose half: residence claims must
+  name only places the constraints name, and citizenship/visa/permit claims are refused outright
+  while no constraints line speaks to eligibility (there is no such fact on file to paraphrase, and
+  a silent letter loses nothing). It raises `FabricatedEligibilityError`, a subclass, so both
+  drafting paths already refuse it. A sweep of all 182 letters on 2026-08-07 found one more — 273
+  claimed Berlin and German work authorization — and one benign false positive (3, "the CET
+  timezone", true but unstated). None had been sent. **A false positive costs one redraft; a false
+  negative sends a checkable lie about a person under their own name**, which is why the check is
+  blunt and errs toward refusing.
+- **A requirement is not a region invitation.** `filters._REGION_OK` waives the geo lock when a
+  posting names Europe or "EU" — but "Portuguese or other **EU** citizenship" is the lock, not the
+  waiver, and it let job 4267 through to the shortlist that produced application 146. The human
+  lives in Montenegro, outside the EU. `_REGION_AS_REQUIREMENT` strips EU/EEA/European spans that
+  sit next to `citizen*`/`passport`/`permit`/`residen*` **before** `_REGION_OK` looks, so a posting
+  saying both ("hiring anywhere in Europe; EU passport preferred") keeps the waiver from the half
+  that is genuinely an invitation.
 - **Multilingual embeddings.** e5, because letters are EN but RU postings must still embed
   sensibly. Decided `intfloat/multilingual-e5-small`, but it is not in fastembed 0.8.0, so we run
   `intfloat/multilingual-e5-large` (same family, human-confirmed 2026-07-22). **e5 requires
@@ -198,6 +569,20 @@ docker compose run --rm --build app uv run funnel run-funnel
   gameplay/UE line so a hybrid posting ("Unreal dev with backend experience") still surfaces.
   `gameplay.md`/`techdesign.md` are dormant (refreshed from the CVs, consumed by nothing) so
   multi-profile can be revived if shipped game work appears. See `PLAN.md` §4.
+- **One identity per thing, folded once — and a per-source transaction dies quietly.**
+  `adapters/ats.py` keyed "have we probed this company?" on the raw name and the `!miss:` row
+  that occupies the unique slug on the casefolded one. `Flohealth` and `flohealth` were both in
+  the table (two boards, two spellings), so they were two companies to the first test and one to
+  the second: the second spelling was re-probed every run and every run re-inserted a row that
+  already existed. `_probe_key`/`probe_marker` are now the single fold, and the miss insert is
+  checked against the slugs already loaded — belt as well as braces, because the cost of being
+  wrong is not a duplicate row. **The IntegrityError rolled back the whole adapter's
+  transaction**, discarding every board polled and every posting fetched, so all five ATS
+  sources returned zero for **8 consecutive runs (2026-08-15 to 08-18)** while the journal said
+  only "duplicate key" on one line per source. Nothing else noticed: `ingest` catches per-source
+  errors so one bad source cannot stop the rest, which is right, and means a source can be dead
+  for days in plain sight. If a source-health check ever gets built (`funnel doctor` is the
+  place), "produced nothing for N consecutive runs" is the signal that would have caught this.
 - **Invariants are tested.** `tests/test_invariants.py` guards the boundaries above (no
   torch, no LLM outside `drafting/`+`replies/`, Gmail scope read-only, no Django, no
   hardcoded secrets). A failure there means a boundary was broken, not that the test is wrong.

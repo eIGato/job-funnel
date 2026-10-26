@@ -265,3 +265,36 @@ def test_arbeitnow_stops_at_the_end_of_a_variant(monkeypatch: pytest.MonkeyPatch
 
     assert len(asyncio.run(ArbeitnowAdapter(config).fetch())) == 2
     assert calls == 2, "must stop after the first empty page, not walk all five"
+
+
+def test_a_dropped_request_is_retried_and_a_404_is_not(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Teletype lost five runs to timeouts; an ATS slug probe must still miss in one call."""
+    import httpx
+
+    from funnel.adapters import util
+
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/flaky" and calls.count("/flaky") == 1:
+            raise httpx.ReadTimeout("", request=request)
+        if request.url.path == "/missing":
+            return httpx.Response(404)
+        return httpx.Response(200, text="ok")
+
+    real_client = httpx.AsyncClient
+
+    def client(**kw: object) -> httpx.AsyncClient:
+        return real_client(transport=httpx.MockTransport(handler), **kw)  # type: ignore[arg-type]
+
+    async def no_sleep(_s: float) -> None:
+        return None
+
+    monkeypatch.setattr(util.httpx, "AsyncClient", client)
+    monkeypatch.setattr(util.asyncio, "sleep", no_sleep)
+
+    assert asyncio.run(util.get_text("https://x/flaky")) == "ok"
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(util.get_text("https://x/missing"))
+    assert calls == ["/flaky", "/flaky", "/missing"]

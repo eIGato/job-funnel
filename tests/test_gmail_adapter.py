@@ -11,6 +11,8 @@ subject on purpose — a later "new jobs" email must parse the same way.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 from pathlib import Path
 
 import pytest
@@ -71,18 +73,51 @@ def test_wellfound_reads_the_plaintext_body_not_the_opaque_html_links() -> None:
     # Wellfound's HTML wraps each posting in a link-less tracking redirect; the real URL and id
     # live only in text/plain. Parsing must come from there.
     jobs = _jobs("wellfound")
+    assert len(jobs) == 3
+    first = jobs[0]
+    assert first.title == "Senior Python Engineer"
+    # Title and company share a line in this layout, separated by nothing but two spaces.
+    assert first.company == "Nimbus Labs"
+    assert first.is_remote is True
+    assert first.location == "Berlin, Lisbon, Remote"  # "Remote only, " prefix stripped
+    assert str(first.url) == "https://wellfound.com/jobs/4468480-senior-python-engineer"
+    assert first.external_id == "4468480"
+    # The per-recipient `?utm_content=` tracking is cut off rather than stored.
+    assert "utm_content" not in str(first.url)
+    # A single-city, non-remote posting keeps its city and is not flagged remote. Its pay is
+    # quoted in rupees and its equity as a percentage; neither may leak into the location, and
+    # neither may Wellfound's "Our take" blurb, which sits in the same card.
+    assert jobs[1].company == "Orbital Freight"
+    assert jobs[1].location == "Amsterdam"
+    assert jobs[1].is_remote is False
+    # A card with no location at all yields none, rather than the years-of-experience segment.
+    assert jobs[2].company == "District Cyber"
+    assert jobs[2].location is None
+    # The slug names the posting this one was cloned from and disagrees with the title on the
+    # card. It is kept as sent: the page resolves on the id, and guessing a slug is worse.
+    assert str(jobs[2].url) == "https://wellfound.com/jobs/4507438-senior-ml-engineer-clone"
+    assert jobs[2].external_id == "4507438"
+
+
+def test_wellfound_still_reads_the_layout_it_used_before_august_2026() -> None:
+    """Both templates are in circulation from the same address, interleaved by date.
+
+    Wellfound began rolling the new one out on 2026-08-05 and was still sending the old one on
+    08-19. The parser read only the old shape until 2026-08-22, so nine alerts back to 07-23
+    yielded nothing; this pins the old shape down so fixing that did not trade one for the other.
+    """
+    jobs = _jobs("wellfound_legacy")
     assert len(jobs) == 2
     first = jobs[0]
     assert first.title == "Senior Python Engineer"
     assert first.company == "Nimbus Labs"  # taken from the "Company / N Employees" line
     assert first.is_remote is True
-    assert first.location == "Berlin, Lisbon, Remote"  # "Remote only, " prefix stripped
+    assert first.location == "Berlin, Lisbon, Remote"
     assert (
         str(first.url)
         == "https://wellfound.com/jobs?job_listing_slug=4468480-senior-python-engineer"
     )
     assert first.external_id == "4468480"
-    # A single-city, non-remote posting keeps its city and is not flagged remote.
     assert jobs[1].company == "Orbital Freight"
     assert jobs[1].location == "Amsterdam"
     assert jobs[1].is_remote is False
@@ -147,8 +182,94 @@ def test_landing_jobs_decodes_the_click_redirect_and_splits_title_from_company()
     assert all("/at/" in str(job.url) for job in jobs)
 
 
+def test_justjoin_counts_the_card_in_from_both_ends_in_either_language() -> None:
+    # justjoin mails the identical card layout in English (no-reply@) and in Polish
+    # (jobs@hello.), so the fields are taken by position: head company/city/title, tail work
+    # mode/contract/seniority/days/apply. The salary line between them is optional, which is
+    # what counting from both ends absorbs.
+    jobs = _jobs("justjoin")
+    assert len(jobs) == 3  # the banner and the "Show job offers" / unsubscribe links are not cards
+    first = jobs[0]
+    assert first.company == "Acme Robotics"
+    assert first.title == "Senior Python Engineer"
+    assert first.location == "Warszawa"
+    assert first.is_remote is True  # the "Remote" chip, not the title
+    # The stored URL drops the tracking query — justjoin concatenates two of them onto one href.
+    assert str(first.url) == (
+        "https://justjoin.it/job-offer/acme-robotics-senior-python-engineer-warszawa-python"
+    )
+    assert first.external_id == "acme-robotics-senior-python-engineer-warszawa-python"
+    # Polish card: "Praca hybrydowa" is not remote, and the localized labels are never read.
+    assert jobs[1].company == "Globex Systems"
+    assert jobs[1].location == "Kraków"
+    assert jobs[1].is_remote is False
+    # A card with no salary line is one shorter; the tail still lands on the work mode.
+    assert jobs[2].company == "Initech"
+    assert jobs[2].is_remote is True  # "Praca w pełni zdalna"
+
+
+def test_pracuj_groups_anchors_by_offer_id_and_recovers_the_city() -> None:
+    # A pracuj card is several anchors on the *same* offer link: title, an optional pay line,
+    # then the employer. The city is in neither — it is appended to the company name in the
+    # rendered text and subtracted back off here.
+    jobs = _jobs("pracuj")
+    assert len(jobs) == 3
+    first = jobs[0]
+    assert first.title == "Senior Python Engineer"  # the "!" badge chip was stripped
+    assert first.company == "Acme Robotics"  # not the pay line above it
+    assert first.location == "Warszawa"
+    assert str(first.url) == (
+        "https://pracuj.pl/praca/senior-python-engineer-warszawa,oferta,1004994023"
+    )
+    assert first.external_id == "1004994023"
+    # A card with no pay anchor at all: the employer is still the last text.
+    assert jobs[1].company == "Globex | Elavon"
+    assert jobs[1].location == "Warszawa (Mokotów)"
+    # Same employer twice in one mail: the second card takes its *own* line, not the first's.
+    assert jobs[2].company == "Acme Robotics"
+    assert jobs[2].location == "Kraków"
+    assert jobs[2].is_remote is True  # nothing but the title says so; the alert has no work mode
+
+
+def test_a_justjoin_application_receipt_is_indistinguishable_to_the_parser() -> None:
+    """The receipt is held out by the Gmail query, never by the parser — this pins down why.
+
+    `no-reply@justjoin.it` sends both the daily alert and the "You applied for X" receipt, and
+    the receipt carries a "similar offers" block in the identical card markup. So the parser
+    reads postings out of it and the message would become trash-eligible; the exclusion has to
+    live in the source query (`seeds.py`), and this test fails the day someone tries to move it
+    into the parser instead.
+    """
+    html = (FIXTURES / "justjoin.eml").read_text(encoding="utf-8").split("\n\n", 1)[1]
+    receipt = "<p>Your application has been sent!</p>" + html
+    assert len(parse_message("no-reply@justjoin.it", receipt)) == 3
+
+
+def test_pracuj_is_keyed_on_the_alert_host_not_the_domain() -> None:
+    """`noreply@aplikacje.pracuj.pl` mails per-application news with a card block under it.
+
+    Parsing that on the domain would turn one acknowledgement into a dozen postings and — with
+    `GMAIL_TRASH_PARSED_ALERTS` on — Trash it. Only `wysylka.pracuj.pl` is an alert host.
+    """
+    html = (FIXTURES / "pracuj.eml").read_text(encoding="utf-8").split("\n\n", 1)[1]
+    assert len(parse_message("rekomendacje@wysylka.pracuj.pl", html)) == 3
+    assert parse_message("noreply@aplikacje.pracuj.pl", html) == []
+
+
 def test_content_hashes_are_distinct_within_a_message() -> None:
-    for name in ("hh", "habr", "linkedin", "wellfound", "glassdoor", "indeed", "landing.jobs"):
+    for name in (
+        "hh",
+        "habr",
+        "linkedin",
+        "wellfound",
+        "wellfound_legacy",
+        "wellfound_wrapped",
+        "glassdoor",
+        "indeed",
+        "landing.jobs",
+        "justjoin",
+        "pracuj",
+    ):
         jobs = _jobs(name)
         hashes = [j.content_hash_for(1) for j in jobs]
         assert len(set(hashes)) == len(hashes)
@@ -211,6 +332,10 @@ class _DeadCreds:
     valid = False
     expired = True
     refresh_token = "stale"
+
+    def has_scopes(self, _scopes: list[str]) -> bool:
+        """Granted the scopes asked for; this stub is about revocation, not scope drift."""
+        return True
 
     def refresh(self, _request: object) -> None:
         from google.auth.exceptions import RefreshError
@@ -301,3 +426,373 @@ def test_a_malformed_token_is_reported_clearly_when_non_interactive(
 
     with pytest.raises(RuntimeError, match="auth-gmail"):
         gmail.get_credentials(interactive=False)
+
+
+# --------------------------------------------------------------------------------------
+# Trashing parsed alerts. The whole risk here is deleting an email whose postings never
+# reached the database, so these drive the two halves of that: which ids `fetch` marks as
+# eligible, and whether `on_committed` acts on them at all.
+# --------------------------------------------------------------------------------------
+
+_JUNK_EMAIL = (
+    b"From: newsletter@example.com\r\nSubject: Sale\r\n"
+    b'Content-Type: text/html; charset="utf-8"\r\n\r\n<p>50% off</p>\r\n'
+)
+
+
+class _Call:
+    """A googleapiclient request object: everything is deferred until `.execute()`."""
+
+    def __init__(self, result: dict[str, object]) -> None:
+        self._result = result
+
+    def execute(self) -> dict[str, object]:
+        return self._result
+
+
+class _FakeMessages:
+    def __init__(self, raws: dict[str, bytes]) -> None:
+        self._raws = raws
+        self.trashed: list[str] = []
+        #: Gmail queries that select a subset. Anything not listed here matches everything,
+        #: which is what the fetch tests want; the discard tests need a query that does not.
+        self.by_query: dict[str, list[str]] = {}
+
+    def list(self, *, q: str = "", **_kw: object) -> _Call:
+        ids = self.by_query.get(q, list(self._raws))
+        return _Call({"messages": [{"id": key} for key in ids]})
+
+    def get(self, *, id: str, **_kw: object) -> _Call:
+        return _Call({"id": id, "raw": base64.urlsafe_b64encode(self._raws[id]).decode()})
+
+    def trash(self, *, id: str, **_kw: object) -> _Call:
+        self.trashed.append(id)
+        return _Call({})
+
+
+@pytest.fixture
+def fake_gmail(monkeypatch: pytest.MonkeyPatch) -> _FakeMessages:
+    """A Gmail service serving one parseable alert and one message that parses to nothing."""
+    messages = _FakeMessages({"alert-1": (FIXTURES / "hh.eml").read_bytes(), "junk-1": _JUNK_EMAIL})
+
+    class _Service:
+        @staticmethod
+        def users() -> _Service:
+            return _Service()
+
+        @staticmethod
+        def messages() -> _FakeMessages:
+            return messages
+
+    monkeypatch.setattr("funnel.adapters.gmail.gmail_service", lambda: _Service())
+    return messages
+
+
+def _with_trashing(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
+    """Redirect the settings `on_committed` reads (a function-local import of funnel.config)."""
+    import funnel.config
+    from funnel.config import Settings
+
+    monkeypatch.setattr(
+        funnel.config, "get_settings", lambda: Settings(gmail_trash_parsed_alerts=enabled)
+    )
+
+
+def test_only_messages_that_yielded_postings_are_eligible(fake_gmail: _FakeMessages) -> None:
+    """A message parsed into nothing may be a board that changed its markup, not junk."""
+    adapter = GmailAlertsAdapter({"query": "in:inbox"})
+
+    jobs = asyncio.run(adapter.fetch())
+
+    assert len(jobs) == 2  # both postings in the hh fixture
+    assert adapter.parsed_message_ids == ["alert-1"]
+
+
+def test_trashing_is_off_by_default(
+    monkeypatch: pytest.MonkeyPatch, fake_gmail: _FakeMessages
+) -> None:
+    _with_trashing(monkeypatch, enabled=False)
+    adapter = GmailAlertsAdapter({"query": "in:inbox"})
+    asyncio.run(adapter.fetch())
+
+    assert asyncio.run(adapter.on_committed()) is None
+    assert fake_gmail.trashed == []
+
+
+def test_trashing_touches_only_the_parsed_alerts(
+    monkeypatch: pytest.MonkeyPatch, fake_gmail: _FakeMessages
+) -> None:
+    _with_trashing(monkeypatch, enabled=True)
+    adapter = GmailAlertsAdapter({"query": "in:inbox"})
+    asyncio.run(adapter.fetch())
+
+    note = asyncio.run(adapter.on_committed())
+
+    assert fake_gmail.trashed == ["alert-1"], "the unparsed message must stay in the mailbox"
+    assert note is not None and "1" in note
+    # Idempotent: a second call has nothing left to act on, so a retry cannot double-trash.
+    assert asyncio.run(adapter.on_committed()) is None
+    assert fake_gmail.trashed == ["alert-1"]
+
+
+def test_nothing_is_discarded_without_a_discard_query(
+    monkeypatch: pytest.MonkeyPatch, fake_gmail: _FakeMessages
+) -> None:
+    """Empty is the default and the only safe one: this is the query that discards mail unread."""
+    _with_trashing(monkeypatch, enabled=True)
+    adapter = GmailAlertsAdapter({"query": "in:inbox"})
+    asyncio.run(adapter.fetch())
+
+    asyncio.run(adapter.on_committed())
+
+    assert fake_gmail.trashed == ["alert-1"]
+
+
+def test_the_discard_query_trashes_mail_that_was_never_parsed(
+    monkeypatch: pytest.MonkeyPatch, fake_gmail: _FakeMessages
+) -> None:
+    """The one path that Trashes a message without having got anything out of it.
+
+    `junk-1` parses to nothing, so the parsed-alerts rule deliberately leaves it alone (see
+    `test_only_messages_that_yielded_postings_are_eligible`). Naming its sender in
+    `discard_query` is the explicit override — a standing decision about an address, not an
+    inference this code makes per message.
+    """
+    _with_trashing(monkeypatch, enabled=True)
+    fake_gmail.by_query["from:newsletter@example.com"] = ["junk-1"]
+    adapter = GmailAlertsAdapter(
+        {"query": "in:inbox", "discard_query": "from:newsletter@example.com"}
+    )
+    asyncio.run(adapter.fetch())
+
+    note = asyncio.run(adapter.on_committed())
+
+    assert sorted(fake_gmail.trashed) == ["alert-1", "junk-1"]
+    assert note is not None and "1 parsed" in note and "1 discarded unread" in note
+
+
+def test_the_discard_query_is_still_gated_on_the_setting(
+    monkeypatch: pytest.MonkeyPatch, fake_gmail: _FakeMessages
+) -> None:
+    """One consent switch for everything this system does to the mailbox, not two."""
+    _with_trashing(monkeypatch, enabled=False)
+    fake_gmail.by_query["from:newsletter@example.com"] = ["junk-1"]
+    adapter = GmailAlertsAdapter(
+        {"query": "in:inbox", "discard_query": "from:newsletter@example.com"}
+    )
+    asyncio.run(adapter.fetch())
+
+    assert asyncio.run(adapter.on_committed()) is None
+    assert fake_gmail.trashed == []
+
+
+def test_a_stuck_id_does_not_keep_the_others_in_the_inbox(
+    monkeypatch: pytest.MonkeyPatch, fake_gmail: _FakeMessages
+) -> None:
+    _with_trashing(monkeypatch, enabled=True)
+    adapter = GmailAlertsAdapter()
+    adapter.parsed_message_ids = ["boom", "alert-1"]
+
+    real_trash = fake_gmail.trash
+
+    def _trash(*, id: str, **_kw: object) -> _Call:
+        if id == "boom":
+            raise RuntimeError("503")
+        return real_trash(id=id)
+
+    monkeypatch.setattr(fake_gmail, "trash", _trash)
+
+    note = asyncio.run(adapter.on_committed())
+
+    assert fake_gmail.trashed == ["alert-1"]
+    assert note is not None and "1 failed (RuntimeError: 503 x1)" in note
+
+
+def test_a_token_missing_the_new_scope_is_refused(
+    monkeypatch: pytest.MonkeyPatch, gmail_paths: tuple[Path, Path]
+) -> None:
+    """Turning on trashing widens the scope; the old token cannot be upgraded in place.
+
+    Google answers a call the token has no scope for with a bare 403 insufficientPermissions,
+    at whichever call happens to need it first. Catching the mismatch here turns that into the
+    one instruction that fixes it.
+    """
+    import funnel.config
+    from funnel.adapters import gmail
+    from funnel.config import Settings
+
+    token, secret = gmail_paths
+    monkeypatch.setattr(
+        funnel.config,
+        "get_settings",
+        lambda: Settings(
+            gmail_token_path=token, gmail_credentials_path=secret, gmail_trash_parsed_alerts=True
+        ),
+    )
+    token.write_text('{"refresh_token": "fine"}', encoding="utf-8")
+
+    class _NarrowCreds(_FreshCreds):
+        def has_scopes(self, _scopes: list[str]) -> bool:
+            return False  # minted for gmail.readonly
+
+    monkeypatch.setattr(
+        "google.oauth2.credentials.Credentials.from_authorized_user_file",
+        staticmethod(lambda *_a, **_kw: _NarrowCreds()),
+    )
+
+    with pytest.raises(RuntimeError, match="auth-gmail"):
+        gmail.get_credentials(interactive=False)
+
+
+def test_trash_failures_are_grouped_by_cause_not_by_message() -> None:
+    """An HttpError's text embeds the URL, and so the message id; the note must not."""
+    import httplib2
+    from googleapiclient.errors import HttpError
+
+    from funnel.adapters.gmail import failure_reason
+
+    def _error(message_id: str) -> HttpError:
+        resp = httplib2.Response({"status": "400"})
+        body = b'{"error": {"code": 400, "message": "Precondition check failed."}}'
+        return HttpError(resp, body, uri=f"https://gmail.googleapis.com/m/{message_id}/trash")
+
+    assert failure_reason(_error("a")) == failure_reason(_error("b"))
+    assert failure_reason(_error("a")) == "HTTP 400 Precondition check failed."
+
+
+def _http_error(status: int, message: str, reason: str = "") -> Exception:
+    import httplib2
+    from googleapiclient.errors import HttpError
+
+    errors = f', "errors": [{{"reason": "{reason}"}}]' if reason else ""
+    body = f'{{"error": {{"code": {status}, "message": "{message}"{errors}}}}}'.encode()
+    return HttpError(httplib2.Response({"status": str(status)}), body, uri="https://x/m/1")
+
+
+class _Flaky:
+    """A request object failing with `errors` in turn before it answers."""
+
+    def __init__(self, *errors: Exception) -> None:
+        self._errors = list(errors)
+        self.calls = 0
+
+    def execute(self) -> dict[str, object]:
+        self.calls += 1
+        if self._errors:
+            raise self._errors.pop(0)
+        return {"ok": True}
+
+
+_QUOTA = "Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per minute per user'"
+
+
+def test_the_per_minute_quota_is_waited_out() -> None:
+    """The failure that kept every parsed alert in the inbox from 2026-09-18 to 10-17."""
+    from funnel.adapters.gmail import execute
+
+    request = _Flaky(_http_error(403, _QUOTA), _http_error(429, "Too many requests"))
+    slept: list[float] = []
+
+    assert execute(request, sleep=slept.append) == {"ok": True}
+    assert request.calls == 3
+    assert len(slept) == 2 and all(0 <= s <= 60 for s in slept)
+
+
+def test_a_rate_limit_reason_is_retried_whatever_the_message_says() -> None:
+    from funnel.adapters.gmail import execute
+
+    request = _Flaky(_http_error(403, "Slow down", reason="userRateLimitExceeded"))
+
+    assert execute(request, sleep=lambda _s: None) == {"ok": True}
+
+
+def test_a_forbidden_call_is_not_retried() -> None:
+    """A 403 for a missing scope will be a 403 in a minute too; waiting only hides it."""
+    from googleapiclient.errors import HttpError
+
+    from funnel.adapters.gmail import execute
+
+    request = _Flaky(_http_error(403, "Insufficient Permission", reason="insufficientPermissions"))
+
+    with pytest.raises(HttpError):
+        execute(request, sleep=lambda _s: pytest.fail("must not wait"))
+    assert request.calls == 1
+
+
+def test_retries_give_up_and_raise() -> None:
+    from googleapiclient.errors import HttpError
+
+    from funnel.adapters.gmail import execute
+
+    request = _Flaky(*[_http_error(503, "Backend Error") for _ in range(5)])
+
+    with pytest.raises(HttpError):
+        execute(request, attempts=3, sleep=lambda _s: None)
+    assert request.calls == 3
+
+
+def test_either_trash_switch_asks_for_the_modify_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    import funnel.config
+    from funnel.adapters.gmail import GMAIL_MODIFY_SCOPE, GMAIL_READONLY_SCOPE, gmail_scopes
+    from funnel.config import Settings
+
+    for alerts, rejections, expected in (
+        (False, False, GMAIL_READONLY_SCOPE),
+        (True, False, GMAIL_MODIFY_SCOPE),
+        (False, True, GMAIL_MODIFY_SCOPE),
+    ):
+        settings = Settings(gmail_trash_parsed_alerts=alerts, gmail_trash_rejections=rejections)
+        monkeypatch.setattr(funnel.config, "get_settings", lambda s=settings: s)
+        assert gmail_scopes() == [expected]
+
+
+def test_the_backlog_drops_the_window_and_reads_every_page(
+    monkeypatch: pytest.MonkeyPatch, fake_gmail: _FakeMessages
+) -> None:
+    """The source's sender list, any age: what the 30-day `fetch` can no longer see."""
+    from funnel.adapters.gmail import alert_backlog
+
+    #: Gmail's parameter is camelCase, so the fake takes it by keyword dict.
+    pages = {
+        None: {"messages": [{"id": "alert-1"}], "nextPageToken": "p2"},
+        "p2": {"messages": [{"id": "junk-1"}]},
+    }
+    asked: list[tuple[object, object]] = []
+
+    def _list(**kw: object) -> _Call:
+        asked.append((kw["q"], kw.get("pageToken")))
+        return _Call(pages[kw.get("pageToken")])  # type: ignore[index]
+
+    monkeypatch.setattr(fake_gmail, "list", _list)
+
+    backlog = list(alert_backlog({"query": "newer_than:30d (from:hh.ru OR from:x.com)"}))
+
+    assert [(m, len(jobs)) for m, jobs in backlog] == [("alert-1", 2), ("junk-1", 0)]
+    query = "in:inbox (from:hh.ru OR from:x.com)"
+    assert asked == [(query, None), (query, "p2")]
+
+
+def test_wellfound_reads_a_title_that_wrapped_and_a_company_with_no_headcount() -> None:
+    """Both shapes yielded nothing until 2026-10-19: two of three alerts sat in the inbox.
+
+    The wrapped title comes in both of its encodings — the boundary's spaces left at the end of
+    the line, and the next line opening with one after the decoder stripped the trailing one.
+    """
+    jobs = _jobs("wellfound_wrapped")
+
+    assert [(j.title, j.company) for j in jobs] == [
+        (
+            "Senior FastAPI Backend Developer - Contract Role with Opportunity for Full-Time",
+            "Genie Labs",
+        ),
+        ("Backend Engineer | Remote", "https://crossing.example.com/"),
+        (
+            "Agentic Systems Architect - Contract Role with Opportunity for Full-Time",
+            "Genie Labs",
+        ),
+    ]
+    # A wrapped location is one location; the line break is not a field boundary.
+    assert jobs[0].location == "Bengaluru, Bangalore Rural"
+    assert jobs[0].is_remote is False
+    assert jobs[1].is_remote is True  # said in the title, not in a location run
+    assert [j.external_id for j in jobs] == ["4791870", "4819009", "4683445"]

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import typer
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, select, update
 
 from funnel import adapters
 from funnel.config import get_settings
@@ -16,9 +17,13 @@ from funnel.models import Job, Source
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import numpy as np
+    from numpy.typing import NDArray
     from sqlalchemy import ColumnElement, Select
     from sqlalchemy.orm import InstrumentedAttribute, Session
 
+    from funnel.models import Application, Reply
+    from funnel.replies.inbox import IncomingMessage
     from funnel.schemas import NormalizedJob
 
 app = typer.Typer(
@@ -33,6 +38,27 @@ app = typer.Typer(
 #: throwing away the whole pass. Independent of the ONNX batch size (config), which is about
 #: peak memory rather than durability.
 _SCORE_CHUNK = 100
+
+#: Below this many characters of body, the batch does not draft for a posting — the admin's
+#: "Screen & draft letter" button does, after the human has pasted the real text into the row.
+#:
+#: A letter written from a title and a company name is a letter about nothing, and that is what
+#: the top of the shortlist was spending its slots on: of the 554 rows above the floor on
+#: 2026-08-06, 124 had an empty body (gmail alerts carry a subject line and a link, no posting)
+#: and 71 more were a single short line — a technology tag list, or arbeitnow's 46-character
+#: stub. Together 36% of every shortlist, one screening call and one useless letter apiece.
+#:
+#: A length floor, not "the body has no newline in it". Adzuna serves its teaser as one
+#: unbroken paragraph, and those 500 characters are real: salary, requirements, stack. The
+#: literal reading would have dropped 68 of them along with the junk. The exact value is not
+#: load-bearing either — measured over the same rows, nothing at all has a body between 162 and
+#: 369 characters, so any floor in that gap selects the identical 197 rows.
+#:
+#: This is a *selection* rule, like the apply-route exclusion below it: the row keeps its score
+#: and its rank, `funnel draft --job <id>` and the admin button still draft for it on demand.
+#: The hard filters deliberately have no minimum-body rule (see `matching/filters.py`) — a terse
+#: posting is still a real posting, and throwing it out would put it beyond the button's reach.
+MIN_DRAFTABLE_BODY = 300
 
 
 def _role_key(column: InstrumentedAttribute[str]) -> ColumnElement[str]:
@@ -97,6 +123,20 @@ def shortlist_select(
     2026-08-03 shortlist opened with EuroCert five times, Rose International four and STAFIDE
     twice, twelve slots for six roles. The highest-scoring row of a role represents it, which
     also picks the best of a board's per-city variants.
+
+    **A posting the human cannot apply to takes no slot** (`matching/apply_route.py`). Some
+    boards' links are dead ends — a site that answers 403 from where the human lives, an apply
+    button behind a paywall — and 131 of the ~640 rows above the floor were such links on
+    2026-08-05, a fifth of the shortlist spent on letters that could not be sent. This is the
+    only place that acts on it: the rows stay scored, because they hold the corpus centre steady
+    and because they are what ATS discovery probes for a company's own board (its link is the
+    direct one).
+
+    **A posting with too little text to write from takes no slot either**
+    (`MIN_DRAFTABLE_BODY`). An empty or one-line body yields a letter about nothing, and 197 of
+    the 554 rows above the floor were such bodies on 2026-08-06. The admin's per-row button is
+    what these are for: the human pastes the real description into the row and draws the letter
+    from there, which is exactly the loop that button was added for.
     """
     from sqlalchemy import desc
     from sqlalchemy.orm import aliased
@@ -129,6 +169,8 @@ def shortlist_select(
         .where(
             Job.match_score.isnot(None),
             Job.hard_filter_passed.is_(True),
+            Job.apply_blocked.is_(False),
+            func.length(func.trim(Job.description)) >= MIN_DRAFTABLE_BODY,
             Job.match_percentile >= floor,
             ~role_is_handled,
         )
@@ -146,6 +188,25 @@ def shortlist_select(
         .where(roles.c.company_rank <= per_company)
         .order_by(desc(roles.c.rank_score))
         .limit(top_n)
+    )
+
+
+def _reply_row(message: IncomingMessage, application: Application | None) -> Reply:
+    """The record of one incoming email, without a verdict on it yet.
+
+    Separate from the classification on purpose: a board's bulk alert gets a row and no model
+    call, so it stays visible in the admin and stays out of the bill.
+    """
+    from funnel.models import Reply
+
+    return Reply(
+        application_id=application.id if application else None,
+        gmail_message_id=message.gmail_message_id,
+        thread_id=message.thread_id or None,
+        from_address=message.from_address,
+        subject=message.subject,
+        body=message.body,
+        received_at=message.received_at,
     )
 
 
@@ -190,13 +251,15 @@ def _persist(session: Session, source: Source, fetched: list[NormalizedJob]) -> 
 @app.command()
 def ingest() -> None:
     """Collect postings from every enabled source. Re-running creates no duplicates."""
+    total = 0
+    used: list[tuple[str, adapters.BaseAdapter]] = []
+
     with session_scope() as session:
         sources = session.scalars(select(Source).where(Source.enabled.is_(True))).all()
         if not sources:
             typer.secho("No enabled sources. Add them in the admin.", fg=typer.colors.YELLOW)
             raise typer.Exit(0)
 
-        total = 0
         for source in sources:
             try:
                 adapter = adapters.get_adapter(source)
@@ -205,14 +268,32 @@ def ingest() -> None:
                 typer.secho(f"  {source.name}: not implemented ({exc})", fg=typer.colors.YELLOW)
                 continue
             except Exception as exc:  # one broken source must not sink the whole run
-                typer.secho(f"  {source.name}: ERROR {exc}", fg=typer.colors.RED)
+                # The type as well as the text: an httpx timeout stringifies to "", and
+                # "teletype: ERROR" on five runs running said nothing about why.
+                typer.secho(
+                    f"  {source.name}: ERROR {type(exc).__name__}: {exc}", fg=typer.colors.RED
+                )
                 continue
 
             new = _persist(session, source, fetched)
             total += new
+            used.append((source.name, adapter))
             typer.echo(f"  {source.name}: fetched {len(fetched)}, new {new}")
 
-        typer.secho(f"ingest: +{total} postings", fg=typer.colors.GREEN)
+    # Outside the transaction, and only because it committed: this is where an adapter is
+    # allowed a side effect on its source that a rollback could not take back — Gmail's
+    # trashes the alerts it parsed (BaseAdapter.on_committed). A source that failed above
+    # never reached `used`, so nothing is cleaned up on its behalf.
+    for name, adapter in used:
+        try:
+            note = asyncio.run(adapter.on_committed())
+        except Exception as exc:  # housekeeping must not fail a run whose postings are saved
+            typer.secho(f"  {name}: post-commit ERROR {exc}", fg=typer.colors.RED)
+            continue
+        if note:
+            typer.echo(f"  {name}: {note}")
+
+    typer.secho(f"ingest: +{total} postings", fg=typer.colors.GREEN)
 
 
 @app.command()
@@ -234,72 +315,171 @@ def match() -> None:
        would produce numbers that cannot be ranked against the existing ones. Rescoring
        everything is one matmul over vectors already in the database: no model call, no
        network, milliseconds at this size. An edited profile lands on the next run too.
+
+    The table is never held in memory, which is the other half of the design: 67k rows are
+    190 MB of descriptions and 200 MB of vectors, and loading them as ORM objects took the
+    process to 1.5 GB before the 1.8 GB embedding model was even loaded alongside them (3.07 GB
+    peak, measured 2026-10-19). Filtering streams plain columns and writes back only the
+    verdicts that changed; embedding reads its texts a chunk at a time; the model is released
+    before scoring, which reads `(id, embedding)` straight into one preallocated matrix.
+    """
+    from funnel.matching.embed import centered_similarity, percentile_ranks, release_model
+    from funnel.matching.profile import get_profile_vector
+
+    scanned, needs_embedding, retired, blocked = _match_filter()
+    embedded = _match_embed(needs_embedding)
+    profile = get_profile_vector()
+    release_model()
+
+    ids, matrix = _match_population()
+    with session_scope() as session:
+        # A rejected row must not keep a score: it is off the shortlist, and leaving it in the
+        # population would also drag the centre towards postings we decided against.
+        session.execute(
+            update(Job)
+            .where(Job.hard_filter_passed.is_(False), Job.match_score.is_not(None))
+            .values(match_score=None, match_percentile=None)
+        )
+        if not ids:
+            typer.secho(
+                f"match: {scanned} scanned, 0 passed the hard filters", fg=typer.colors.YELLOW
+            )
+            return
+        scores = centered_similarity(matrix, profile)
+        percentiles = percentile_ranks(scores)
+        session.execute(
+            update(Job),
+            [
+                {"id": job_id, "match_score": float(score), "match_percentile": float(pct)}
+                for job_id, score, pct in zip(ids, scores, percentiles, strict=True)
+            ],
+        )
+
+    typer.secho(
+        f"match: {scanned} scanned, {embedded} newly embedded, "
+        f"{len(ids)} scored ({scanned - len(ids)} filtered out"
+        + (f", {retired} newly retired" if retired else "")
+        + (f", {blocked} scored but unapplyable" if blocked else "")
+        + f"), top score {float(scores.max()):.3f}",
+        fg=typer.colors.GREEN,
+    )
+
+
+#: Rows per round trip when `match` streams the table.
+_STREAM_ROWS = 2000
+
+
+def _match_filter() -> tuple[int, list[int], int, int]:
+    """Pass 1: re-judge every row. Returns (scanned, ids to embed, newly retired, blocked).
+
+    Streams the columns the filters read, not `Job` objects, and never the embedding blob — a
+    `Row` has the attributes `passes_hard_filters` reads, which is all its protocol asks for.
+    Only a verdict that changed is written, so a run where no rule changed writes nothing.
+    """
+    from funnel.matching.apply_route import is_blocked
+    from funnel.matching.filters import passes_hard_filters
+
+    columns = select(
+        Job.id,
+        Job.title,
+        Job.description,
+        Job.location,
+        Job.is_remote,
+        Job.url,
+        Job.hard_filter_passed,
+        Job.apply_blocked,
+        Job.embedding.is_(None).label("unembedded"),
+    ).execution_options(yield_per=_STREAM_ROWS)
+
+    scanned = retired = blocked = 0
+    needs_embedding: list[int] = []
+    changed: list[dict[str, Any]] = []
+    with session_scope() as session:
+        for row in session.execute(columns):
+            scanned += 1
+            passed = passes_hard_filters(row)
+            # Scored like everything else, but off the shortlist: no apply route (see
+            # matching/apply_route.py). Recomputed here rather than at ingest so a change to
+            # the host list lands on the whole table at once.
+            no_route = is_blocked(row.url)
+            retired += row.hard_filter_passed and not passed
+            blocked += no_route and passed
+            if passed and row.unembedded:
+                needs_embedding.append(row.id)
+            if (passed, no_route) != (row.hard_filter_passed, row.apply_blocked):
+                changed.append(
+                    {"id": row.id, "hard_filter_passed": passed, "apply_blocked": no_route}
+                )
+        if changed:
+            session.execute(update(Job), changed)
+    return scanned, needs_embedding, retired, blocked
+
+
+def _match_embed(job_ids: list[int]) -> int:
+    """Pass 2: embed the rows that passed and have no vector yet, one committed chunk at a time.
+
+    Each chunk reads its texts, embeds them with no transaction open, and writes in a
+    transaction of its own — the model is minutes of CPU on a backlog, and nothing should hold
+    a connection across it. The write is conditional on the row still having no vector, so a
+    second `match` running alongside cannot be overwritten by this one.
+    """
+    from funnel.matching.embed import embed_texts, to_bytes
+
+    done = 0
+    for start in range(0, len(job_ids), _SCORE_CHUNK):
+        chunk = job_ids[start : start + _SCORE_CHUNK]
+        with session_scope() as session:
+            rows = session.execute(
+                select(Job.id, Job.title, Job.company, Job.description).where(Job.id.in_(chunk))
+            ).all()
+        # Postings are the passage side of the e5 pair; the profile is the query side.
+        texts = [f"{r.title}\n{r.company}\n{r.description}".strip() for r in rows]
+        vectors = embed_texts(texts, is_query=False)
+        with session_scope() as session:
+            for row, vector in zip(rows, vectors, strict=True):
+                session.execute(
+                    update(Job)
+                    .where(Job.id == row.id, Job.embedding.is_(None))
+                    .values(embedding=to_bytes(vector))
+                )
+        done += len(rows)
+        typer.echo(f"  embedded {done}/{len(job_ids)}")
+    return done
+
+
+def _match_population() -> tuple[list[int], NDArray[np.float32]]:
+    """Pass 3's input: the ids and vectors of every row that passed, as one float32 matrix.
+
+    The count and the rows come from one `REPEATABLE READ` snapshot so the preallocated matrix
+    is exactly the right size, and each vector is copied straight into its row — no list of
+    67k small arrays and no `vstack` doubling the peak.
     """
     import numpy as np
 
-    from funnel.matching.embed import (
-        centered_similarity,
-        embed_texts,
-        from_bytes,
-        percentile_ranks,
-        to_bytes,
-    )
-    from funnel.matching.filters import passes_hard_filters
-    from funnel.matching.profile import get_profile_vector
+    from funnel.db import snapshot_scope
+    from funnel.matching.embed import from_bytes
 
-    with session_scope() as session:
-        every = session.scalars(select(Job)).all()
-
-        retired = 0
-        needs_embedding: list[Job] = []
-        for job in every:
-            passed = passes_hard_filters(job)
-            if job.hard_filter_passed and not passed:
-                retired += 1
-            job.hard_filter_passed = passed
-            if passed and job.embedding is None:
-                needs_embedding.append(job)
-
-        # Postings are the passage side of the e5 pair; the profile is the query side.
-        for start in range(0, len(needs_embedding), _SCORE_CHUNK):
-            chunk = needs_embedding[start : start + _SCORE_CHUNK]
-            texts = [f"{j.title}\n{j.company}\n{j.description}".strip() for j in chunk]
-            for job, vector in zip(chunk, embed_texts(texts, is_query=False), strict=True):
-                job.embedding = to_bytes(vector)
-            session.commit()
-            typer.echo(f"  embedded {start + len(chunk)}/{len(needs_embedding)}")
-
-        # A rejected row must not keep a score: it is off the shortlist, and leaving it in the
-        # population would also drag the centre towards postings we decided against.
-        population = [j for j in every if j.hard_filter_passed and j.embedding is not None]
-        for job in every:
-            if job.hard_filter_passed is False:
-                job.match_score = None
-                job.match_percentile = None
-        if not population:
-            session.commit()
-            typer.secho(
-                f"match: {len(every)} scanned, 0 passed the hard filters", fg=typer.colors.YELLOW
-            )
-            return
-
-        # One float32 matrix of the whole shortlist: 1024 dims is ~4 KB a row, so a few thousand
-        # postings is a few MB. Chunk this only if the table grows by an order of magnitude.
-        matrix = np.vstack([from_bytes(job.embedding) for job in population if job.embedding])
-        scores = centered_similarity(matrix, get_profile_vector())
-        percentiles = percentile_ranks(scores)
-        for job, score, percentile in zip(population, scores, percentiles, strict=True):
-            job.match_score = float(score)
-            job.match_percentile = float(percentile)
-        session.commit()
-
-        typer.secho(
-            f"match: {len(every)} scanned, {len(needs_embedding)} newly embedded, "
-            f"{len(population)} scored ({len(every) - len(population)} filtered out"
-            + (f", {retired} newly retired" if retired else "")
-            + f"), top score {float(scores.max()):.3f}",
-            fg=typer.colors.GREEN,
+    population = (Job.hard_filter_passed.is_(True), Job.embedding.is_not(None))
+    with snapshot_scope() as session:
+        count = session.scalar(select(func.count()).select_from(Job).where(*population)) or 0
+        if not count:
+            return [], np.empty((0, 0), dtype=np.float32)
+        ids: list[int] = []
+        matrix: NDArray[np.float32] | None = None
+        rows = session.execute(
+            select(Job.id, Job.embedding)
+            .where(*population)
+            .order_by(Job.id)
+            .execution_options(yield_per=_STREAM_ROWS)
         )
+        for i, (job_id, blob) in enumerate(rows):
+            vector = from_bytes(blob)
+            if matrix is None:
+                matrix = np.empty((count, vector.size), dtype=np.float32)
+            matrix[i] = vector
+            ids.append(job_id)
+    assert matrix is not None
+    return ids, matrix
 
 
 def _screen_and_draft(session: Session, job: Job, *, do_screen: bool) -> str:
@@ -346,12 +526,14 @@ def draft(
     Measured 2026-08-03 — all 25 slots held a decided row and `draft` had been a silent no-op
     for days, with 2853 ingested postings behind 49 shortlist entries.
 
-    `--job <id>` is the deliberate exception, and the only way to redo a decided posting. Some
-    boards serve a teaser rather than a posting — RemoteOK republishes LinkedIn snippets that
-    break off at "Job Summary: In this…", 121 characters with nothing in them to write a letter
-    from. Paste the real description into the row in the admin, then name the row here: it is
-    re-screened and re-drafted from the text as it now stands, rank and existing status
-    ignored. Nothing is sent, here as everywhere (invariant 2).
+    A posting with under `MIN_DRAFTABLE_BODY` characters of body is passed over as well: some
+    boards serve a teaser rather than a posting, and a gmail alert carries no body at all. The
+    batch has nothing to write from, so it writes nothing and leaves the row for the human.
+
+    `--job <id>` is that row's way back in, and the only way to redo a decided posting. Paste
+    the real description into the row in the admin — or press "Screen & draft letter" there,
+    which runs this same step — and the letter follows from the text as it now stands, rank and
+    existing status ignored. Nothing is sent, here as everywhere (invariant 2).
     """
     settings = get_settings()
     if not (settings.llm_api_key and settings.llm_api_key.get_secret_value()):
@@ -447,13 +629,16 @@ def agent_draft(
     deps = build_agent_deps(do_research=research)
 
     with session_scope() as session:
-        # Same quality floor as `draft`. This pass is four model calls and a web search per
-        # posting, so spending it below the floor is the more expensive version of the mistake.
+        # Same quality floor as `draft`, and the same apply-route rule: this pass is four model
+        # calls and a web search per posting, so spending it below the floor — or on a posting
+        # with no way to apply (`matching/apply_route.py`) — is the expensive version of the
+        # mistake `draft` would have made for one call.
         jobs = session.scalars(
             select(Job)
             .where(
                 Job.match_score.isnot(None),
                 Job.hard_filter_passed.is_(True),
+                Job.apply_blocked.is_(False),
                 Job.match_percentile >= settings.match_percentile_threshold,
             )
             .order_by(desc(Job.is_remote), desc(Job.match_score))
@@ -514,22 +699,16 @@ def agent_draft(
 def check_replies(
     days: int = typer.Option(None, help="How far back to scan the mailbox."),
 ) -> None:
-    """Pull replies, classify them, and update the funnel. Reads mail only; sends nothing.
+    """Pull replies, classify them, and update the funnel. Sends nothing.
 
-    Three passes, and every one of them refuses to guess:
-
-    1. **Link.** For applications the human marked `sent` but that have no thread yet, look in
-       Sent mail for the message they sent. Only an unambiguous hit is stored.
-    2. **Fetch.** Read incoming mail, skipping any message already recorded — `check-replies`
-       is idempotent and never re-bills a classification.
-    3. **Classify and apply.** An unmatched reply, or one classified below
-       `reply_confidence_threshold`, is stored for review but leaves the Application status
-       untouched. A wrong auto-status would hide a real interview; an unread row would not.
+    The passes and their transaction boundaries are in `replies.scan`. With the trash switches
+    on, the mailbox is tidied after every write has committed: hh notices that answer no
+    application on file, and the incoming mail of each conversation this scan moved to
+    REJECTED (`funnel tidy-mailbox` sweeps the ones it did not).
     """
-    from funnel.models import Application, ApplicationStatus, Reply, ReplyType
     from funnel.replies.classify import classify_reply
-    from funnel.replies.inbox import build_service, fetch_recent, find_sent_thread
-    from funnel.replies.match import match_reply
+    from funnel.replies.inbox import build_service
+    from funnel.replies.scan import ReplyScan, clear_mailbox
 
     settings = get_settings()
     if not (settings.llm_api_key and settings.llm_api_key.get_secret_value()):
@@ -541,101 +720,89 @@ def check_replies(
         raise typer.Exit(1)
 
     service = build_service()
-    lookback = days or settings.reply_lookback_days
+    scan = ReplyScan(service, classify_reply, threshold=settings.reply_confidence_threshold)
+    report = scan.run(days=days or settings.reply_lookback_days)
+    for line in report.lines:
+        typer.echo(f"  {line}")
+    typer.secho(
+        f"check-replies: {report.fresh} new, {report.applied} applied, "
+        f"{report.hh_rejections} hh rejections applied, "
+        f"{report.uncertain} below threshold, {report.weak} linked without a status, "
+        f"{report.unmatched} unmatched, {report.bulk} board alerts unclassified, "
+        f"{report.skipped} unrelated skipped, {report.errors} errors, "
+        f"{report.threads_linked} threads linked, {report.relinked} stored replies relinked",
+        fg=typer.colors.GREEN,
+    )
+    if report.unmatched or report.uncertain:
+        typer.echo("  Review them in the admin under Replies (unmatched have no Application).")
+
+    # A failure here loses nothing: every write above has committed.
+    try:
+        for line in clear_mailbox(
+            service,
+            report,
+            trash_alerts=settings.gmail_trash_parsed_alerts,
+            trash_rejections=settings.gmail_trash_rejections,
+        ):
+            typer.echo(f"  {line}")
+    except Exception as exc:
+        typer.secho(f"  mailbox: ERROR {type(exc).__name__}: {exc}", fg=typer.colors.RED)
+
+
+@app.command(name="tidy-mailbox")
+def tidy_mailbox(
+    apply: bool = typer.Option(
+        False, "--apply", help="Move the messages to Trash. Without it, only count them."
+    ),
+) -> None:
+    """Clear the mail backlog the per-run cleanup never reaches. A dry run unless --apply.
+
+    Two backlogs, each behind its own consent switch: alerts in the inbox whose postings are
+    all in the table (`GMAIL_TRASH_PARSED_ALERTS`; `ingest` only reads the last 30 days), and
+    the incoming mail of every application already REJECTED (`GMAIL_TRASH_REJECTIONS`;
+    `check-replies` only clears the ones it moves itself, so a status set by hand in the admin
+    lands here). Trash only, never delete: everything is recoverable for 30 days. Safe to
+    re-run — what is already in Trash is not listed again.
+    """
+    from funnel.mailbox import clear_alert_backlog, clear_rejected_mail
+
+    settings = get_settings()
+    if settings.gmail_trash_parsed_alerts:
+        for line in clear_alert_backlog(apply=apply):
+            typer.echo(f"  {line}")
+    else:
+        typer.echo("  alerts: GMAIL_TRASH_PARSED_ALERTS is off, skipped")
+    if settings.gmail_trash_rejections:
+        typer.echo(f"  {clear_rejected_mail(None, apply=apply)}")
+    else:
+        typer.echo("  rejected mail: GMAIL_TRASH_REJECTIONS is off, skipped")
+    if not apply:
+        typer.secho("tidy-mailbox: dry run, nothing moved (pass --apply)", fg=typer.colors.YELLOW)
+
+
+@app.command(name="relink-replies")
+def relink_replies() -> None:
+    """Re-match stored replies against today's applications. Touches no mail and no model.
+
+    The same pass `check-replies` ends with, on its own so it can be run after a matching rule
+    changes or after an orphan reply is turned into an application, without waiting for the
+    next scan and without a Gmail token.
+    """
+    from funnel.models import REPLYABLE_STATUSES, Application
+    from funnel.replies.link import relink_stored
 
     with session_scope() as session:
-        sent = list(
+        applications = list(
             session.scalars(
-                select(Application).where(
-                    Application.status.in_(
-                        [
-                            ApplicationStatus.SENT,
-                            ApplicationStatus.INTERVIEW,
-                            ApplicationStatus.REJECTED,
-                        ]
-                    )
-                )
+                select(Application).where(Application.status.in_(REPLYABLE_STATUSES))
             ).all()
         )
+        linked, applied = relink_stored(session, applications)
 
-        # 1. Link applications to their Gmail thread.
-        linked = 0
-        for application in sent:
-            if application.thread_id or application.sent_at is None:
-                continue
-            thread_id = find_sent_thread(
-                service, company=application.job.company, sent_at=application.sent_at
-            )
-            if thread_id:
-                application.thread_id = thread_id
-                linked += 1
-
-        # 2. Fetch what is new.
-        messages = fetch_recent(service, days=lookback)
-        seen = set(
-            session.scalars(
-                select(Reply.gmail_message_id).where(
-                    Reply.gmail_message_id.in_([m.gmail_message_id for m in messages] or [""])
-                )
-            ).all()
-        )
-        fresh = [m for m in messages if m.gmail_message_id not in seen]
-
-        # 3. Match, classify, apply.
-        applied = unmatched = uncertain = 0
-        for message in fresh:
-            matched = match_reply(message, sent)
-            try:
-                verdict = asyncio.run(
-                    classify_reply(message.subject, message.from_address, message.body)
-                )
-            except Exception as exc:  # one bad message must not sink the batch
-                typer.secho(f"  {message.subject[:40]}: ERROR {exc}", fg=typer.colors.RED)
-                continue
-
-            session.add(
-                Reply(
-                    application_id=matched.id if matched else None,
-                    gmail_message_id=message.gmail_message_id,
-                    thread_id=message.thread_id or None,
-                    from_address=message.from_address,
-                    subject=message.subject,
-                    body=message.body,
-                    received_at=message.received_at,
-                    reply_type=verdict.reply_type,
-                    confidence=verdict.confidence,
-                    reasoning=verdict.reasoning,
-                )
-            )
-
-            if matched is None:
-                unmatched += 1
-                continue
-            if verdict.confidence < settings.reply_confidence_threshold:
-                uncertain += 1
-                continue
-            if verdict.reply_type is ReplyType.NO_REPLY:
-                continue  # an auto-acknowledgement is not an answer; leave the status alone
-
-            matched.reply_type = verdict.reply_type
-            matched.reply_at = message.received_at
-            matched.status = (
-                ApplicationStatus.INTERVIEW
-                if verdict.reply_type is ReplyType.INTERVIEW
-                else ApplicationStatus.REJECTED
-            )
-            applied += 1
-            typer.echo(
-                f"  {verdict.reply_type.value}: {matched.job.company} ({verdict.confidence:.2f})"
-            )
-
-        typer.secho(
-            f"check-replies: {len(fresh)} new, {applied} applied, {uncertain} below threshold, "
-            f"{unmatched} unmatched, {linked} threads linked",
-            fg=typer.colors.GREEN,
-        )
-        if unmatched or uncertain:
-            typer.echo("  Review them in the admin under Replies (unmatched have no Application).")
+    typer.secho(
+        f"relink-replies: {linked} replies linked, {applied} statuses moved",
+        fg=typer.colors.GREEN,
+    )
 
 
 @app.command(name="run-funnel")
@@ -693,13 +860,18 @@ def seed_sources(
 
 @app.command(name="auth-gmail")
 def auth_gmail() -> None:
-    """Authorize Gmail read-only access (one-time, opens a browser). DOES NOT SEND."""
-    from funnel.adapters.gmail import get_credentials
+    """Authorize Gmail access (one-time, opens a browser). DOES NOT SEND.
+
+    Re-run this after flipping GMAIL_TRASH_PARSED_ALERTS: the scope changes with it, and a
+    token minted for the narrower one is refused rather than left to fail with a bare 403.
+    """
+    from funnel.adapters.gmail import get_credentials, gmail_scopes
 
     settings = get_settings()
+    scope = gmail_scopes()[0].rsplit("/", 1)[-1]
     typer.echo(f"Using client secret : {settings.gmail_credentials_path}")
     typer.echo(f"Token will be saved : {settings.gmail_token_path}")
-    typer.echo("A browser window will open for consent (scope: gmail.readonly).")
+    typer.echo(f"A browser window will open for consent (scope: {scope}).")
     typer.echo("If it does not, copy the URL printed below into a browser by hand.")
     try:
         get_credentials(interactive=True)
@@ -724,6 +896,67 @@ def init_db() -> None:
     typer.echo("Schema is managed by Alembic only:\n  uv run alembic upgrade head")
 
 
+def _ineligible_requirements(session: Session, limit: int = 8) -> tuple[int, list[str]]:
+    """The requirements the human was found not to meet: the backlog of `matching/filters.py`.
+
+    Every one of these rows is a hard filter that does not exist yet, and it cost a screening
+    call and a cover letter to find — 36 of the 45 hand-declined rows measured on 2026-08-27 had
+    a letter written before the human read far enough. Printing the notes rather than a count is
+    the point: the note is meant to hold the posting's own sentence, so it can be grepped over
+    the whole table to size a filter before writing one (`_NO_SPONSORSHIP` was built that way).
+
+    Newest first and capped: this is a reading list, not a report to scroll.
+    """
+    from funnel.models import Application, ApplicationStatus
+
+    total = session.execute(
+        select(func.count())
+        .select_from(Application)
+        .where(Application.status == ApplicationStatus.INELIGIBLE)
+    ).scalar_one()
+    notes = session.execute(
+        select(Application.notes)
+        .where(
+            Application.status == ApplicationStatus.INELIGIBLE,
+            Application.notes.isnot(None),
+            func.length(func.trim(Application.notes)) > 0,
+        )
+        .order_by(Application.updated_at.desc())
+        .limit(limit)
+    ).scalars()
+    return total, [" ".join(note.split())[:70] for note in notes if note]
+
+
+def _unreachable_hosts(session: Session) -> list[tuple[str, int, bool]]:
+    """Hosts the human has marked UNREACHABLE, commonest first, with `already listed` alongside.
+
+    The input side of `apply_route.BLOCKED_HOSTS`, which is hand-maintained and whose two
+    entries were each found by the human walking into a wall and mentioning it once. A host that
+    keeps turning up here is the next entry; a host that turned up once is a dead posting, not a
+    dead site, and the count is what tells them apart — so this reports and never edits the list.
+    Hosts already in it are listed too rather than filtered out: their rows are the evidence the
+    entry is still earning its place, and `BLOCKED_HOSTS` says to delete an entry the moment a
+    site lets the human in again.
+    """
+    from funnel.matching.apply_route import is_blocked
+    from funnel.models import Application, ApplicationStatus
+
+    rows = session.execute(
+        select(Job.url)
+        .join(Application, Application.job_id == Job.id)
+        .where(Application.status == ApplicationStatus.UNREACHABLE)
+    ).scalars()
+    counts: dict[str, int] = {}
+    listed: dict[str, bool] = {}
+    for url in rows:
+        host = (urlparse(url.strip()).hostname or "").lower().removeprefix("www.")
+        if not host:
+            continue
+        counts[host] = counts.get(host, 0) + 1
+        listed[host] = is_blocked(url)
+    return [(host, n, listed[host]) for host, n in sorted(counts.items(), key=lambda kv: -kv[1])]
+
+
 @app.command()
 def doctor() -> None:
     """Check the environment: config, database, adapter registry, CV."""
@@ -744,12 +977,52 @@ def doctor() -> None:
     typer.echo(f"adapters        : {', '.join(sorted(adapters.registry())) or 'none'}")
 
     if settings.gmail_token_path.exists():
-        typer.secho(f"gmail token     : ok ({settings.gmail_token_path})", fg=typer.colors.GREEN)
+        from funnel.adapters.gmail import gmail_scopes
+
+        scope = gmail_scopes()[0].rsplit("/", 1)[-1]
+        alerts = "on" if settings.gmail_trash_parsed_alerts else "off"
+        rejections = "on" if settings.gmail_trash_rejections else "off"
+        typer.secho(
+            f"gmail token     : ok ({settings.gmail_token_path}), scope {scope}, "
+            f"trash parsed alerts {alerts}, trash rejected threads {rejections}",
+            fg=typer.colors.GREEN,
+        )
     else:
         typer.secho(
             "gmail token     : missing (run `uv run funnel auth-gmail`)",
             fg=typer.colors.YELLOW,
         )
+
+    try:
+        with session_scope() as session:
+            hosts = _unreachable_hosts(session)
+    except Exception:  # the database line above already reported why
+        hosts = []
+    if hosts:
+        total = sum(count for _, count, _ in hosts)
+        typer.echo(f"apply routes    : {total} unreachable row(s) the human could not apply to")
+        for host, count, already in hosts:
+            note = "already in BLOCKED_HOSTS" if already else "candidate for BLOCKED_HOSTS"
+            colour = typer.colors.GREEN if already else typer.colors.YELLOW
+            typer.secho(f"                  {count:>3}x {host} - {note}", fg=colour)
+    else:
+        typer.echo("apply routes    : nothing marked unreachable")
+
+    try:
+        with session_scope() as session:
+            ineligible, requirements = _ineligible_requirements(session)
+    except Exception:  # the database line above already reported why
+        ineligible, requirements = 0, []
+    if ineligible:
+        typer.echo(
+            f"filter backlog  : {ineligible} posting(s) with a requirement the human cannot meet"
+        )
+        for requirement in requirements:
+            typer.secho(f"                  - {requirement}", fg=typer.colors.YELLOW)
+        if len(requirements) < ineligible:
+            typer.echo(f"                  ... and {ineligible - len(requirements)} more")
+    else:
+        typer.echo("filter backlog  : nothing marked ineligible")
 
     profile: Path = settings.profiles_dir / f"{settings.active_profile}.md"
     if profile.is_file():

@@ -7,25 +7,245 @@ The one button that *does* something is `JobAdmin.screen_and_draft_action`, and 
 same thing the timer does — screen a posting and leave a draft. It exists because the workflow
 it serves is a browser workflow: a board serves a teaser, the human pastes the real description
 into the row, and the letter should follow from the same page. Still nothing sent (invariant 2).
+
+That button is also why the batch no longer drafts from a body it cannot write from
+(`cli.MIN_DRAFTABLE_BODY`): those postings keep their rank and wait here for a human to fill
+the body in, instead of spending a shortlist slot on a letter about a title.
 """
 
 from __future__ import annotations
 
+import json
 from collections import Counter
-from typing import TYPE_CHECKING, Any
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, ClassVar, cast
+from zoneinfo import ZoneInfo
 
 from markupsafe import Markup, escape
-from sqladmin import Admin, ModelView, action
+from sqladmin import Admin, ModelView, action, expose
+from sqladmin.fields import DateTimeField
+from sqladmin.filters import BooleanFilter, ForeignKeyFilter, StaticValuesFilter
+from sqladmin.formatters import BASE_FORMATTERS
+from sqladmin.forms import ModelConverter, ModelConverterBase, converts
+from sqladmin.widgets import DateTimePickerWidget
 from starlette.applications import Starlette
 from starlette.responses import RedirectResponse
 
 from funnel.config import get_settings
 from funnel.db import get_engine
-from funnel.models import Application, Job, Reply, Source
+from funnel.models import (
+    Application,
+    ApplicationStatus,
+    ApplyChannel,
+    Job,
+    Reply,
+    ReplyType,
+    Source,
+    SourceKind,
+)
 
 if TYPE_CHECKING:
+    from enum import StrEnum
+
     from sqlalchemy import Select
+    from sqlalchemy.orm import ColumnProperty, InstrumentedAttribute, Session
     from starlette.requests import Request
+    from wtforms.fields.core import UnboundField
+
+
+def admin_zone() -> ZoneInfo:
+    """The wall clock the admin speaks (`ADMIN_TIMEZONE`). Storage is UTC regardless."""
+    return ZoneInfo(get_settings().admin_timezone)
+
+
+def _to_local(value: datetime) -> datetime:
+    """A stored instant as the human's wall clock. A naive value is read as UTC, as stored."""
+    aware = value.replace(tzinfo=UTC) if value.tzinfo is None else value
+    return aware.astimezone(admin_zone())
+
+
+# Fills the input with the current wall clock in the admin's zone — not the browser's, which
+# can differ, and the form parses what it is given as `ADMIN_TIMEZONE`. Goes through
+# flatpickr when the picker is attached, so its calendar agrees with the text.
+_NOW_SCRIPT = """\
+var i = this.parentNode.querySelector("input");
+var p = {};
+new Intl.DateTimeFormat("en-CA", {timeZone: %s, hourCycle: "h23",
+  year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", second: "2-digit"})
+  .formatToParts(new Date()).forEach(function (x) { p[x.type] = x.value; });
+var v = p.year + "-" + p.month + "-" + p.day + " " + p.hour + ":" + p.minute + ":" + p.second;
+if (i._flatpickr) { i._flatpickr.setDate(v, true); } else { i.value = v; }"""
+
+
+class NowButtonWidget(DateTimePickerWidget):
+    """sqladmin's date-time picker with a "Now" button beside it (none on a read-only field)."""
+
+    def __call__(self, field: Any, **kwargs: Any) -> Markup:
+        rendered = Markup(super().__call__(field, **kwargs))
+        if kwargs.get("readonly") or (field.render_kw or {}).get("readonly"):
+            return rendered
+        script = _NOW_SCRIPT % json.dumps(get_settings().admin_timezone)
+        return Markup(
+            '<div class="input-group">{}'
+            '<button type="button" class="btn" title="Now in {}" onclick="{}">Now</button>'
+            "</div>"
+        ).format(rendered, get_settings().admin_timezone, script)
+
+
+class LocalDateTimeField(DateTimeField):
+    """A datetime field that reads and writes the human's local wall clock.
+
+    Every timestamp column is `DateTime(timezone=True)` and everything the pipeline writes is
+    UTC — which is right, and stays. The problem was only ever the form: it rendered the UTC
+    value and parsed whatever was typed straight back as UTC, so entering the time off your own
+    watch recorded an instant two hours in the future. Every one of the 22 hand-entered
+    `sent_at` values was wrong by exactly the offset (migration a1c7e35f9b04).
+
+    Conversion lives in the field rather than in the view, so it cannot be forgotten on a
+    column added later: `LocalTimeConverter` maps *every* DateTime column onto this field.
+
+    Subclassed from sqladmin's DateTimeField rather than wtforms' own: that is the one carrying
+    `DateTimePickerWidget`, and inheriting from the plain wtforms field silently swapped the
+    calendar picker for a bare text box.
+
+    At the autumn changeover an hour repeats, and a bare wall clock inside it is genuinely
+    ambiguous; `replace(tzinfo=...)` resolves it to the first pass (`fold=0`). One hour a year,
+    on a field a human can correct — not worth a disambiguation UI.
+    """
+
+    def process_data(self, value: Any) -> None:
+        if isinstance(value, datetime):
+            value = _to_local(value).replace(tzinfo=None)
+        super().process_data(value)
+
+    # The first format is what the form renders; the rest are what a human types or pastes.
+    # The detail view prints "%Y-%m-%d %H:%M %Z" — no seconds — and a value copied from there
+    # into the edit form used to fail as "Not a valid datetime value", which reads like a save
+    # until you notice the form came back.
+    widget = NowButtonWidget()
+
+    _FORMATS: ClassVar[list[str]] = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+    ]
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("format", self._FORMATS)
+        super().__init__(*args, **kwargs)
+
+    def process_formdata(self, valuelist: Any) -> None:
+        # The zone abbreviation the detail view appends is accepted only when it is the one
+        # that wall clock really has here; "CET" on an August date is a typo, not a hint.
+        abbreviation = None
+        if valuelist:
+            text = " ".join(valuelist).strip()
+            head, _, tail = text.rpartition(" ")
+            if head and tail.isalpha():
+                abbreviation, text = tail, head
+            valuelist = [text]
+        super().process_formdata(valuelist)
+        if isinstance(self.data, datetime) and self.data.tzinfo is None:
+            local = self.data.replace(tzinfo=admin_zone())
+            if abbreviation is not None and abbreviation != local.tzname():
+                self.data = None
+                raise ValueError(
+                    f"{abbreviation} is not the zone of that time in {admin_zone().key}"
+                    f" ({local.tzname()}); drop it or fix it."
+                )
+            self.data = local.astimezone(UTC)
+
+
+class LocalTimeConverter(ModelConverter):
+    """Route every DateTime column to `LocalDateTimeField`, and say so on the label."""
+
+    @converts("DateTime")  # type: ignore[untyped-decorator]  # sqladmin ships no types
+    def conv_datetime(
+        self, model: type, prop: ColumnProperty[Any], kwargs: dict[str, Any]
+    ) -> UnboundField[Any]:
+        # Matching wtforms' own default when the view names no label, so the zone is appended
+        # to "Sent At" rather than replacing it with the raw column key.
+        label = kwargs.get("label") or prop.key.replace("_", " ").title()
+        kwargs["label"] = f"{label} ({get_settings().admin_timezone})"
+        # Constructing a wtforms field outside a form yields an UnboundField, which is what a
+        # converter is expected to return; the stubs describe the bound case only.
+        return cast("UnboundField[Any]", LocalDateTimeField(**kwargs))
+
+
+def _local_datetime(value: datetime) -> str:
+    """List and detail rendering: the same wall clock the form takes, with the zone spelled out.
+
+    The zone abbreviation is the point. A bare "21:00" next to a UTC one elsewhere is how this
+    bug started; "21:00 CEST" cannot be misread, and it comes from the value's own offset, so it
+    stays honest across the changeover.
+    """
+    return _to_local(value).strftime("%Y-%m-%d %H:%M %Z")
+
+
+class LocalTimeView:
+    """Mixin: local wall clock in the forms, in the list and in the detail view.
+
+    A mixin rather than a base ModelView because sqladmin's metaclass registers a view by its
+    `model=` keyword; this carries only the two settings and each view keeps its own model.
+    """
+
+    form_converter: ClassVar[type[ModelConverterBase]] = LocalTimeConverter
+    column_type_formatters: ClassVar[dict[type, Any]] = {
+        **BASE_FORMATTERS,
+        datetime: _local_datetime,
+    }
+
+
+def _enum_filter(
+    column: InstrumentedAttribute[Any], enum_cls: type[StrEnum], title: str | None = None
+) -> StaticValuesFilter:
+    """A dropdown of every member of an enum column.
+
+    `StaticValuesFilter` rather than `AllUniqueStringValuesFilter`: the values are known from
+    the type, so there is no reason to spend a `SELECT DISTINCT` on every page load, and a
+    status nothing currently holds still appears in the list instead of vanishing from it.
+    The stored form is the member *name*, but SQLAlchemy's Enum accepts either side of the
+    lookup, so the URL carries the readable lowercase value.
+    """
+    return StaticValuesFilter(
+        column,
+        values=[(member.value, member.value.replace("_", " ").capitalize()) for member in enum_cls],
+        title=title,
+    )
+
+
+class UnmatchedRepliesFilter:
+    """ "Which replies is nobody looking at?" — the one question this table is for.
+
+    Not expressible with the built-in filters: `application_id` is a foreign key, so
+    `ForeignKeyFilter` offers "which application" and never "none of them". Yet an unmatched
+    reply is precisely the review queue — a recruiter writing out of the blue, or an answer to
+    a Telegram application, which by construction has no thread and usually no company domain
+    to match on either (PLAN.md section 7).
+
+    `default_value = None` rather than sqladmin's private `_UNSET` sentinel — the protocol
+    requires the attribute, and the only consequence is that the filter is consulted on an
+    unfiltered page too, where it hands the query straight back.
+    """
+
+    has_operator = False
+    template = "sqladmin/filters/lookup_filter.html"
+    title = "Matched to an application"
+    parameter_name = "matched"
+    default_value: Any = None
+
+    async def lookups(self, request: Request, model: Any, run_query: Any) -> list[tuple[str, str]]:
+        return [("__all", "All"), ("no", "Unmatched only"), ("yes", "Matched only")]
+
+    async def get_filtered_query(self, query: Select[Any], value: Any, model: Any) -> Select[Any]:
+        if value == "no":
+            return query.filter(Reply.application_id.is_(None))
+        if value == "yes":
+            return query.filter(Reply.application_id.isnot(None))
+        return query
 
 
 def _multiline(model: Any, attribute: str) -> Markup:
@@ -45,13 +265,14 @@ def _multiline(model: Any, attribute: str) -> Markup:
     )
 
 
-class SourceAdmin(ModelView, model=Source):
+class SourceAdmin(LocalTimeView, ModelView, model=Source):
     name = "Source"
     name_plural = "Sources"
     icon = "fa-solid fa-rss"
     column_list = [Source.id, Source.name, Source.kind, Source.enabled, Source.last_run_at]
     column_searchable_list = [Source.name]
     column_sortable_list = [Source.name, Source.last_run_at]
+    column_filters = [BooleanFilter(Source.enabled), _enum_filter(Source.kind, SourceKind)]
     # Source.jobs is cascade="all, delete-orphan": submitting this form with the field empty
     # deletes every job of the source (and their applications). Ingest owns this collection,
     # not the human — keep it off the form entirely.
@@ -83,7 +304,7 @@ def _percentile(model: Any, attribute: str) -> str:
     return "" if value is None else f"{value:.1f}%"
 
 
-class JobAdmin(ModelView, model=Job):
+class JobAdmin(LocalTimeView, ModelView, model=Job):
     name = "Job"
     name_plural = "Jobs"
     icon = "fa-solid fa-briefcase"
@@ -94,10 +315,16 @@ class JobAdmin(ModelView, model=Job):
         Job.is_remote,
         Job.apply_channel,
         Job.hard_filter_passed,
+        Job.apply_blocked,
         Job.match_percentile,
         Job.posted_at,
     ]
-    column_labels = {Job.match_percentile: "Match"}
+    # "No apply route" rather than the column name: the human's question in front of a
+    # high-scoring row that never gets drafted is "why is this being skipped?", and the answer
+    # is that the link is a dead end from here (`matching/apply_route.py`), not that the posting
+    # is bad. Sortable, so the blocked rows can be read as a batch — those are the ones worth
+    # chasing by hand.
+    column_labels = {Job.match_percentile: "Match", Job.apply_blocked: "No apply route"}
     column_formatters = {Job.match_percentile: _percentile, Job.url: _link}
     column_searchable_list = [Job.company, Job.title]
     column_sortable_list = [
@@ -105,8 +332,19 @@ class JobAdmin(ModelView, model=Job):
         Job.match_score,
         Job.is_remote,
         Job.apply_channel,
+        Job.apply_blocked,
         Job.posted_at,
         Job.company,
+    ]
+    # The shortlist questions a human actually arrives with: which board did this come from,
+    # is it remote, and why is that high-scoring row never drafted (no apply route, or it never
+    # cleared the hard filters). Search covers company and title above.
+    column_filters = [
+        ForeignKeyFilter(Job.source_id, Source.name, foreign_model=Source, title="Source"),
+        BooleanFilter(Job.is_remote, title="Remote"),
+        BooleanFilter(Job.apply_blocked, title="No apply route"),
+        BooleanFilter(Job.hard_filter_passed, title="Passed hard filters"),
+        _enum_filter(Job.apply_channel, ApplyChannel, title="Apply channel"),
     ]
     # Score order, which is what the shortlist is now (PLAN.md section 7). It used to lead with
     # `is_remote`, matching a `draft` that sorted the same way — and that turned out to be the
@@ -187,7 +425,7 @@ class JobAdmin(ModelView, model=Job):
         )
 
 
-class ApplicationAdmin(ModelView, model=Application):
+class ApplicationAdmin(LocalTimeView, ModelView, model=Application):
     name = "Application"
     name_plural = "Applications"
     icon = "fa-solid fa-paper-plane"
@@ -199,7 +437,16 @@ class ApplicationAdmin(ModelView, model=Application):
         Application.reply_type,
         Application.reply_at,
     ]
-    column_sortable_list = [Application.status, Application.sent_at]
+    column_sortable_list = [Application.status, Application.sent_at, Application.reply_at]
+    # Sorting by status groups them; filtering is what "show me only the drafted ones" needs,
+    # and that is the normal way into this table.
+    column_filters = [
+        _enum_filter(Application.status, ApplicationStatus, title="Status"),
+        _enum_filter(Application.reply_type, ReplyType, title="Reply"),
+    ]
+    # Dotted paths: an application is identified by its posting, so searching it means searching
+    # the job. sqladmin joins the relationship for the search itself (`search_query`).
+    column_searchable_list = ["job.company", "job.title"]
     column_formatters_detail = {
         Application.cover_letter: _multiline,
         Application.notes: _multiline,
@@ -211,7 +458,7 @@ class ApplicationAdmin(ModelView, model=Application):
     page_size = 50
 
 
-class ReplyAdmin(ModelView, model=Reply):
+class ReplyAdmin(LocalTimeView, ModelView, model=Reply):
     """Incoming mail and what the classifier made of it.
 
     The review surface for everything `check-replies` refused to decide: rows with no
@@ -231,9 +478,21 @@ class ReplyAdmin(ModelView, model=Reply):
         Reply.reply_type,
         Reply.confidence,
         Reply.application,
+        # What "Record as sent application" would create, visible before pressing it.
+        Reply.detected_company,
+        Reply.detected_role,
     ]
     column_searchable_list = [Reply.from_address, Reply.subject]
-    column_sortable_list = [Reply.received_at, Reply.reply_type, Reply.confidence]
+    column_sortable_list = [
+        Reply.received_at,
+        Reply.reply_type,
+        Reply.confidence,
+        Reply.detected_company,
+    ]
+    column_filters = [
+        _enum_filter(Reply.reply_type, ReplyType, title="Reply type"),
+        UnmatchedRepliesFilter(),
+    ]
     column_default_sort = [(Reply.received_at, True)]
     column_formatters_detail = {Reply.body: _multiline, Reply.reasoning: _multiline}
     # gmail_message_id is the idempotency key: editing it by hand would let check-replies
@@ -241,9 +500,161 @@ class ReplyAdmin(ModelView, model=Reply):
     form_excluded_columns = [Reply.gmail_message_id, Reply.created_at]
     page_size = 50
 
+    @action(
+        name="record_as_application",
+        label="Record as sent application",
+        confirmation_message=(
+            "Create a sent application for each of these, from the employer and role the "
+            "classifier read out of the email? Where the funnel may already have that "
+            "application under another spelling, you will be asked first. Nothing is sent; "
+            "this only records what already happened."
+        ),
+    )
+    async def record_as_application_action(self, request: Request) -> RedirectResponse:
+        """Turn an orphan acknowledgement into the application it is evidence of.
+
+        The gap this closes: the human applies through a board or a referral, the funnel never
+        sees it, and the "we got your application" mail that comes back has nothing to attach
+        to — ~20 of 166 stored replies on 2026-08-12. Every later message in that conversation
+        is then unmatchable too, and the sent-to-reply rate is computed against the wrong
+        denominator.
+
+        The email is the only record of that application, so the row is built from it
+        (`replies.link.record_as_application`) and the reply is linked to it — **unless the
+        funnel may already have it**. That lookup is by exact company and title, and five of the
+        rows this button made were twins of a funnel row spelled another way ("SGI" / "Source
+        Group International", found 2026-10-02). So a reply with `similar_applications` is not
+        recorded here: it goes to a page where the human links it to one of them or confirms it
+        is new. Replies with no candidates are recorded straight away, as before.
+
+        Review-only (invariant 6) is about not acting on the human's behalf: this acts on their
+        press, from the row they selected, and it sends nothing (invariant 2). The classifier
+        only ever *proposed* the names, on a call already paid for.
+        """
+        from funnel.db import session_scope
+        from funnel.replies.link import record_as_application, similar_applications
+
+        ids = [int(pk) for pk in request.query_params.get("pks", "").split(",") if pk]
+        created = skipped = 0
+        to_review: list[int] = []
+        with session_scope() as session:
+            for reply_id in ids:
+                reply = session.get(Reply, reply_id)
+                if (
+                    reply is not None
+                    and reply.application_id is None
+                    and similar_applications(session, reply)
+                ):
+                    to_review.append(reply_id)
+                    continue
+                if reply is None or record_as_application(session, reply) is None:
+                    skipped += 1  # already linked, or the model would not name an employer
+                    continue
+                created += 1
+            relinked = _relink_backlog(session) if created else 0
+
+        summary = f"{created} recorded, {skipped} skipped, {relinked} other replies relinked"
+        if to_review:
+            return RedirectResponse(
+                request.url_for("admin:view-reply-record_review").include_query_params(
+                    pks=",".join(map(str, to_review)), recorded=summary
+                )
+            )
+        return RedirectResponse(
+            request.url_for("admin:list", identity=self.identity).include_query_params(
+                recorded=summary
+            )
+        )
+
+    @expose("/record-review", methods=["GET"])
+    async def record_review(self, request: Request) -> Any:
+        """The replies the button held back, each with the applications it might belong to."""
+        from funnel.db import session_scope
+        from funnel.replies.link import similar_applications
+
+        ids = [int(pk) for pk in request.query_params.get("pks", "").split(",") if pk]
+        with session_scope() as session:
+            items = []
+            for reply_id in ids:
+                reply = session.get(Reply, reply_id)
+                if reply is None or reply.application_id is not None:
+                    continue  # decided already, by this page or by a relink
+                items.append({"reply": reply, "candidates": similar_applications(session, reply)})
+            # Rendered inside the session: the template walks application.job.
+            return await self.templates.TemplateResponse(
+                request,
+                "record_review.html",
+                {
+                    "title": "Record as sent application",
+                    "items": items,
+                    "recorded": request.query_params.get("recorded"),
+                },
+            )
+
+    @expose("/record-review", methods=["POST"])
+    async def record_review_submit(self, request: Request) -> RedirectResponse:
+        """Apply the human's pick for one reply, then show the rest of the queue.
+
+        Linking is conclusive: the human chose this application with the email in front of
+        them, which is stronger evidence than anything `replies.match` has — so the thread is
+        learned and an answer moves the status, exactly as a conclusive automatic match would.
+        """
+        from funnel.db import session_scope
+        from funnel.models import Application
+        from funnel.replies.link import link, record_as_application
+
+        form = await request.form()
+        reply_id = int(str(form["reply_id"]))
+        choice = str(form["choice"])
+        with session_scope() as session:
+            reply = session.get(Reply, reply_id)
+            if reply is not None and reply.application_id is None:
+                if choice == "new":
+                    record_as_application(session, reply)
+                else:
+                    application = session.get(Application, int(choice))
+                    if application is not None:
+                        link(reply, application, conclusive=True)
+                session.flush()
+                _relink_backlog(session)
+
+        remaining = [
+            pk
+            for pk in request.query_params.get("pks", "").split(",")
+            if pk and pk != str(reply_id)
+        ]
+        target = request.url_for("admin:view-reply-record_review")
+        if remaining:
+            return RedirectResponse(
+                target.include_query_params(pks=",".join(remaining)), status_code=303
+            )
+        return RedirectResponse(
+            request.url_for("admin:list", identity=self.identity), status_code=303
+        )
+
+
+def _relink_backlog(session: Session) -> int:
+    """Re-match the orphan replies: an application that exists only now may claim some."""
+    from sqlalchemy import select
+
+    from funnel.models import REPLYABLE_STATUSES
+    from funnel.replies.link import relink_stored
+
+    session.flush()
+    applications = list(
+        session.scalars(select(Application).where(Application.status.in_(REPLYABLE_STATUSES)))
+    )
+    relinked, _ = relink_stored(session, applications)
+    return relinked
+
 
 app = Starlette()
-admin = Admin(app, get_engine(), title="Job Funnel")
+admin = Admin(
+    app,
+    get_engine(),
+    title="Job Funnel",
+    templates_dir=str(Path(__file__).parent / "templates"),
+)
 admin.add_view(SourceAdmin)
 admin.add_view(JobAdmin)
 admin.add_view(ApplicationAdmin)
