@@ -53,7 +53,7 @@ from funnel.models import (
 )
 from funnel.replies import hh
 from funnel.replies.inbox import fetch_recent, find_sent_thread
-from funnel.replies.link import is_unrelated, link, relink_stored
+from funnel.replies.link import is_unrelated, link, may_learn_thread, relink_stored
 from funnel.replies.match import Match, is_board_sender, match_reply, names_company
 
 if TYPE_CHECKING:
@@ -211,8 +211,20 @@ class ReplyScan:
             if application is None or reply is None:
                 return False
             # The thread of a conversation we are now sure about. Learned from the incoming
-            # side, which is the only side a web-form application has.
-            if message.thread_id and application.thread_id is None:
+            # side, which is the only side a web-form application has — and only from evidence
+            # that identifies the conversation (`link.may_learn_thread`).
+            owned_elsewhere = bool(
+                message.thread_id
+                and session.scalar(
+                    select(Application.id).where(
+                        Application.thread_id == message.thread_id,
+                        Application.id != application.id,
+                    )
+                )
+            )
+            if may_learn_thread(
+                match, message.thread_id, application.thread_id, owned_elsewhere=owned_elsewhere
+            ):
                 application.thread_id = message.thread_id
             moved = False
             # Older than the answer already on file: a late-read email must not overwrite a
@@ -233,7 +245,9 @@ class ReplyScan:
             )
             if application.status in REPLYABLE_STATUSES and not stale:
                 sure = (record.confidence or 0.0) >= self._threshold
-                moved = link(reply, application, conclusive=match.conclusive and sure)
+                moved = link(
+                    reply, application, conclusive=match.conclusive and sure, learn_thread=False
+                )
             session.flush()
             # Mirror onto the detached copy the rest of the scan matches against.
             match.application.thread_id = application.thread_id
@@ -353,7 +367,7 @@ class ReplyScan:
                     continue
                 record = _Record(
                     message,
-                    Match(application, "hh vacancy id", conclusive=True),
+                    Match(application, "hh vacancy id", conclusive=True, teaches_thread=False),
                     reply_type=ReplyType.REJECTION,
                     confidence=1.0,
                     reasoning=f"hh.ru rejection notice for vacancy {notice.vacancy_id}",
@@ -374,7 +388,9 @@ class ReplyScan:
                     applications,
                     report,
                     answered,
-                    match=Match(application, "hh vacancy id", conclusive=True),
+                    match=Match(
+                        application, "hh vacancy id", conclusive=True, teaches_thread=False
+                    ),
                 )
             elif notice.kind is hh.NoticeKind.MESSAGE_FROM and notice.company:
                 named = [a for a in on_hh if names_company(notice.company, a.job.company)]
@@ -383,7 +399,12 @@ class ReplyScan:
                     continue
                 # Kept in the inbox and linked for the human; a name is not proof of which
                 # application, so no status moves on it.
-                self._write(_Record(message, Match(named[0], "hh employer", conclusive=False)))
+                self._write(
+                    _Record(
+                        message,
+                        Match(named[0], "hh employer", conclusive=False, teaches_thread=False),
+                    )
+                )
                 report.weak += 1
             else:
                 report.hh_trash.append((notice.gmail_message_id, "alerts"))

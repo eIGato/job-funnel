@@ -87,12 +87,42 @@ def as_message(reply: Reply) -> IncomingMessage:
     )
 
 
-def link(reply: Reply, application: Application, *, conclusive: bool) -> bool:
+def may_learn_thread(
+    match: Match, thread_id: str | None, current: str | None, *, owned_elsewhere: bool
+) -> bool:
+    """Whether an email's thread may become its application's thread. Pure; no session.
+
+    A thread, once stored, is the strongest evidence the matcher has — every later message in it
+    matches conclusively — so only evidence that identifies the conversation may write one:
+
+    - **A conclusive match.** A name found in a body is not: a Sensor Tower interview was linked
+      to an eXperience IT application by body, taught it the Sensor Tower thread, and the
+      rejection that followed then matched by thread and moved that application to INTERVIEW and
+      on (2026-10-19). A TradingView data-retention notice did the same to IT_One.
+    - **Evidence that is the conversation.** `Match.teaches_thread` is False for hh.ru, whose
+      notices match by vacancy id while Gmail threads them by subject.
+    - **A thread no other application holds.** A thread is one conversation; if another
+      application already owns it, one of the two is wrong, and writing a second copy makes the
+      next message in it ambiguous at best.
+    """
+    return bool(
+        thread_id
+        and current is None
+        and match.conclusive
+        and match.teaches_thread
+        and not owned_elsewhere
+    )
+
+
+def link(
+    reply: Reply, application: Application, *, conclusive: bool, learn_thread: bool = True
+) -> bool:
     """Attach a reply to an application, and let a conclusive one teach us its thread.
 
     The thread write-back is the important half: almost every application here goes through a
     web form, leaves nothing in Sent mail, and would otherwise never have a thread at all
     (1 of 36 did). With one, every further message in the conversation matches outright.
+    `learn_thread=False` is for a caller that has already decided (`may_learn_thread`).
 
     Returns whether the application's status moved.
     """
@@ -100,7 +130,7 @@ def link(reply: Reply, application: Application, *, conclusive: bool) -> bool:
     reply.application = application
     if not conclusive:
         return False
-    if reply.thread_id and application.thread_id is None:
+    if learn_thread and reply.thread_id and application.thread_id is None:
         application.thread_id = reply.thread_id
     return apply_verdict(application, reply)
 
@@ -117,13 +147,22 @@ def relink_stored(session: Session, applications: Sequence[Application]) -> tupl
     Returns (newly linked, statuses moved).
     """
     linked = applied = 0
+    owned = set(
+        session.scalars(select(Application.thread_id).where(Application.thread_id.is_not(None)))
+    )
     orphans = session.scalars(select(Reply).where(Reply.application_id.is_(None))).all()
     for reply in orphans:
         match = match_reply(as_message(reply), applications)
         if match is None:
             continue
         linked += 1
-        applied += link(reply, match.application, conclusive=match.conclusive)
+        application = match.application
+        learn = may_learn_thread(
+            match, reply.thread_id, application.thread_id, owned_elsewhere=reply.thread_id in owned
+        )
+        applied += link(reply, application, conclusive=match.conclusive, learn_thread=learn)
+        if application.thread_id:
+            owned.add(application.thread_id)
     return linked, applied
 
 
@@ -371,6 +410,7 @@ __all__ = [
     "company_reason",
     "is_unrelated",
     "link",
+    "may_learn_thread",
     "record_as_application",
     "rejection_threads",
     "relink_stored",

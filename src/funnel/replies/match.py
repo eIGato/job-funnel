@@ -79,13 +79,17 @@ _GENERIC_DOMAINS = frozenset(
 #: as many domains as it has countries (`adzuna.pl`, `adzuna.nl`, `adzuna.com`) and as many
 #: subdomains as it has systems (`wysylka.pracuj.pl`, `aplikacje.pracuj.pl`, `konto.pracuj.pl`).
 #: A board is never a company answering us — at most it relays one, and then the sender still
-#: says nothing about which company. These are the boards this funnel actually ingests from.
+#: says nothing about which company. These are the boards this funnel actually ingests from,
+#: and the ones the human applies through: eFinancialCareers mails a daily digest, a newsletter
+#: and job picks from `emails.` and receipts from `agent.`, and its digests were linking
+#: themselves by body to Databricks and Anson McCade (four in three days, 2026-11-09..11).
 _BOARD_LABELS = frozenset(
     {
         "adzuna",
         "arbeitnow",
         "avito",
         "djinni",
+        "efinancialcareers",
         "getmatch",
         "justjoin",
         "nofluffjobs",
@@ -391,6 +395,12 @@ class Match(NamedTuple):
     #: True when the evidence identifies this application, false when it only identifies the
     #: company and the rest was inference. Only a conclusive match may move a status.
     conclusive: bool
+    #: Whether the email's Gmail thread is this application's conversation, so that the next
+    #: message in it may match by thread alone. False when the evidence is not the conversation
+    #: itself: hh.ru notices match by vacancy id, but Gmail threads them by subject, and one
+    #: "Работодатель не готов пригласить вас" thread held 11 different applications' rejections
+    #: (measured 2026-11-12).
+    teaches_thread: bool = True
 
 
 def _sent_order(application: Application, received_at: datetime | None) -> tuple[int, float]:

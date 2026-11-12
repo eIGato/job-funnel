@@ -20,11 +20,13 @@ from funnel.replies.link import (
     MANUAL_SOURCE,
     company_reason,
     is_unrelated,
+    may_learn_thread,
     record_as_application,
     role_words,
     same_company,
 )
 from funnel.replies.match import (
+    Match,
     company_slug,
     display_name,
     is_board_sender,
@@ -267,6 +269,33 @@ def test_role_words_ignore_gender_markers() -> None:
     )
 
 
+def test_a_conclusive_match_teaches_its_thread() -> None:
+    match = Match(_application("Acme"), "domain", conclusive=True)
+    assert may_learn_thread(match, "t1", None, owned_elsewhere=False)
+
+
+def test_a_name_in_the_body_teaches_no_thread() -> None:
+    """Sensor Tower's interview, linked to eXperience IT by body, must not hand it the thread."""
+    match = Match(_application("eXperience IT Solutions"), "body", conclusive=False)
+    assert not may_learn_thread(match, "t1", None, owned_elsewhere=False)
+
+
+def test_an_hh_notice_teaches_no_thread() -> None:
+    """Gmail threads hh notices by subject: one thread held 11 applications' rejections."""
+    match = Match(_application("X5 Tech"), "hh vacancy id", conclusive=True, teaches_thread=False)
+    assert not may_learn_thread(match, "t1", None, owned_elsewhere=False)
+
+
+def test_a_thread_another_application_holds_is_not_copied() -> None:
+    match = Match(_application("Acme"), "domain", conclusive=True)
+    assert not may_learn_thread(match, "t1", None, owned_elsewhere=True)
+
+
+def test_a_known_thread_is_not_overwritten() -> None:
+    match = Match(_application("Acme"), "domain", conclusive=True)
+    assert not may_learn_thread(match, "t2", "t1", owned_elsewhere=False)
+
+
 def test_matching_stays_pure() -> None:
     """Guard the boundary: correlation must not reach for the database or the network.
 
@@ -417,6 +446,7 @@ def test_display_name(address: str, expected: str) -> None:
         ("no-reply@adzuna.nl", True),
         ("no-reply@jobs.reed.co.uk", True),
         ("jobalerts-noreply@linkedin.com", True),
+        ("eFinancialCareers <emails@efinancialcareers.com>", True),
         # A person at a board is still a board sender: the classification is withheld, the row
         # is not, and a message that matched an application is classified before we get here.
         ("pykarpenko@avito.ru", True),

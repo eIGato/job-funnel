@@ -444,6 +444,12 @@ docker compose run --rm --build app uv run funnel run-funnel
   applications go through a web form. So a conclusive match writes `message.thread_id` back
   onto the Application, and the oldest-first order means an acknowledgement teaches the thread
   before the answer to it is looked at in the same batch.
+  **Only evidence that identifies the conversation may teach a thread** (`link.may_learn_thread`):
+  a conclusive match, a `Match.teaches_thread` source, and a thread no other application holds.
+  Until 2026-11-12 `scan._write` stored the thread before checking the match, so a body match
+  taught it: Sensor Tower's interview thread landed on eXperience IT, whose status the next
+  message in that thread then moved to INTERVIEW. And hh.ru notices match by vacancy id while
+  Gmail threads them by subject — 11 such threads were stored on 52 applications.
 - **Not applying has six different statuses, and they stay apart.** `DECLINED` is the screen's
   verdict on fit, `INELIGIBLE` is a requirement the human cannot meet, `CLOSED` is a posting that
   stopped taking applications before he got there, `UNREACHABLE` is a posting he could not apply
